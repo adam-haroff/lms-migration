@@ -1,0 +1,90 @@
+{
+  "replacements": [
+    {
+      "description": "Replace legacy D2L navigation wording in quiz instructions",
+      "pattern": "(?i)click\\s+the\\s+\"?take\\s+the\\s+quiz\"?\\s+button",
+      "replacement": "Click the Begin button"
+    },
+    {
+      "description": "Replace ambiguous submit wording for quizzes",
+      "pattern": "(?i)click\\s+submit\\s+quiz",
+      "replacement": "Click Submit so your score is recorded"
+    },
+    {
+      "description": "Normalize common D2L tool labels in body text",
+      "pattern": "(?i)\\b(Content Browser|Manage Files|Classlist|Question Library|Question Pools?)\\b",
+      "replacement": "Canvas equivalent"
+    },
+    {
+      "description": "Remove inline font-family declarations",
+      "pattern": "(?i)font-family\\s*:[^;\"']+;?",
+      "replacement": ""
+    }
+  ],
+  "link_rewrites": [
+    {
+      "description": "Rewrite institutional LMS links",
+      "from": "https://d2l.yourinstitution.edu",
+      "to": "https://canvas.yourinstitution.edu"
+    }
+  ],
+  "manual_review_triggers": [
+    {
+      "reason": "SCORM packages require upload through Canvas SCORM workflow",
+      "pattern": "(?i)\\bscorm\\b"
+    },
+    {
+      "reason": "H5P content requires manual conversion/replacement decision",
+      "pattern": "(?i)\\bh5p\\b"
+    },
+    {
+      "reason": "Panopto embed requires permissions and sizing review",
+      "pattern": "(?i)panopto|embed\\.aspx\\?id="
+    },
+    {
+      "reason": "YouTube embeds may violate ad-free requirement; review hosting path",
+      "pattern": "(?i)youtube\\.com|youtu\\.be"
+    },
+    {
+      "reason": "Legacy script blocks should be removed or replaced",
+      "pattern": "(?i)<script\\b"
+    },
+    {
+      "reason": "Embedded iframe requires manual accessibility and policy review",
+      "pattern": "(?i)<iframe\\b"
+    },
+    {
+      "reason": "Question bank migration requires manual verification of pool/randomization logic",
+      "pattern": "(?i)item bank|question bank|question pool"
+    },
+    {
+      "reason": "Announcement migration behavior is non-standard; verify posting/notification settings",
+      "pattern": "(?i)announcement"
+    },
+    {
+      "reason": "Avoid Detect Multiple Sessions setting due known false-warning behavior",
+      "pattern": "(?i)detect\\s+multiple\\s+sessions"
+    },
+    {
+      "reason": "Reference /undelete runbook if accidental deletion occurs during migration cleanup",
+      "pattern": "(?i)/undelete|restore deleted"
+    },
+    {
+      "reason": "Template-specific instructor guidance requires manual final review",
+      "pattern": "(?i)instructor notes|about the instructor|course q\\s*&\\s*a"
+    },
+    {
+      "reason": "Legacy D2L links were neutralized and must be relinked in Canvas",
+      "pattern": "(?i)data-migration-link-status\\s*=\\s*\"needs-review\""
+    },
+    {
+      "reason": "Missing images were removed and require manual verification of visual equivalency",
+      "pattern": "(?i)migration-missing-image-text"
+    }
+  ],
+  "banner": {
+    "enabled": false,
+    "insert_mode": "prepend_body",
+    "html": "<section class=\"course-migration-banner\"><p>This course has been migrated and requires final instructional and accessibility review.</p></section>"
+  }
+}

@@ -1,0 +1,32 @@
+[project]
+name = "lms-migration-pilot"
+version = "0.1.0"
+description = "Local-first D2L to Canvas migration pilot toolkit"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openpyxl>=3.1.2"
+]
+
+[project.scripts]
+lms-migrate = "lms_migration.cli:main"
+lms-best-practices-audit = "lms_migration.best_practices:main"
+lms-safe-summary = "lms_migration.safe_summary:main"
+lms-migrate-ui = "lms_migration.ui:main"
+lms-reference-audit = "lms_migration.reference_audit:main"
+lms-build-fix-checklist = "lms_migration.fix_checklist:main"
+lms-canvas-auto-relink = "lms_migration.canvas_post_import:main"
+lms-canvas-live-audit = "lms_migration.canvas_live_audit:main"
+lms-canvas-snapshot = "lms_migration.canvas_snapshot:main"
+lms-analyze-examples = "lms_migration.example_corpus:main"
+lms-analyze-template-package = "lms_migration.template_package:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

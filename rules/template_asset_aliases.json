@@ -1,0 +1,12 @@
+{
+  "aliases": {
+    "banner_01.jpg": ["banner-1.png"],
+    "banner_02.jpg": ["banner-2.png"],
+    "banner_03.jpg": ["banner-3.png"],
+    "banner_04.jpg": ["banner-4.png"],
+    "banner_05.jpg": ["banner-5.png"],
+    "banner_06.jpg": ["banner-6.png"],
+    "banner_07.jpg": ["banner-7.png"],
+    "banner_08.jpg": ["banner-8.png"]
+  }
+}

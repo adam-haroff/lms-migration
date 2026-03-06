@@ -1,0 +1,6 @@
+Rule ID,Category,D2L Feature,Canvas Equivalent,Best Practice,Notes
+BP-001,Pages,Content Browser,Modules + Pages,Move files into module pages,Ensure one H1 per page
+BP-002,Pages,Content Browser,Modules + Pages,Move files into module pages,Ensure one H1 per page
+BP-003,Quizzes,Question Library,Item Banks,Create Canvas Item Banks before import,Validate outcomes mapping
+BP-004,Quizzes,Question Library,Classic Quizzes,Do not use Classic Quizzes for new content,Use New Quizzes where possible
+BP-005,Links,External Links,External URLs,Replace click here text with descriptive links,Check all links after import

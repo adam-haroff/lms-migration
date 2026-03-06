@@ -1,0 +1,50 @@
+{
+  "replacements": [
+    {
+      "description": "Normalize Brightspace terminology to Canvas",
+      "pattern": "\\b(Content Browser|Manage Files|Classlist)\\b",
+      "replacement": "Canvas",
+      "flags": "i"
+    },
+    {
+      "description": "Remove inline font-family declarations",
+      "pattern": "font-family\\s*:[^;\"']+;?",
+      "replacement": "",
+      "flags": "i"
+    }
+  ],
+  "link_rewrites": [
+    {
+      "description": "Rewrite institutional LMS links",
+      "from": "https://d2l.yourinstitution.edu",
+      "to": "https://canvas.yourinstitution.edu"
+    }
+  ],
+  "manual_review_triggers": [
+    {
+      "reason": "Embedded iframe requires manual accessibility and policy review",
+      "pattern": "<iframe\\b",
+      "flags": "i"
+    },
+    {
+      "reason": "Legacy script blocks should be removed or replaced",
+      "pattern": "<script\\b",
+      "flags": "i"
+    },
+    {
+      "reason": "Legacy D2L links were neutralized and must be relinked in Canvas",
+      "pattern": "data-migration-link-status\\s*=\\s*\"needs-review\"",
+      "flags": "i"
+    },
+    {
+      "reason": "Missing images were removed and require manual verification of visual equivalency",
+      "pattern": "migration-missing-image-text",
+      "flags": "i"
+    }
+  ],
+  "banner": {
+    "enabled": false,
+    "insert_mode": "prepend_body",
+    "html": "<section class=\"course-migration-banner\"><p>This course has been migrated and reviewed for Canvas alignment.</p></section>"
+  }
+}

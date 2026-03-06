@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+output/
+.lms-migrate-ui-state.json
+*.egg-info/
+
+# Local/sensitive course content and exports
+resources/
+*.zip
+*.imscc
