@@ -127,6 +127,13 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
         return ("P1", "embedded_iframe_review", "ID", "Review each iframe for accessibility, security, and responsive behavior.")
     if "template placeholder text remains" in lowered:
         return ("P1", "template_placeholder_cleanup", "Faculty/ID", "Replace unresolved template placeholders with final course-specific content.")
+    if "template asset reference not mapped to canvas template package" in lowered:
+        return (
+            "P1",
+            "template_asset_mapping_review",
+            "ID",
+            "Map unresolved Brightspace template assets to approved Canvas template assets and re-run migration.",
+        )
     if "legacy d2l links were neutralized" in lowered:
         return ("P1", "relink_neutralized_d2l_links", "ID", "Replace neutralized D2L links with valid Canvas links.")
     if "question bank migration requires manual verification" in lowered:

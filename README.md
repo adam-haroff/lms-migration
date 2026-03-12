@@ -36,13 +36,17 @@ On macOS you can also double-click:
 The UI provides:
 
 - Local ZIP migration with file pickers.
+- Cleaner default layout with optional tools collapsed by default and advanced Canvas controls hidden behind a toggle.
 - Split pipeline actions:
 - `Run Pre-Import Pipeline` (local migration + reports)
 - `Run Post-Import Pipeline` (Canvas issues export + fix checklist after Canvas import)
+- `Run Full Post-Import` (pre issues + optional auto-relink + live audit/safe fixes + post issues + checklist)
 - Course identifier fields (Canvas course ID + local Sinclair course code) to keep output paths organized.
 - Sinclair course code history dropdown (remembers recent entries locally).
 - D2L export ZIP history dropdown (remembers recent local paths).
 - Policy profile selector (`strict` or `standard`).
+- Optional Template Overlay stage (experimental) to map known Brightspace template refs to assets from a Canvas template package and materialize those template assets into the migrated package.
+- Accordion handling mode selector (`details`, `flatten`, or `none`) during pre-import conversion.
 - Optional best-practice enforcer toggle for safe template/process normalization during pre-import conversion.
 - Non-sensitive summary generation (no file names, no content snippets).
 - Optional best-practices spreadsheet audit.
@@ -50,6 +54,7 @@ The UI provides:
 - Optional Canvas import-issues export via API (token entered in UI; output saved locally as JSON).
 - Optional post-import auto-relink action for missing page file/image links in Canvas.
 - Optional live Canvas link audit with exportable JSON/CSV/Markdown findings and optional safe page-fix pass.
+- Run status line + clear-log control for faster troubleshooting.
 - A/B helper: one-click variant cycle (`pre issues -> optional auto-relink -> post issues`) with auto-managed output paths under `ab-test/<A|B>/` and variant-tagged filenames.
 - Optional Canvas course snapshot capture (pages/modules/files/assignments/discussions/announcements) for gold-course comparison.
 - Canvas sanitizer for common Brightspace template breakage (removes missing template assets, neutralizes legacy D2L links, and keeps review flags in reports).
@@ -93,6 +98,41 @@ Institution-specific rulepack (derived from your provided checklist + best-pract
 lms-migrate /path/to/d2l-export.zip --rules rules/sinclair_pilot_rules.json --output-dir output
 ```
 
+Enable template overlay mapping against a Canvas template package:
+
+```bash
+lms-migrate /path/to/d2l-export.zip \
+  --rules rules/sinclair_pilot_rules.json \
+  --template-package resources/examples/template/elearn-standard-template-export.imscc \
+  --template-alias-map-json rules/template_asset_aliases.json \
+  --output-dir output
+```
+
+Set accordion handling mode during migration:
+
+```bash
+lms-migrate /path/to/d2l-export.zip \
+  --rules rules/sinclair_pilot_rules.json \
+  --accordion-handling flatten \
+  --output-dir output
+```
+
+Modes:
+
+- `details`: Convert legacy Bootstrap accordion cards to accessible `<details>/<summary>` blocks.
+- `flatten`: Convert accordion cards into plain heading/content sections.
+- `none`: Leave legacy accordion markup unchanged.
+
+Disable optional template transforms when needed:
+
+```bash
+lms-migrate /path/to/d2l-export.zip \
+  --rules rules/sinclair_pilot_rules.json \
+  --no-template-module-structure \
+  --no-template-visual-standards \
+  --output-dir output
+```
+
 Outputs:
 
 - `output/<zip-name>.canvas-ready.zip`
@@ -100,6 +140,12 @@ Outputs:
 - `output/<zip-name>.migration-report.md`
 - `output/<zip-name>.manual-review.csv`
 - `output/<zip-name>.preflight-checklist.md`
+- Optional: `output/<zip-name>.template-overlay-report.json`
+
+Template overlay notes:
+
+- Mapped template assets are materialized into `TemplateAssets/` inside the generated package.
+- Common Brightspace framework CSS/JS references are tracked as `ignored_unresolved_total` in the overlay report because they are intentionally removed by sanitizer logic.
 
 ## 1b) Generate non-sensitive summary from report JSON
 
@@ -110,6 +156,19 @@ lms-safe-summary /path/to/course.migration-report.json
 Outputs:
 
 - `*.safe-summary.txt` with counts and issue-reason totals only.
+
+## 1c) Visual HTML structure audit (original vs converted)
+
+```bash
+lms-visual-audit \
+  --original-zip /path/to/d2l-export.zip \
+  --converted-zip /path/to/d2l-export.canvas-ready.zip
+```
+
+Outputs:
+
+- `*.visual-audit.json`
+- `*.visual-audit.md`
 
 ## 2) Audit best-practices spreadsheet
 

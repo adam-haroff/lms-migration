@@ -5,6 +5,7 @@ import posixpath
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Iterable
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
@@ -38,6 +39,8 @@ class CanvasSanitizerPolicy:
     neutralize_legacy_d2l_links: bool = True
     use_alt_text_for_removed_template_images: bool = True
     repair_missing_local_references: bool = True
+    strip_bootstrap_grid_classes: bool = True
+    accordion_handling: str = "details"
 
 
 @dataclass(frozen=True)
@@ -51,10 +54,56 @@ _BSP_TEMPLATE_RE = re.compile(r"^/?shared/brightspace_html_template/", flags=re.
 _BSP_FONT_RE = re.compile(r"^https?://s\.brightspace\.com/", flags=re.IGNORECASE)
 _LEGACY_D2L_RE = re.compile(r"^/?d2l/", flags=re.IGNORECASE)
 _LEGACY_ENFORCED_RE = re.compile(r"^/?content/enforced/", flags=re.IGNORECASE)
+_D2L_QUICKLINK_PATH_RE = re.compile(
+    r"^/?d2l/common/dialogs/quicklink/quicklink\.d2l$",
+    flags=re.IGNORECASE,
+)
 _BOOTSTRAP_GRID_CLASS_RE = re.compile(
     r"^(?:container(?:-fluid)?|row|col(?:-[a-z]+)?-\d{1,2}|offset(?:-[a-z]+)?-\d{1,2})$",
     flags=re.IGNORECASE,
 )
+_ACCORDION_CARD_PATTERN = re.compile(
+    r"<div\b[^>]*class\s*=\s*[\"'][^\"']*\bcard\b[^\"']*[\"'][^>]*>\s*"
+    r"<div\b[^>]*class\s*=\s*[\"'][^\"']*\bcard-header\b[^\"']*[\"'][^>]*>\s*(?P<header>.*?)\s*</div>\s*"
+    r"<div\b[^>]*class\s*=\s*[\"'][^\"']*\bcollapse\b[^\"']*[\"'][^>]*>\s*"
+    r"<div\b[^>]*class\s*=\s*[\"'][^\"']*\bcard-body\b[^\"']*[\"'][^>]*>\s*(?P<body>.*?)\s*</div>\s*</div>\s*</div>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _convert_bootstrap_accordion_cards(content: str, mode: str) -> tuple[str, int]:
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode not in {"details", "flatten"}:
+        return content, 0
+
+    converted = 0
+
+    def replace_card(match: re.Match[str]) -> str:
+        nonlocal converted
+        header_html = match.group("header").strip()
+        body_html = match.group("body").strip()
+        heading_match = re.search(
+            r"<h[1-6]\b[^>]*>(?P<title>.*?)</h[1-6]>",
+            header_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        title_html = (heading_match.group("title") if heading_match is not None else header_html).strip()
+        if not title_html:
+            title_html = "Section"
+
+        converted += 1
+        if normalized_mode == "details":
+            return (
+                f'<details class="migration-accordion">\n'
+                f"  <summary>{title_html}</summary>\n"
+                f"  <div>{body_html}</div>\n"
+                f"</details>"
+            )
+
+        return f"<h3>{title_html}</h3>\n<div>{body_html}</div>"
+
+    updated = _ACCORDION_CARD_PATTERN.sub(replace_card, content)
+    return updated, converted
 
 
 def _re_flags(flag_string: str) -> int:
@@ -141,6 +190,95 @@ def _is_legacy_d2l_link(url: str) -> bool:
     return bool(_LEGACY_D2L_RE.match(cleaned) or _LEGACY_ENFORCED_RE.match(cleaned))
 
 
+def _html_unescape_repeated(value: str, *, max_rounds: int = 4) -> str:
+    current = value
+    for _ in range(max_rounds):
+        unescaped = html.unescape(current)
+        if unescaped == current:
+            break
+        current = unescaped
+    return current
+
+
+def _rewrite_quicklink_coursefile_href(raw_href: str) -> str | None:
+    decoded_href = _html_unescape_repeated(raw_href.strip())
+    parsed = urlparse(decoded_href)
+    path_text = (parsed.path or "").strip()
+    if parsed.params:
+        path_text = f"{path_text};{parsed.params}"
+    if not _D2L_QUICKLINK_PATH_RE.match(path_text):
+        return None
+
+    params = parse_qsl(parsed.query, keep_blank_values=True)
+    if not params:
+        return None
+
+    link_type = ""
+    file_id = ""
+    for key, value in params:
+        lowered = key.strip().lower()
+        if lowered == "type" and not link_type:
+            link_type = value.strip().lower()
+        elif lowered == "fileid" and not file_id:
+            file_id = value.strip()
+
+    if link_type != "coursefile" or not file_id:
+        return None
+
+    normalized = unquote(file_id).strip().replace("\\", "/")
+    if not normalized:
+        return None
+    normalized = posixpath.normpath(normalized).lstrip("./")
+    if not normalized or normalized.startswith("../"):
+        return None
+
+    if parsed.fragment:
+        return f"{normalized}#{parsed.fragment}"
+    return normalized
+
+
+def neutralize_legacy_d2l_hrefs_in_markup(content: str) -> tuple[str, int, int]:
+    """
+    Neutralize legacy D2L href values in raw/escaped markup payloads.
+
+    This is used for D2L XML package files (for example ``news_d2l.xml``) where
+    learner-facing HTML is often entity-escaped, so normal HTML parsing passes
+    do not see those anchors.
+    """
+    href_pattern = re.compile(
+        r'(?P<prefix>\bhref\s*=\s*)(?P<quote>[\"\'])(?P<href>[^\"\']+)(?P=quote)',
+        flags=re.IGNORECASE,
+    )
+    neutralized = 0
+    rewritten_quicklinks = 0
+
+    def replace_href(match: re.Match[str]) -> str:
+        nonlocal neutralized
+        nonlocal rewritten_quicklinks
+        raw_href = match.group("href").strip()
+        rewritten = _rewrite_quicklink_coursefile_href(raw_href)
+        if rewritten:
+            rewritten_quicklinks += 1
+            return (
+                f'{match.group("prefix")}{match.group("quote")}'
+                f'{html.escape(rewritten, quote=True)}'
+                f'{match.group("quote")}'
+            )
+        if not _is_legacy_d2l_link(html.unescape(raw_href)):
+            return match.group(0)
+
+        neutralized += 1
+        escaped_href = html.escape(raw_href, quote=True)
+        return (
+            f'{match.group("prefix")}{match.group("quote")}#{match.group("quote")} '
+            f'data-migration-link-status="needs-review" '
+            f'data-migration-original-href="{escaped_href}"'
+        )
+
+    updated = href_pattern.sub(replace_href, content)
+    return updated, rewritten_quicklinks, neutralized
+
+
 def apply_canvas_sanitizer(
     content: str,
     policy: CanvasSanitizerPolicy | None = None,
@@ -151,38 +289,94 @@ def apply_canvas_sanitizer(
     applied_policy = policy or CanvasSanitizerPolicy()
     updated = content
     applied: list[AppliedChange] = []
-
-    if applied_policy.sanitize_brightspace_assets:
-        class_attr_pattern = re.compile(
-            r'(?P<prefix>\sclass\s*=\s*)(?P<quote>["\'])(?P<classes>[^"\']*)(?P=quote)',
-            flags=re.IGNORECASE,
-        )
-        stripped_grid_tokens = 0
-
-        def replace_class_attr(match: re.Match[str]) -> str:
-            nonlocal stripped_grid_tokens
-            classes_text = match.group("classes").strip()
-            if not classes_text:
-                return ""
-            original_tokens = [token for token in classes_text.split() if token]
-            kept_tokens = [token for token in original_tokens if not _BOOTSTRAP_GRID_CLASS_RE.match(token)]
-            removed = len(original_tokens) - len(kept_tokens)
-            if removed <= 0:
-                return match.group(0)
-            stripped_grid_tokens += removed
-            if not kept_tokens:
-                return ""
-            return f'{match.group("prefix")}"{" ".join(kept_tokens)}"'
-
-        updated = class_attr_pattern.sub(replace_class_attr, updated)
-        if stripped_grid_tokens:
+    title_tag_pattern = re.compile(r"<title\b[^>]*>(?P<title>.*?)</title>", flags=re.IGNORECASE | re.DOTALL)
+    document_title_text = ""
+    title_match_initial = title_tag_pattern.search(updated)
+    if title_match_initial is not None:
+        document_title_text = html.unescape(re.sub(r"<[^>]+>", " ", title_match_initial.group("title"))).strip()
+        updated, removed_title_tags = title_tag_pattern.subn("", updated)
+        if removed_title_tags:
             applied.append(
                 AppliedChange(
                     category="sanitizer",
-                    description="Removed Bootstrap grid classes that conflict with Canvas layout",
-                    count=stripped_grid_tokens,
+                    description="Removed HTML <title> tags to prevent duplicate in-body headings in Canvas",
+                    count=removed_title_tags,
                 )
             )
+    decorative_alt_values = {
+        "banner",
+        "logo",
+        "image",
+        "decorative",
+        "horizontal line",
+        "horizontal rule",
+        "rule",
+        "divider",
+        "line",
+    }
+
+    wiris_annotation_pattern = re.compile(
+        r"<annotation\b[^>]*\bencoding\s*=\s*([\"'])wiris\1[^>]*>.*?</annotation>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    updated, removed_wiris_annotations = wiris_annotation_pattern.subn("", updated)
+    if removed_wiris_annotations:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Removed legacy WIRIS annotation payloads from MathML to improve Canvas equation rendering",
+                count=removed_wiris_annotations,
+            )
+        )
+
+    accordion_mode = str(applied_policy.accordion_handling or "").strip().lower()
+    updated, converted_accordion_cards = _convert_bootstrap_accordion_cards(updated, accordion_mode)
+    if converted_accordion_cards:
+        description = (
+            "Converted Bootstrap accordion cards to accessible <details>/<summary> blocks"
+            if accordion_mode == "details"
+            else "Flattened Bootstrap accordion cards into plain heading/content sections"
+        )
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description=description,
+                count=converted_accordion_cards,
+            )
+        )
+
+    if applied_policy.sanitize_brightspace_assets:
+        if applied_policy.strip_bootstrap_grid_classes:
+            class_attr_pattern = re.compile(
+                r'(?P<prefix>\sclass\s*=\s*)(?P<quote>["\'])(?P<classes>[^"\']*)(?P=quote)',
+                flags=re.IGNORECASE,
+            )
+            stripped_grid_tokens = 0
+
+            def replace_class_attr(match: re.Match[str]) -> str:
+                nonlocal stripped_grid_tokens
+                classes_text = match.group("classes").strip()
+                if not classes_text:
+                    return ""
+                original_tokens = [token for token in classes_text.split() if token]
+                kept_tokens = [token for token in original_tokens if not _BOOTSTRAP_GRID_CLASS_RE.match(token)]
+                removed = len(original_tokens) - len(kept_tokens)
+                if removed <= 0:
+                    return match.group(0)
+                stripped_grid_tokens += removed
+                if not kept_tokens:
+                    return ""
+                return f'{match.group("prefix")}"{" ".join(kept_tokens)}"'
+
+            updated = class_attr_pattern.sub(replace_class_attr, updated)
+            if stripped_grid_tokens:
+                applied.append(
+                    AppliedChange(
+                        category="sanitizer",
+                        description="Removed Bootstrap grid classes that conflict with Canvas layout",
+                        count=stripped_grid_tokens,
+                    )
+                )
 
         link_pattern = re.compile(
             r"<link\b[^>]*\bhref\s*=\s*([\"'])(?P<href>[^\"']+)\1[^>]*>",
@@ -259,7 +453,7 @@ def apply_canvas_sanitizer(
             alt_text = alt_match.group("alt").strip() if alt_match else ""
             if not alt_text:
                 return ""
-            if alt_text.lower() in {"banner", "logo", "image", "decorative"}:
+            if alt_text.lower() in decorative_alt_values:
                 return ""
 
             replaced_img_with_alt += 1
@@ -281,6 +475,27 @@ def apply_canvas_sanitizer(
                     category="sanitizer",
                     description="Replaced removed template images with existing alt text",
                     count=replaced_img_with_alt,
+                )
+            )
+
+        decorative_template_assets_pattern = re.compile(
+            r"<img\b[^>]*\bsrc\s*=\s*([\"'])[^\"']*templateassets/(?P<name>footer\.png|course-card\.png)(?:[?#][^\"']*)?\1[^>]*>",
+            flags=re.IGNORECASE,
+        )
+        removed_decorative_template_assets = 0
+
+        def replace_decorative_template_asset(match: re.Match[str]) -> str:
+            nonlocal removed_decorative_template_assets
+            removed_decorative_template_assets += 1
+            return ""
+
+        updated = decorative_template_assets_pattern.sub(replace_decorative_template_asset, updated)
+        if removed_decorative_template_assets:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Removed decorative template footer/logo images that do not render correctly in Canvas",
+                    count=removed_decorative_template_assets,
                 )
             )
 
@@ -318,17 +533,223 @@ def apply_canvas_sanitizer(
                 )
             )
 
+    h1_pattern = re.compile(r"<h1(?P<attrs>\b[^>]*)>(?P<body>.*?)</h1>", flags=re.IGNORECASE | re.DOTALL)
+    h1_demoted = 0
+
+    def demote_h1(match: re.Match[str]) -> str:
+        nonlocal h1_demoted
+        h1_demoted += 1
+        attrs = match.group("attrs") or ""
+        body = match.group("body")
+        return f"<h2{attrs}>{body}</h2>"
+
+    updated = h1_pattern.sub(demote_h1, updated)
+    if h1_demoted:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Demoted in-body H1 headings to H2 to align with Canvas page-title hierarchy",
+                count=h1_demoted,
+            )
+        )
+
+    # Remove empty spacer paragraphs that create odd vertical gaps after import.
+    empty_paragraph_pattern = re.compile(
+        r"<p\b[^>]*>\s*(?:&nbsp;|<br\s*/?>|\s|<span\b[^>]*>\s*(?:&nbsp;|<br\s*/?>|\s)*</span>)*</p>",
+        flags=re.IGNORECASE,
+    )
+    updated, removed_empty_paragraphs = empty_paragraph_pattern.subn("", updated)
+    if removed_empty_paragraphs:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Removed empty spacer paragraphs to reduce Canvas layout drift",
+                count=removed_empty_paragraphs,
+            )
+        )
+
+    # Remove whitespace filler around images inside headings (common after
+    # Brightspace -> Canvas conversion where many &nbsp;/<br> tokens are used for
+    # manual spacing in source templates).
+    heading_pattern = re.compile(
+        r"<h(?P<level>[1-6])(?P<attrs>\b[^>]*)>(?P<body>.*?)</h(?P=level)>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    normalized_heading_whitespace = 0
+
+    def normalize_heading_body(match: re.Match[str]) -> str:
+        nonlocal normalized_heading_whitespace
+        body = match.group("body")
+        if "<img" not in body.lower():
+            return match.group(0)
+        rebuilt = re.sub(r"(?:&nbsp;|\s|<br\s*/?>){3,}", " ", body, flags=re.IGNORECASE)
+        rebuilt = re.sub(r"\s{2,}", " ", rebuilt).strip()
+        if rebuilt == body:
+            return match.group(0)
+        normalized_heading_whitespace += 1
+        return f'<h{match.group("level")}{match.group("attrs")}>{rebuilt}</h{match.group("level")}>'
+
+    updated = heading_pattern.sub(normalize_heading_body, updated)
+    if normalized_heading_whitespace:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Collapsed excessive whitespace fillers around heading images",
+                count=normalized_heading_whitespace,
+            )
+        )
+
+    empty_container_pattern = re.compile(
+        r"<(?P<tag>div|span|footer)\b[^>]*>\s*</(?P=tag)>",
+        flags=re.IGNORECASE,
+    )
+    removed_empty_containers = 0
+    while True:
+        updated, removed = empty_container_pattern.subn("", updated)
+        if removed <= 0:
+            break
+        removed_empty_containers += removed
+    if removed_empty_containers:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Removed empty wrapper containers left by legacy template markup",
+                count=removed_empty_containers,
+            )
+        )
+
+    hr_pattern = re.compile(r"<hr\b[^>]*>", flags=re.IGNORECASE)
+    normalized_hr_count = 0
+
+    def normalize_hr_tag(match: re.Match[str]) -> str:
+        nonlocal normalized_hr_count
+        tag = match.group(0)
+        style_match = re.search(
+            r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
+            tag,
+            flags=re.IGNORECASE,
+        )
+        if style_match is None:
+            normalized_style = (
+                "border: 0; height: 2px; background-color: #ac1a2f; width: 100%; margin: 16px 0;"
+            )
+            if tag.endswith("/>"):
+                rebuilt = f'{tag[:-2].rstrip()} style="{normalized_style}" />'
+            else:
+                rebuilt = f'{tag[:-1].rstrip()} style="{normalized_style}">'
+            if rebuilt != tag:
+                normalized_hr_count += 1
+            return rebuilt
+        style_text = style_match.group("style")
+        lowered = style_text.lower()
+        if "height" not in lowered and "background-color" not in lowered and "color" not in lowered:
+            return tag
+
+        color_match = re.search(
+            r"(?:background-color|color)\s*:\s*(?P<color>#[0-9a-f]{3,8}|[a-z]+)",
+            style_text,
+            flags=re.IGNORECASE,
+        )
+        color_value = color_match.group("color") if color_match is not None else "#ac1a2f"
+        normalized_style = (
+            f"border: 0; height: 2px; background-color: {color_value}; width: 100%; margin: 16px 0;"
+        )
+        rebuilt = (
+            tag[: style_match.start("style")]
+            + normalized_style
+            + tag[style_match.end("style") :]
+        )
+        if rebuilt != tag:
+            normalized_hr_count += 1
+        return rebuilt
+
+    updated = hr_pattern.sub(normalize_hr_tag, updated)
+    if normalized_hr_count:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Normalized horizontal divider styling for Canvas consistency",
+                count=normalized_hr_count,
+            )
+        )
+
+    def normalize_display_text(value: str) -> str:
+        lowered = value.lower()
+        lowered = re.sub(r"\s+", " ", lowered).strip()
+        lowered = lowered.replace("&", "and")
+        lowered = re.sub(r"[^a-z0-9 ]+", "", lowered)
+        lowered = re.sub(r"\s+", " ", lowered).strip()
+        return lowered
+
+    def tokenized(value: str) -> list[str]:
+        return [token for token in value.split(" ") if token and token not in {"the", "a", "an"}]
+
+    def is_duplicate_title_block(block_text: str, title_text: str) -> bool:
+        normalized_block = normalize_display_text(block_text)
+        normalized_title_text = normalize_display_text(title_text)
+        if not normalized_block or not normalized_title_text:
+            return False
+        if normalized_block == normalized_title_text:
+            return True
+        block_tokens = tokenized(normalized_block)
+        title_tokens = tokenized(normalized_title_text)
+        if block_tokens and title_tokens and block_tokens == title_tokens:
+            return True
+        ratio = SequenceMatcher(a=normalized_block, b=normalized_title_text).ratio()
+        return ratio >= 0.92
+
+    normalized_title = normalize_display_text(document_title_text)
+    if normalized_title:
+        block_pattern = re.compile(
+            r"<(?P<tag>h[1-6]|p)\b[^>]*>(?P<body>.*?)</(?P=tag)>",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        duplicate_title_block_span: tuple[int, int] | None = None
+        inspected_candidates = 0
+        for match in block_pattern.finditer(updated):
+            block_text = re.sub(r"<[^>]+>", " ", match.group("body"))
+            block_text = html.unescape(block_text)
+            normalized_block = normalize_display_text(block_text)
+            if not normalized_block:
+                continue
+            if normalized_block == "printerfriendlyversion":
+                continue
+            if is_duplicate_title_block(block_text, document_title_text):
+                duplicate_title_block_span = (match.start(), match.end())
+                break
+            inspected_candidates += 1
+            if inspected_candidates >= 3:
+                break
+
+        if duplicate_title_block_span is not None:
+            start, end = duplicate_title_block_span
+            updated = updated[:start] + updated[end:]
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Removed duplicate in-body heading/paragraph that repeated the Canvas page title",
+                    count=1,
+                )
+            )
+
     if applied_policy.neutralize_legacy_d2l_links:
         anchor_href_pattern = re.compile(
             r'(<a\b[^>]*\bhref\s*=\s*)([\"\'])(?P<href>[^\"\']+)\2',
             flags=re.IGNORECASE,
         )
+        rewritten_quicklinks = 0
         neutralized_links = 0
 
         def replace_anchor_href(match: re.Match[str]) -> str:
+            nonlocal rewritten_quicklinks
             nonlocal neutralized_links
             href = match.group("href").strip()
-            if not _is_legacy_d2l_link(href):
+            rewritten = _rewrite_quicklink_coursefile_href(href)
+            if rewritten:
+                rewritten_quicklinks += 1
+                prefix = match.group(1)
+                return f'{prefix}"{html.escape(rewritten, quote=True)}"'
+            if not _is_legacy_d2l_link(_html_unescape_repeated(href)):
                 return match.group(0)
 
             neutralized_links += 1
@@ -341,6 +762,14 @@ def apply_canvas_sanitizer(
             )
 
         updated = anchor_href_pattern.sub(replace_anchor_href, updated)
+        if rewritten_quicklinks:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Converted D2L quickLink coursefile links to package-relative file references",
+                    count=rewritten_quicklinks,
+                )
+            )
         if neutralized_links:
             applied.append(
                 AppliedChange(

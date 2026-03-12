@@ -20,6 +20,7 @@ lms-canvas-live-audit = "lms_migration.canvas_live_audit:main"
 lms-canvas-snapshot = "lms_migration.canvas_snapshot:main"
 lms-analyze-examples = "lms_migration.example_corpus:main"
 lms-analyze-template-package = "lms_migration.template_package:main"
+lms-visual-audit = "lms_migration.visual_audit:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

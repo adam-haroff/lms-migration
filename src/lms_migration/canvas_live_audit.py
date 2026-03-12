@@ -29,7 +29,7 @@ _SHARED_TEMPLATE_RE = re.compile(r"^/?shared/brightspace_html_template/", flags=
 
 def _extract_attr_refs(html_text: str) -> list[tuple[str, str]]:
     pattern = re.compile(
-        r"(?P<attr>href|src)\s*=\s*(?P<quote>[\"'])(?P<url>[^\"']+)(?P=quote)",
+        r"(?:^|\s)(?P<attr>href|src)\s*=\s*(?P<quote>[\"'])(?P<url>[^\"']+)(?P=quote)",
         flags=re.IGNORECASE,
     )
     refs: list[tuple[str, str]] = []

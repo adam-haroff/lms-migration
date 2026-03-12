@@ -30,12 +30,22 @@ from .pipeline import MigrationOutput, run_migration
 from .policy_profiles import list_policy_profiles
 from .reference_audit import run_reference_audit
 from .safe_summary import build_safe_summary_from_path
+from .visual_audit import build_visual_audit
 
 
 def _default_safe_summary_path(report_path: Path) -> Path:
     if report_path.name.endswith(".migration-report.json"):
         return report_path.with_name(report_path.name.replace(".migration-report.json", ".safe-summary.txt"))
     return report_path.with_suffix(".safe-summary.txt")
+
+
+def _default_visual_audit_json_path(converted_zip: Path) -> Path:
+    stem = converted_zip.name
+    if stem.endswith(".canvas-ready.zip"):
+        stem = stem[: -len(".canvas-ready.zip")]
+    elif stem.endswith(".zip"):
+        stem = stem[: -len(".zip")]
+    return converted_zip.with_name(f"{stem}.visual-audit.json")
 
 
 class LMSMigrationUI:
@@ -51,12 +61,21 @@ class LMSMigrationUI:
         self.input_zip_history = self._load_history("input_zip_history")
 
         default_output = self._resolve_workspace_root() / "output"
+        default_template_package = (
+            self._resolve_workspace_root() / "resources" / "examples" / "template" / "elearn-standard-template-export.imscc"
+        )
         self.policy_profiles_path = self._resolve_workspace_root() / "rules" / "policy_profiles.json"
         self.available_policy_profiles = self._load_available_policy_profiles()
         self.input_zip_var = tk.StringVar(value="")
         self.rules_var = tk.StringVar(value=str(self._resolve_default_rules()))
         self.output_dir_var = tk.StringVar(value=str(default_output))
         self.enable_best_practice_enforcer_var = tk.BooleanVar(value=True)
+        self.enable_template_overlay_var = tk.BooleanVar(value=False)
+        self.template_package_var = tk.StringVar(value=str(default_template_package) if default_template_package.exists() else "")
+        self.template_overlay_use_alias_map_var = tk.BooleanVar(value=True)
+        self.accordion_handling_var = tk.StringVar(value="flatten")
+        self.template_module_structure_var = tk.BooleanVar(value=True)
+        self.template_visual_standards_var = tk.BooleanVar(value=True)
         default_policy = "strict" if "strict" in self.available_policy_profiles else self.available_policy_profiles[0]
         self.policy_profile_var = tk.StringVar(value=default_policy)
         self.report_json_var = tk.StringVar(value="")
@@ -69,6 +88,9 @@ class LMSMigrationUI:
         self.ref_best_practices_docx_var = tk.StringVar(value="")
         self.ref_page_templates_docx_var = tk.StringVar(value="")
         self.ref_syllabus_template_docx_var = tk.StringVar(value="")
+        self.visual_original_zip_var = tk.StringVar(value="")
+        self.visual_converted_zip_var = tk.StringVar(value="")
+        self.visual_audit_output_var = tk.StringVar(value="")
 
         self.canvas_base_url_var = tk.StringVar(value="https://sinclair.instructure.com")
         self.canvas_course_id_var = tk.StringVar(value="")
@@ -86,6 +108,8 @@ class LMSMigrationUI:
         self.ab_variant_var = tk.StringVar(value="A")
         self.ab_include_auto_relink_var = tk.BooleanVar(value=True)
         self.show_canvas_advanced_var = tk.BooleanVar(value=False)
+        self.show_optional_tools_var = tk.BooleanVar(value=False)
+        self.status_text_var = tk.StringVar(value="Status: Idle")
 
         self.sinclair_course_code_var.trace_add(
             "write", lambda *_: self._maybe_apply_course_folder_defaults()
@@ -170,6 +194,8 @@ class LMSMigrationUI:
         inferred = self._infer_course_code_from_input_zip(Path(input_zip_text))
         if inferred and not self.sinclair_course_code_var.get().strip():
             self.sinclair_course_code_var.set(inferred)
+        if not self.visual_original_zip_var.get().strip():
+            self.visual_original_zip_var.set(input_zip_text)
         self._maybe_apply_course_folder_defaults()
 
     def _remember_and_apply_input_zip(self) -> None:
@@ -276,6 +302,22 @@ class LMSMigrationUI:
                 text="Hide Advanced Canvas Options" if show else "Show Advanced Canvas Options"
             )
 
+    def _toggle_optional_tools(self) -> None:
+        self.show_optional_tools_var.set(not self.show_optional_tools_var.get())
+        self._apply_optional_tools_visibility()
+
+    def _apply_optional_tools_visibility(self) -> None:
+        show = bool(self.show_optional_tools_var.get())
+        if hasattr(self, "optional_tools_frame"):
+            if show:
+                self.optional_tools_frame.grid()
+            else:
+                self.optional_tools_frame.grid_remove()
+        if hasattr(self, "optional_tools_toggle_btn"):
+            self.optional_tools_toggle_btn.configure(
+                text="Hide Optional Tools (Summary/Audits)" if show else "Show Optional Tools (Summary/Audits)"
+            )
+
     def _on_canvas_course_id_changed(self) -> None:
         current_course_id = self.canvas_course_id_var.get().strip()
         if current_course_id != self._last_canvas_course_id:
@@ -350,6 +392,7 @@ class LMSMigrationUI:
             self.output_dir_var.set(str(output_root / course_code))
 
         self._maybe_sync_canvas_issues_output_path()
+        self._maybe_sync_visual_audit_paths()
 
     def _should_auto_reset_output_dir(self, output_dir: Path) -> bool:
         workspace_output = (self._resolve_workspace_root() / "output").resolve()
@@ -378,6 +421,45 @@ class LMSMigrationUI:
             return True
         except ValueError:
             return False
+
+    def _default_visual_converted_zip_path(self) -> Path | None:
+        input_zip_text = self.input_zip_var.get().strip()
+        if not input_zip_text:
+            return None
+        input_zip = Path(input_zip_text)
+        output_dir_text = self.output_dir_var.get().strip()
+        output_dir = Path(output_dir_text) if output_dir_text else (self._resolve_workspace_root() / "output")
+        return output_dir / f"{input_zip.stem}.canvas-ready.zip"
+
+    def _should_auto_reset_visual_audit_path(self, current_output: str, expected_name_suffix: str) -> bool:
+        if not current_output:
+            return True
+        current = Path(current_output)
+        if expected_name_suffix and not current.name.endswith(expected_name_suffix):
+            return False
+        workspace_output = (self._resolve_workspace_root() / "output").resolve()
+        try:
+            current.resolve().relative_to(workspace_output)
+            return True
+        except ValueError:
+            return False
+
+    def _maybe_sync_visual_audit_paths(self) -> None:
+        converted_default = self._default_visual_converted_zip_path()
+        if converted_default is None:
+            return
+        if self._should_auto_reset_visual_audit_path(
+            self.visual_converted_zip_var.get().strip(),
+            ".canvas-ready.zip",
+        ):
+            self.visual_converted_zip_var.set(str(converted_default))
+
+        visual_output_default = _default_visual_audit_json_path(converted_default)
+        if self._should_auto_reset_visual_audit_path(
+            self.visual_audit_output_var.get().strip(),
+            ".visual-audit.json",
+        ):
+            self.visual_audit_output_var.set(str(visual_output_default))
 
     def _build_layout(self) -> None:
         container = ttk.Frame(self.root)
@@ -426,6 +508,10 @@ class LMSMigrationUI:
             "<FocusOut>",
             lambda *_: self._remember_sinclair_course_code(),
         )
+        ttk.Label(
+            identifiers,
+            text="Recommended flow: Pre-Import Pipeline -> Canvas Import -> A/B Variant Cycle -> Live Link Audit.",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         migration = ttk.LabelFrame(main, text="1) Local Course Migration", padding=10)
         migration.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
@@ -469,38 +555,97 @@ class LMSMigrationUI:
             variable=self.output_dir_var,
             button_text="Browse Output",
         )
-        ttk.Label(migration, text="Policy profile").grid(row=3, column=0, sticky="w", pady=3)
+        self._add_file_row(
+            parent=migration,
+            row=3,
+            label="Template package (.imscc, optional)",
+            variable=self.template_package_var,
+            button_text="Browse Template",
+            filetypes=[("Canvas Package", "*.imscc"), ("All files", "*.*")],
+        )
+        self._add_file_row(
+            parent=migration,
+            row=4,
+            label="Template alias map JSON (optional)",
+            variable=self.template_alias_map_var,
+            button_text="Browse Alias Map",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        self.enable_template_overlay_check = ttk.Checkbutton(
+            migration,
+            text="Apply Template Overlay (map known Brightspace template assets to Canvas template assets)",
+            variable=self.enable_template_overlay_var,
+        )
+        self.enable_template_overlay_check.grid(row=5, column=1, sticky="w", pady=(0, 3))
+        self.template_overlay_use_alias_map_check = ttk.Checkbutton(
+            migration,
+            text="Use alias map for Template Overlay",
+            variable=self.template_overlay_use_alias_map_var,
+        )
+        self.template_overlay_use_alias_map_check.grid(row=5, column=2, sticky="w", pady=(0, 3))
+        ttk.Label(migration, text="Policy profile").grid(row=6, column=0, sticky="w", pady=3)
         self.policy_profile_combo = ttk.Combobox(
             migration,
             textvariable=self.policy_profile_var,
             values=self.available_policy_profiles,
             state="readonly",
         )
-        self.policy_profile_combo.grid(row=3, column=1, sticky="ew", padx=6, pady=3)
+        self.policy_profile_combo.grid(row=6, column=1, sticky="ew", padx=6, pady=3)
         self.policy_profile_combo.current(
             self.available_policy_profiles.index(self.policy_profile_var.get())
         )
+        ttk.Label(migration, text="Accordion handling").grid(row=7, column=0, sticky="w", pady=3)
+        self.accordion_handling_combo = ttk.Combobox(
+            migration,
+            textvariable=self.accordion_handling_var,
+            values=("details", "flatten", "none"),
+            state="readonly",
+        )
+        self.accordion_handling_combo.grid(row=7, column=1, sticky="w", padx=6, pady=3)
+        self.template_module_structure_check = ttk.Checkbutton(
+            migration,
+            text="Apply Template Module Structure (Overview/Activities/Review + module item naming)",
+            variable=self.template_module_structure_var,
+        )
+        self.template_module_structure_check.grid(row=8, column=1, sticky="w", pady=(0, 3))
+        self.template_visual_standards_check = ttk.Checkbutton(
+            migration,
+            text="Apply Template Visual Standards (icon+heading layout, icon sizing/labels)",
+            variable=self.template_visual_standards_var,
+        )
+        self.template_visual_standards_check.grid(row=9, column=1, sticky="w", pady=(0, 3))
         ttk.Checkbutton(
             migration,
             text="Apply Best-Practice Enforcer (safe subset)",
             variable=self.enable_best_practice_enforcer_var,
-        ).grid(row=4, column=1, sticky="w", pady=(0, 3))
+        ).grid(row=10, column=1, sticky="w", pady=(0, 3))
 
         self.run_migration_btn = ttk.Button(
             migration,
             text="Run Migration",
             command=self._run_migration_clicked,
         )
-        self.run_migration_btn.grid(row=5, column=2, sticky="e", pady=(8, 0))
+        self.run_migration_btn.grid(row=11, column=2, sticky="e", pady=(8, 0))
         self.run_full_pipeline_btn = ttk.Button(
             migration,
             text="Run Pre-Import Pipeline",
             command=self._run_pre_import_pipeline_clicked,
         )
-        self.run_full_pipeline_btn.grid(row=5, column=1, sticky="e", pady=(8, 0), padx=(0, 8))
+        self.run_full_pipeline_btn.grid(row=11, column=1, sticky="e", pady=(8, 0), padx=(0, 8))
 
-        summary = ttk.LabelFrame(main, text="2) Non-Sensitive Summary", padding=10)
-        summary.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        self.optional_tools_toggle_btn = ttk.Button(
+            main,
+            text="Show Optional Tools (Summary/Audits)",
+            command=self._toggle_optional_tools,
+        )
+        self.optional_tools_toggle_btn.grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        self.optional_tools_frame = ttk.Frame(main)
+        self.optional_tools_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self.optional_tools_frame.columnconfigure(0, weight=1)
+
+        summary = ttk.LabelFrame(self.optional_tools_frame, text="2) Non-Sensitive Summary", padding=10)
+        summary.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         summary.columnconfigure(1, weight=1)
 
         self._add_file_row(
@@ -536,8 +681,8 @@ class LMSMigrationUI:
         )
         self.copy_summary_btn.grid(row=0, column=1)
 
-        audit = ttk.LabelFrame(main, text="3) Best-Practices Audit (Optional)", padding=10)
-        audit.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        audit = ttk.LabelFrame(self.optional_tools_frame, text="3) Best-Practices Audit (Optional)", padding=10)
+        audit.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         audit.columnconfigure(1, weight=1)
 
         self._add_file_row(
@@ -559,8 +704,8 @@ class LMSMigrationUI:
         )
         self.run_audit_btn.grid(row=1, column=2, sticky="e", pady=3)
 
-        reference = ttk.LabelFrame(main, text="4) Reference Docs Audit (Optional)", padding=10)
-        reference.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        reference = ttk.LabelFrame(self.optional_tools_frame, text="4) Reference Docs Audit (Optional)", padding=10)
+        reference.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         reference.columnconfigure(1, weight=1)
 
         self._add_file_row(
@@ -602,8 +747,45 @@ class LMSMigrationUI:
         )
         self.run_reference_audit_btn.grid(row=4, column=2, sticky="e", pady=(6, 0))
 
-        canvas = ttk.LabelFrame(main, text="5) Canvas Import Issues Export (Optional)", padding=10)
-        canvas.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        visual = ttk.LabelFrame(self.optional_tools_frame, text="5) Visual HTML Audit (Optional)", padding=10)
+        visual.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        visual.columnconfigure(1, weight=1)
+        self._add_file_row(
+            parent=visual,
+            row=0,
+            label="Original D2L ZIP",
+            variable=self.visual_original_zip_var,
+            button_text="Browse ZIP",
+            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")],
+        )
+        self._add_file_row(
+            parent=visual,
+            row=1,
+            label="Converted canvas-ready ZIP",
+            variable=self.visual_converted_zip_var,
+            button_text="Browse ZIP",
+            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")],
+        )
+        self._add_file_row(
+            parent=visual,
+            row=2,
+            label="Visual audit JSON output",
+            variable=self.visual_audit_output_var,
+            button_text="Save As",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            save_mode=True,
+        )
+        self.run_visual_audit_btn = ttk.Button(
+            visual,
+            text="Run Visual Audit",
+            command=self._run_visual_audit_clicked,
+        )
+        self.run_visual_audit_btn.grid(row=3, column=2, sticky="e", pady=(6, 0))
+
+        self._apply_optional_tools_visibility()
+
+        canvas = ttk.LabelFrame(main, text="6) Canvas Post-Import Tools", padding=10)
+        canvas.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         canvas.columnconfigure(1, weight=1)
 
         ttk.Label(canvas, text="Canvas base URL").grid(row=0, column=0, sticky="w", pady=3)
@@ -687,66 +869,82 @@ class LMSMigrationUI:
         )
         self.run_ab_variant_cycle_btn.grid(row=0, column=3, sticky="e", padx=(12, 0))
 
+        canvas_secondary_actions = ttk.Frame(self.canvas_advanced_frame)
+        canvas_secondary_actions.grid(row=5, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        self.fetch_canvas_imports_btn = ttk.Button(
+            canvas_secondary_actions,
+            text="Fetch Imports",
+            command=self._fetch_canvas_imports_clicked,
+        )
+        self.fetch_canvas_imports_btn.grid(row=0, column=0, padx=(0, 8))
+        self.export_canvas_issues_btn = ttk.Button(
+            canvas_secondary_actions,
+            text="Export Issues JSON",
+            command=self._export_canvas_issues_clicked,
+        )
+        self.export_canvas_issues_btn.grid(row=0, column=1, padx=(0, 8))
+        self.build_fix_checklist_btn = ttk.Button(
+            canvas_secondary_actions,
+            text="Build Fix Checklist",
+            command=self._build_fix_checklist_clicked,
+        )
+        self.build_fix_checklist_btn.grid(row=0, column=2, padx=(0, 8))
+        self.snapshot_canvas_course_btn = ttk.Button(
+            canvas_secondary_actions,
+            text="Snapshot Course",
+            command=self._snapshot_canvas_course_clicked,
+        )
+        self.snapshot_canvas_course_btn.grid(row=0, column=3)
+
         canvas_actions = ttk.Frame(canvas)
         canvas_actions.grid(row=5, column=0, columnspan=3, sticky="e", pady=(8, 0))
+        self.run_full_post_import_btn = ttk.Button(
+            canvas_actions,
+            text="Run Full Post-Import",
+            command=self._run_full_post_import_clicked,
+        )
+        self.run_full_post_import_btn.grid(row=0, column=0, padx=(0, 8))
         self.run_post_import_pipeline_btn = ttk.Button(
             canvas_actions,
             text="Run Post-Import Pipeline",
             command=self._run_post_import_pipeline_clicked,
         )
-        self.run_post_import_pipeline_btn.grid(row=0, column=0, padx=(0, 8))
-        self.fetch_canvas_imports_btn = ttk.Button(
-            canvas_actions,
-            text="Fetch Imports",
-            command=self._fetch_canvas_imports_clicked,
-        )
-        self.fetch_canvas_imports_btn.grid(row=0, column=1, padx=(0, 8))
-        self.export_canvas_issues_btn = ttk.Button(
-            canvas_actions,
-            text="Export Issues JSON",
-            command=self._export_canvas_issues_clicked,
-        )
-        self.export_canvas_issues_btn.grid(row=0, column=2)
+        self.run_post_import_pipeline_btn.grid(row=0, column=1, padx=(0, 8))
         self.auto_relink_btn = ttk.Button(
             canvas_actions,
             text="Auto-Relink Missing Links",
             command=self._auto_relink_missing_links_clicked,
         )
-        self.auto_relink_btn.grid(row=0, column=3, padx=(8, 0))
-        self.build_fix_checklist_btn = ttk.Button(
-            canvas_actions,
-            text="Build Fix Checklist",
-            command=self._build_fix_checklist_clicked,
-        )
-        self.build_fix_checklist_btn.grid(row=0, column=4, padx=(8, 0))
-        self.snapshot_canvas_course_btn = ttk.Button(
-            canvas_actions,
-            text="Snapshot Course",
-            command=self._snapshot_canvas_course_clicked,
-        )
-        self.snapshot_canvas_course_btn.grid(row=0, column=5, padx=(8, 0))
+        self.auto_relink_btn.grid(row=0, column=2, padx=(8, 0))
         self.live_link_audit_btn = ttk.Button(
             canvas_actions,
             text="Live Link Audit",
             command=self._run_live_link_audit_clicked,
         )
-        self.live_link_audit_btn.grid(row=0, column=6, padx=(8, 0))
+        self.live_link_audit_btn.grid(row=0, column=3, padx=(8, 0))
         ttk.Checkbutton(
             canvas_actions,
             text="Apply Safe Fixes",
             variable=self.live_audit_apply_safe_fixes_var,
-        ).grid(row=0, column=7, padx=(8, 0))
+        ).grid(row=0, column=4, padx=(8, 0))
         self._apply_canvas_advanced_visibility()
 
         log_frame = ttk.LabelFrame(main, text="Run Log", padding=10)
-        log_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
+        log_frame.rowconfigure(1, weight=1)
+
+        log_toolbar = ttk.Frame(log_frame)
+        log_toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        log_toolbar.columnconfigure(0, weight=1)
+        ttk.Label(log_toolbar, textvariable=self.status_text_var).grid(row=0, column=0, sticky="w")
+        self.clear_log_btn = ttk.Button(log_toolbar, text="Clear Log", command=self._clear_log_clicked)
+        self.clear_log_btn.grid(row=0, column=1, sticky="e")
 
         self.log_text = tk.Text(log_frame, wrap="word", height=18)
-        self.log_text.grid(row=0, column=0, sticky="nsew")
+        self.log_text.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid(row=1, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scroll.set)
 
         self._log("Ready. Select a D2L zip and click Run Migration.")
@@ -843,17 +1041,28 @@ class LMSMigrationUI:
         self.log_text.insert("end", f"{text}\n")
         self.log_text.see("end")
 
+    def _clear_log_clicked(self) -> None:
+        self.log_text.delete("1.0", "end")
+        self._log("Log cleared.")
+
     def _set_busy(self, busy: bool) -> None:
         self.is_busy = busy
         state = "disabled" if busy else "normal"
         self.input_zip_combo.configure(state=state)
         self.run_migration_btn.configure(state=state)
         self.run_full_pipeline_btn.configure(state=state)
+        self.run_full_post_import_btn.configure(state=state)
         self.policy_profile_combo.configure(state="disabled" if busy else "readonly")
+        self.accordion_handling_combo.configure(state="disabled" if busy else "readonly")
+        self.template_overlay_use_alias_map_check.configure(state=state)
+        self.enable_template_overlay_check.configure(state=state)
+        self.template_module_structure_check.configure(state=state)
+        self.template_visual_standards_check.configure(state=state)
         self.build_summary_btn.configure(state=state)
         self.copy_summary_btn.configure(state=state if self.latest_safe_summary else "disabled")
         self.run_audit_btn.configure(state=state)
         self.run_reference_audit_btn.configure(state=state)
+        self.run_visual_audit_btn.configure(state=state)
         self.run_post_import_pipeline_btn.configure(state=state)
         self.fetch_canvas_imports_btn.configure(state=state)
         self.export_canvas_issues_btn.configure(state=state)
@@ -863,12 +1072,15 @@ class LMSMigrationUI:
         self.live_link_audit_btn.configure(state=state)
         self.run_ab_variant_cycle_btn.configure(state=state)
         self.canvas_advanced_toggle_btn.configure(state=state)
+        self.optional_tools_toggle_btn.configure(state=state)
+        self.clear_log_btn.configure(state=state)
         self.ab_variant_combo.configure(state="disabled" if busy else "readonly")
 
     def _run_background(self, task_name: str, target: Callable[[], None]) -> None:
         if self.is_busy:
             return
         self._set_busy(True)
+        self.status_text_var.set(f"Status: Running - {task_name}")
         self._log(f"[START] {task_name}")
 
         def worker() -> None:
@@ -883,6 +1095,7 @@ class LMSMigrationUI:
 
     def _task_failed(self, task_name: str, exc: Exception, traceback_text: str) -> None:
         self._set_busy(False)
+        self.status_text_var.set(f"Status: Failed - {task_name}")
         self._log(f"[ERROR] {task_name}: {exc}")
         self._log(traceback_text.strip())
         messagebox.showerror("Task failed", f"{task_name} failed:\n{exc}")
@@ -890,6 +1103,7 @@ class LMSMigrationUI:
     def _task_succeeded(self, task_name: str) -> None:
         self._log(f"[DONE] {task_name}")
         self._set_busy(False)
+        self.status_text_var.set(f"Status: Idle (last: {task_name})")
 
     def _run_migration_clicked(self) -> None:
         self._maybe_apply_course_folder_defaults()
@@ -898,6 +1112,12 @@ class LMSMigrationUI:
         output_dir = Path(self.output_dir_var.get().strip())
         policy_profile_id = self.policy_profile_var.get().strip()
         best_practice_enforcer = bool(self.enable_best_practice_enforcer_var.get())
+        accordion_handling = self.accordion_handling_var.get().strip().lower() or "flatten"
+        apply_template_module_structure = bool(self.template_module_structure_var.get())
+        apply_template_visual_standards = bool(self.template_visual_standards_var.get())
+        template_overlay_enabled = bool(self.enable_template_overlay_var.get())
+        template_package: Path | None = None
+        template_alias_map_json: Path | None = None
 
         if not input_zip.exists():
             messagebox.showwarning("Missing input", "Select a valid D2L export ZIP.")
@@ -908,6 +1128,25 @@ class LMSMigrationUI:
         if not self.policy_profiles_path.exists():
             messagebox.showwarning("Missing profiles", f"Policy profiles file not found: {self.policy_profiles_path}")
             return
+        if template_overlay_enabled:
+            template_package_text = self.template_package_var.get().strip()
+            if not template_package_text:
+                messagebox.showwarning("Missing template package", "Select a template package (.imscc) or disable Template Overlay.")
+                return
+            template_package = Path(template_package_text)
+            if not template_package.exists():
+                messagebox.showwarning("Missing template package", f"Template package does not exist: {template_package}")
+                return
+            if self.template_overlay_use_alias_map_var.get():
+                alias_map_text = self.template_alias_map_var.get().strip()
+                if alias_map_text:
+                    alias_path = Path(alias_map_text)
+                    if not alias_path.exists():
+                        messagebox.showwarning("Missing alias map", f"Template alias map JSON does not exist: {alias_path}")
+                        return
+                    template_alias_map_json = alias_path
+        if not self.visual_original_zip_var.get().strip():
+            self.visual_original_zip_var.set(str(input_zip))
         self._remember_sinclair_course_code()
         self._remember_input_zip_path(str(input_zip))
 
@@ -921,6 +1160,11 @@ class LMSMigrationUI:
                 policy_profiles_path=self.policy_profiles_path,
                 reference_audit_json=reference_audit_json,
                 best_practice_enforcer=best_practice_enforcer,
+                template_package=template_package,
+                template_alias_map_json=template_alias_map_json,
+                accordion_handling=accordion_handling,
+                apply_template_module_structure=apply_template_module_structure,
+                apply_template_visual_standards=apply_template_visual_standards,
             )
             self.root.after(0, lambda: self._handle_migration_result(result, reference_audit_json))
 
@@ -1047,6 +1291,245 @@ class LMSMigrationUI:
         self._log(f"Reference audit source: {reference_audit_json if reference_audit_json else 'none'}")
         self._task_succeeded("Run post-import pipeline")
 
+    def _run_full_post_import_clicked(self) -> None:
+        self._maybe_apply_course_folder_defaults()
+        self._remember_sinclair_course_code()
+        creds = self._get_canvas_credentials()
+        if creds is None:
+            return
+        base_url, course_id, token = creds
+
+        reference_audit_json = self._find_reference_audit_json()
+        selected_migration_id = self.canvas_migration_id_var.get().strip()
+
+        output_text = self.canvas_issues_output_var.get().strip()
+        if self._should_auto_reset_canvas_issues_output(output_text):
+            base_issues_path = self._default_canvas_issues_output_path(course_id)
+            self.canvas_issues_output_var.set(str(base_issues_path))
+        else:
+            base_issues_path = Path(output_text)
+        output_dir = base_issues_path.parent
+
+        variant = self.ab_variant_var.get().strip().upper() or "A"
+        artifact_prefix = self._ab_artifact_prefix(variant)
+        normalized_output_dir = str(output_dir).replace("\\", "/").lower()
+        if "/ab-test/" in normalized_output_dir:
+            pre_issues_path = output_dir / f"{artifact_prefix}.canvas-migration-issues-pre.json"
+            post_issues_path = output_dir / f"{artifact_prefix}.canvas-migration-issues-post.json"
+            relink_report_path = output_dir / f"{artifact_prefix}.canvas-auto-relink-report.json"
+            live_audit_json = output_dir / f"{artifact_prefix}.canvas-live-link-audit.json"
+        else:
+            pre_issues_path = output_dir / "canvas-migration-issues-pre.json"
+            post_issues_path = output_dir / "canvas-migration-issues-post.json"
+            relink_report_path = output_dir / "canvas-auto-relink-report.json"
+            live_audit_json = output_dir / "canvas-live-link-audit.json"
+        live_audit_md = live_audit_json.with_suffix(".md")
+        live_audit_csv = live_audit_json.with_suffix(".csv")
+
+        include_auto_relink = bool(self.ab_include_auto_relink_var.get())
+        apply_safe_fixes = bool(self.live_audit_apply_safe_fixes_var.get())
+        alias_map_path = self._resolve_alias_map_path(show_warning=True)
+        if self.use_template_alias_map_var.get() and alias_map_path is None:
+            return
+
+        output_root_text = self.output_dir_var.get().strip()
+        output_root = Path(output_root_text) if output_root_text else (self._resolve_workspace_root() / "output")
+        manual_review_dirs = [output_dir, output_root]
+
+        update_actions: list[str] = []
+        if include_auto_relink:
+            update_actions.append("auto-relink missing page/file links")
+        if apply_safe_fixes:
+            update_actions.append("live-audit safe fixes")
+        if update_actions:
+            proceed = messagebox.askyesno(
+                "Confirm Canvas Updates",
+                "Full post-import will update Canvas content via: "
+                + ", ".join(update_actions)
+                + ".\n\nContinue?",
+            )
+            if not proceed:
+                return
+
+        def task() -> None:
+            self.root.after(0, lambda: self._log("[Full Post-Import] Exporting pre issues..."))
+            pre_payload = self._fetch_issues_and_build_checklist(
+                base_url=base_url,
+                course_id=course_id,
+                token=token,
+                issues_path=pre_issues_path,
+                selected_migration_id=selected_migration_id,
+                force_latest_migration=True,
+                reference_audit_json=reference_audit_json,
+                manual_review_search_dirs=manual_review_dirs,
+            )
+            migration_id = str(pre_payload.get("migration_id", "")).strip()
+
+            relink_report = None
+            relink_error = ""
+            if include_auto_relink:
+                try:
+                    self.root.after(0, lambda: self._log("[Full Post-Import] Running auto-relink..."))
+                    report_path = auto_relink_missing_links(
+                        base_url=base_url,
+                        course_id=course_id,
+                        token=token,
+                        issues_json_path=pre_issues_path,
+                        output_json_path=relink_report_path,
+                        alias_map_json_path=alias_map_path,
+                        dry_run=False,
+                    )
+                    relink_report = json.loads(report_path.read_text(encoding="utf-8"))
+                except Exception as exc:  # pragma: no cover - network/runtime dependent
+                    relink_error = str(exc)
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            f"[WARN] [Full Post-Import] Auto-relink failed; continuing with live audit + post export: {exc}"
+                        ),
+                    )
+            else:
+                self.root.after(0, lambda: self._log("[Full Post-Import] Auto-relink skipped by toggle."))
+
+            live_report: dict = {}
+            live_json_path = live_audit_json
+            live_md_path = live_audit_md
+            live_csv_path = live_audit_csv
+            live_error = ""
+            try:
+                self.root.after(0, lambda: self._log("[Full Post-Import] Running live link audit..."))
+                live_json_path, live_md_path, live_csv_path = run_live_link_audit(
+                    base_url=base_url,
+                    course_id=course_id,
+                    token=token,
+                    output_json_path=live_audit_json,
+                    output_markdown_path=live_audit_md,
+                    output_csv_path=live_audit_csv,
+                    apply_safe_fixes=apply_safe_fixes,
+                    alias_map_json_path=alias_map_path,
+                )
+                live_report = json.loads(live_json_path.read_text(encoding="utf-8"))
+            except Exception as exc:  # pragma: no cover - network/runtime dependent
+                live_error = str(exc)
+                self.root.after(
+                    0,
+                    lambda: self._log(
+                        f"[WARN] [Full Post-Import] Live audit failed; continuing with post export: {exc}"
+                    ),
+                )
+
+            self.root.after(0, lambda: self._log("[Full Post-Import] Exporting post issues..."))
+            post_payload = self._fetch_issues_and_build_checklist(
+                base_url=base_url,
+                course_id=course_id,
+                token=token,
+                issues_path=post_issues_path,
+                selected_migration_id=migration_id,
+                force_latest_migration=False,
+                reference_audit_json=reference_audit_json,
+                manual_review_search_dirs=manual_review_dirs,
+            )
+            canonical_issues_path: Path | None = None
+            post_issues_value = post_payload.get("issues_path")
+            if isinstance(post_issues_value, Path):
+                normalized_post_parent = str(post_issues_value.parent).replace("\\", "/").lower()
+                if "/ab-test/" not in normalized_post_parent and post_issues_value.name == "canvas-migration-issues-post.json":
+                    canonical_issues_path = post_issues_value.parent / "canvas-migration-issues.json"
+                    canonical_issues_path.write_text(
+                        post_issues_value.read_text(encoding="utf-8"),
+                        encoding="utf-8",
+                    )
+
+            payload = {
+                "pre": pre_payload,
+                "post": post_payload,
+                "relink_report": relink_report,
+                "relink_report_path": relink_report_path if include_auto_relink else None,
+                "relink_error": relink_error,
+                "live_audit_json_path": live_json_path,
+                "live_audit_md_path": live_md_path,
+                "live_audit_csv_path": live_csv_path,
+                "live_audit_report": live_report,
+                "live_audit_error": live_error,
+                "canonical_issues_path": canonical_issues_path,
+            }
+            self.root.after(0, lambda: self._handle_full_post_import_result(payload))
+
+        self._run_background("Run full post-import pipeline", task)
+
+    def _handle_full_post_import_result(self, payload: dict) -> None:
+        pre = payload.get("pre", {})
+        post = payload.get("post", {})
+        relink_report = payload.get("relink_report")
+        relink_report_path = payload.get("relink_report_path")
+        relink_error = str(payload.get("relink_error", "")).strip()
+        live_audit_report = payload.get("live_audit_report", {})
+        live_audit_json_path = payload.get("live_audit_json_path")
+        live_audit_md_path = payload.get("live_audit_md_path")
+        live_audit_csv_path = payload.get("live_audit_csv_path")
+        live_audit_error = str(payload.get("live_audit_error", "")).strip()
+        canonical_issues_path = payload.get("canonical_issues_path")
+
+        pre_count = int(pre.get("issues_count", 0))
+        post_count = int(post.get("issues_count", 0))
+        migration_id = str(post.get("migration_id", pre.get("migration_id", ""))).strip()
+        if migration_id:
+            self.canvas_migration_id_var.set(migration_id)
+
+        post_issues_path = post.get("issues_path")
+        if isinstance(canonical_issues_path, Path):
+            self.canvas_issues_output_var.set(str(canonical_issues_path))
+        elif isinstance(post_issues_path, Path):
+            self.canvas_issues_output_var.set(str(post_issues_path))
+
+        self._log("Full post-import complete.")
+        self._log(f"Pre issues JSON: {pre.get('issues_path')}")
+        self._log(f"Post issues JSON: {post.get('issues_path')}")
+        if isinstance(canonical_issues_path, Path):
+            self._log(f"Canonical issues JSON: {canonical_issues_path}")
+        self._log(f"Issue count delta: {pre_count} -> {post_count}")
+        if relink_report_path:
+            self._log(f"Auto-relink report JSON: {relink_report_path}")
+        if isinstance(relink_report, dict):
+            summary = relink_report.get("summary", {})
+            self._log(
+                "Auto-relink summary: "
+                f"pages_updated={summary.get('pages_updated', 0)} | "
+                f"total_rewrites={summary.get('total_rewrites', 0)} | "
+                f"alias_rewrites={summary.get('total_alias_rewrites', 0)} | "
+                f"unresolved_local_refs={summary.get('total_unresolved_local_refs', 0)}"
+            )
+        if relink_error:
+            self._log(f"[WARN] Auto-relink error: {relink_error}")
+
+        self._log(f"Live audit JSON: {live_audit_json_path}")
+        self._log(f"Live audit Markdown: {live_audit_md_path}")
+        self._log(f"Live audit CSV: {live_audit_csv_path}")
+        if isinstance(live_audit_report, dict):
+            counts = live_audit_report.get("counts", {})
+            safe_fix = live_audit_report.get("safe_fix_summary", {})
+            self._log(
+                "Live audit summary: "
+                f"findings={counts.get('findings_total', 0)} | "
+                f"pages={counts.get('pages', 0)} | "
+                f"assignments={counts.get('assignments', 0)} | "
+                f"discussions={counts.get('discussions', 0)} | "
+                f"announcements={counts.get('announcements', 0)}"
+            )
+            self._log(
+                "Live audit fixes: "
+                f"pages_updated={safe_fix.get('pages_updated', 0)} | "
+                f"rewrites={safe_fix.get('total_rewrites', 0)} | "
+                f"alias_rewrites={safe_fix.get('total_alias_rewrites', 0)} | "
+                f"unresolved_local_refs={safe_fix.get('total_unresolved_local_refs', 0)}"
+            )
+        if live_audit_error:
+            self._log(f"[WARN] Live audit error: {live_audit_error}")
+
+        self._log(f"Fix checklist CSV: {post.get('checklist_csv')}")
+        self._log(f"Fix checklist Markdown: {post.get('checklist_md')}")
+        self._task_succeeded("Run full post-import pipeline")
+
     def _run_ab_variant_cycle_clicked(self) -> None:
         self._maybe_apply_course_folder_defaults()
         self._remember_sinclair_course_code()
@@ -1167,6 +1650,8 @@ class LMSMigrationUI:
     ) -> None:
         self.report_json_var.set(str(result.report_json))
         self.safe_summary_path_var.set(str(safe_summary_path))
+        self.visual_converted_zip_var.set(str(result.output_zip))
+        self.visual_audit_output_var.set(str(_default_visual_audit_json_path(result.output_zip)))
         self.latest_safe_summary = safe_summary
 
         self._log(f"Canvas-ready zip: {result.output_zip}")
@@ -1174,7 +1659,12 @@ class LMSMigrationUI:
         self._log(f"Migration report Markdown: {result.report_markdown}")
         self._log(f"Manual review CSV: {result.manual_review_csv}")
         self._log(f"Preflight checklist: {result.preflight_checklist}")
+        if result.template_overlay_report_json is not None:
+            self._log(f"Template overlay report JSON: {result.template_overlay_report_json}")
         self._log(f"Policy profile used: {result.policy_profile_id}")
+        self._log(f"Accordion handling: {self.accordion_handling_var.get()}")
+        self._log(f"Template module structure: {self.template_module_structure_var.get()}")
+        self._log(f"Template visual standards: {self.template_visual_standards_var.get()}")
         self._log(f"Best-practice enforcer: {self.enable_best_practice_enforcer_var.get()}")
         self._log(f"Reference alignment input: {reference_audit_json if reference_audit_json else 'none'}")
         self._log(f"Safe summary: {safe_summary_path}")
@@ -1298,6 +1788,66 @@ class LMSMigrationUI:
         self._log(f"Reference audit Markdown: {md_path}")
         self._task_succeeded("Run reference docs audit")
 
+    def _run_visual_audit_clicked(self) -> None:
+        original_zip = Path(self.visual_original_zip_var.get().strip())
+        converted_zip = Path(self.visual_converted_zip_var.get().strip())
+        output_json_text = self.visual_audit_output_var.get().strip()
+
+        if not original_zip.exists():
+            messagebox.showwarning("Missing original ZIP", "Select a valid original D2L export ZIP.")
+            return
+        if not converted_zip.exists():
+            messagebox.showwarning("Missing converted ZIP", "Select a valid converted canvas-ready ZIP.")
+            return
+
+        output_json = Path(output_json_text) if output_json_text else _default_visual_audit_json_path(converted_zip)
+        output_markdown = output_json.with_suffix(".md")
+
+        def task() -> None:
+            report = build_visual_audit(
+                original_zip=original_zip,
+                converted_zip=converted_zip,
+            )
+            output_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
+            summary = report.get("summary", {})
+            markdown_lines = [
+                "# Visual Audit",
+                "",
+                "## Summary",
+                "",
+                f"- Files scanned: {summary.get('files_scanned', 0)}",
+                f"- Duplicate title/first-block files: {summary.get('files_with_duplicate_title_first_block', 0)}",
+                f"- Remaining shared template refs: {summary.get('files_with_remaining_shared_template_refs', 0)}",
+                f"- Remaining title tags: {summary.get('files_with_remaining_title_tags', 0)}",
+                f"- Nonstandard divider files: {summary.get('files_with_nonstandard_hr', 0)}",
+                f"- Icon-size anomaly files: {summary.get('files_with_icon_size_anomalies', 0)}",
+                f"- Accordion cards (original): {summary.get('total_original_accordion_cards', 0)}",
+                f"- Details blocks (converted): {summary.get('total_converted_details_blocks', 0)}",
+                f"- MathML expressions (original): {summary.get('total_original_mathml', 0)}",
+                f"- MathML expressions (converted): {summary.get('total_converted_mathml', 0)}",
+                f"- Remaining WIRIS annotations: {summary.get('total_converted_wiris_annotations', 0)}",
+                "",
+            ]
+            output_markdown.write_text("\n".join(markdown_lines), encoding="utf-8")
+            self.root.after(0, lambda: self._handle_visual_audit_result(output_json, output_markdown, summary))
+
+        self._run_background("Run visual HTML audit", task)
+
+    def _handle_visual_audit_result(self, json_path: Path, md_path: Path, summary: dict) -> None:
+        self.visual_audit_output_var.set(str(json_path))
+        self._log(f"Visual audit JSON: {json_path}")
+        self._log(f"Visual audit Markdown: {md_path}")
+        self._log(
+            "Visual audit summary: "
+            f"files={summary.get('files_scanned', 0)} | "
+            f"dup_title={summary.get('files_with_duplicate_title_first_block', 0)} | "
+            f"shared_refs={summary.get('files_with_remaining_shared_template_refs', 0)} | "
+            f"title_tags={summary.get('files_with_remaining_title_tags', 0)} | "
+            f"accordion_cards={summary.get('total_original_accordion_cards', 0)} | "
+            f"details_blocks={summary.get('total_converted_details_blocks', 0)}"
+        )
+        self._task_succeeded("Run visual HTML audit")
+
     def _get_canvas_credentials(self) -> tuple[str, str, str] | None:
         base_url = self.canvas_base_url_var.get().strip()
         course_id = self.canvas_course_id_var.get().strip()
@@ -1343,8 +1893,7 @@ class LMSMigrationUI:
             self._task_succeeded("Fetch Canvas content migrations")
             return
 
-        latest = migrations[0]
-        latest_id = str(latest.get("id", "")).strip()
+        latest_id = self._pick_latest_migration_id(migrations)
         self.canvas_migration_id_var.set(latest_id)
         self._maybe_sync_canvas_issues_output_path()
 

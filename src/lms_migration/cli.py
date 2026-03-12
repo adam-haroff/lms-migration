@@ -51,6 +51,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable safe best-practice enforcement during HTML preprocessing.",
     )
+    parser.add_argument(
+        "--template-package",
+        type=Path,
+        default=None,
+        help="Optional Canvas template export package (.imscc) used for template asset overlay mapping.",
+    )
+    parser.add_argument(
+        "--template-alias-map-json",
+        type=Path,
+        default=None,
+        help="Optional alias map JSON used with --template-package for legacy-to-template basename mapping.",
+    )
+    parser.add_argument(
+        "--accordion-handling",
+        type=str,
+        choices=("none", "details", "flatten"),
+        default="flatten",
+        help="How to handle legacy Bootstrap accordions during conversion.",
+    )
+    parser.add_argument(
+        "--no-template-module-structure",
+        action="store_true",
+        help="Disable template-style module structuring (Overview/Activities/Review + module item naming).",
+    )
+    parser.add_argument(
+        "--no-template-visual-standards",
+        action="store_true",
+        help="Disable template visual normalization (icon+heading layout, icon sizing/labels, heading color hints).",
+    )
     return parser
 
 
@@ -68,6 +97,10 @@ def main() -> None:
         parser.error(f"Policy profiles file does not exist: {args.policy_profiles}")
     if args.reference_audit_json is not None and not args.reference_audit_json.exists():
         parser.error(f"Reference audit file does not exist: {args.reference_audit_json}")
+    if args.template_package is not None and not args.template_package.exists():
+        parser.error(f"Template package does not exist: {args.template_package}")
+    if args.template_alias_map_json is not None and not args.template_alias_map_json.exists():
+        parser.error(f"Template alias map JSON does not exist: {args.template_alias_map_json}")
 
     try:
         result = run_migration(
@@ -78,6 +111,11 @@ def main() -> None:
             policy_profiles_path=args.policy_profiles,
             reference_audit_json=args.reference_audit_json,
             best_practice_enforcer=bool(args.best_practice_enforcer),
+            template_package=args.template_package,
+            template_alias_map_json=args.template_alias_map_json,
+            accordion_handling=args.accordion_handling,
+            apply_template_module_structure=not bool(args.no_template_module_structure),
+            apply_template_visual_standards=not bool(args.no_template_visual_standards),
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -87,6 +125,8 @@ def main() -> None:
     print(f"Markdown report: {result.report_markdown}")
     print(f"Manual review CSV: {result.manual_review_csv}")
     print(f"Preflight checklist: {result.preflight_checklist}")
+    if result.template_overlay_report_json is not None:
+        print(f"Template overlay report JSON: {result.template_overlay_report_json}")
     print(f"Policy profile: {result.policy_profile_id}")
 
 
