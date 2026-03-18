@@ -1,0 +1,119 @@
+{
+  "folders": [
+    {
+      "name": "lms-migration",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "[python]": {
+      "editor.defaultFormatter": "ms-python.black-formatter",
+      "editor.formatOnSave": true
+    },
+    "editor.rulers": [100],
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/*.pyc": true,
+      "**/.DS_Store": true,
+      "**/lms_migration_pilot.egg-info": true
+    },
+    "search.exclude": {
+      "**/output": true,
+      "**/resources/incoming": true,
+      "**/resources/examples": true,
+      "**/resources/training-corpus-v2": true
+    },
+    "python.testing.pytestEnabled": true,
+    "python.testing.pytestArgs": ["tests"],
+    "python.analysis.extraPaths": ["src"],
+    "ruff.enable": true,
+    "ruff.organizeImports": true
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "ms-python.black-formatter",
+      "charliermarsh.ruff",
+      "ms-python.mypy-type-checker",
+      "github.copilot",
+      "github.copilot-chat",
+      "redhat.vscode-yaml",
+      "mechatroner.rainbow-csv"
+    ]
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "Migrate ACC-2321 (pre-import)",
+        "type": "shell",
+        "command": "source .venv/bin/activate && lms-migrate resources/incoming/acc-2321/before/d2l-export.zip --rules rules/default_rules.json --policy-profile strict --best-practice-enforcer --template-package resources/examples/template/elearn-standard-template-export-20260316.imscc --template-alias-map-json rules/template_asset_aliases.json --output-dir output/acc-2321",
+        "group": "build",
+        "presentation": { "reveal": "always", "panel": "new" },
+        "problemMatcher": []
+      },
+      {
+        "label": "Launch UI",
+        "type": "shell",
+        "command": "source .venv/bin/activate && lms-migrate-ui",
+        "group": "build",
+        "presentation": { "reveal": "always", "panel": "shared" },
+        "problemMatcher": []
+      },
+      {
+        "label": "Run tests",
+        "type": "shell",
+        "command": "source .venv/bin/activate && python -m pytest tests/ -v",
+        "group": {
+          "kind": "test",
+          "isDefault": true
+        },
+        "presentation": { "reveal": "always", "panel": "shared" },
+        "problemMatcher": []
+      },
+      {
+        "label": "Run reference audit",
+        "type": "shell",
+        "command": "source .venv/bin/activate && lms-reference-audit --output-dir output/reference_audit",
+        "group": "build",
+        "presentation": { "reveal": "always", "panel": "shared" },
+        "problemMatcher": []
+      }
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Debug: Migrate ACC-2321",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "lms_migration.cli",
+        "args": [
+          "resources/incoming/acc-2321/before/d2l-export.zip",
+          "--rules", "rules/default_rules.json",
+          "--policy-profile", "strict",
+          "--best-practice-enforcer",
+          "--template-package", "resources/examples/template/elearn-standard-template-export-20260316.imscc",
+          "--template-alias-map-json", "rules/template_asset_aliases.json",
+          "--output-dir", "output/acc-2321"
+        ],
+        "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal"
+      },
+      {
+        "name": "Debug: UI",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "lms_migration.ui",
+        "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal"
+      }
+    ]
+  }
+}

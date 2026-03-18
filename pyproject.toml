@@ -8,6 +8,15 @@ dependencies = [
   "openpyxl>=3.1.2"
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "black>=24.0",
+  "ruff>=0.4",
+  "mypy>=1.9",
+]
+
 [project.scripts]
 lms-migrate = "lms_migration.cli:main"
 lms-best-practices-audit = "lms_migration.best_practices:main"

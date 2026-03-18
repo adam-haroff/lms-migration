@@ -124,6 +124,42 @@ _D2L_STYLE_TOKEN_RE = re.compile(
     r"(?:^|;)\s*--d2l-[a-z0-9-]+\s*:\s*[^;]+",
     flags=re.IGNORECASE,
 )
+# CSS property equivalents for Bootstrap utility classes that carry visible layout
+# intent (float, alignment, background, spacing).  Applied as inline styles before
+# the class tokens are stripped so their visual effect is preserved in Canvas.
+_BOOTSTRAP_UTILITY_CSS_MAP: dict[str, dict[str, str]] = {
+    "float-left":  {"float": "left",  "margin-right": "12px", "margin-bottom": "8px"},
+    "float-right": {"float": "right", "margin-left":  "12px", "margin-bottom": "8px"},
+    "text-center": {"text-align": "center"},
+    "text-right":  {"text-align": "right"},
+    "bg-light":    {"background-color": "#f8f9fa", "padding": "0.75rem"},
+    "bg-white":    {"background-color": "#ffffff"},
+    "w-100":       {"width": "100%"},
+    "p-0": {"padding": "0"},
+    "p-1": {"padding": "0.25rem"},
+    "p-2": {"padding": "0.5rem"},
+    "p-3": {"padding": "1rem"},
+    "p-4": {"padding": "1.5rem"},
+    "p-5": {"padding": "3rem"},
+    "mt-1": {"margin-top": "0.25rem"},
+    "mt-2": {"margin-top": "0.5rem"},
+    "mt-3": {"margin-top": "1rem"},
+    "mb-1": {"margin-bottom": "0.25rem"},
+    "mb-2": {"margin-bottom": "0.5rem"},
+    "mb-3": {"margin-bottom": "1rem"},
+    "py-1": {"padding-top": "0.25rem",  "padding-bottom": "0.25rem"},
+    "py-2": {"padding-top": "0.5rem",   "padding-bottom": "0.5rem"},
+    "py-3": {"padding-top": "1rem",     "padding-bottom": "1rem"},
+    "px-1": {"padding-left": "0.25rem", "padding-right": "0.25rem"},
+    "px-2": {"padding-left": "0.5rem",  "padding-right": "0.5rem"},
+    "px-3": {"padding-left": "1rem",    "padding-right": "1rem"},
+}
+# Accordion card-header text values that are generic D2L template placeholders
+# rather than meaningful section titles.  In flatten mode these are silently
+# suppressed so no spurious headings appear in the converted document.
+_ACCORDION_PLACEHOLDER_TITLES: frozenset[str] = frozenset({
+    "section", "item", "content", "note", "card", "panel", "block", "unit",
+})
 _DISPLAY_EQUATION_BLOCK_RE = re.compile(
     r"<(?P<tag>p|div)\b(?P<attrs>[^>]*)>\s*"
     r"(?P<body>(?:<span\b[^>]*>\s*)?(?:<img\b[^>]*>|<math\b[^>]*>.*?</math>)(?:\s*</span>)?)\s*"
@@ -740,18 +776,25 @@ def _convert_bootstrap_accordion_cards(content: str, mode: str, *, alignment: st
         header_html = match.group("header").strip()
         body_html = match.group("body").strip()
         title_text = _extract_accordion_title_text(header_html)
-        title_html = html.escape(title_text, quote=False) or "Section"
+        title_html = html.escape(title_text, quote=False)
 
         converted += 1
         if normalized_mode == "details":
+            summary_label = title_html or "Section"
             return (
                 f'<details class="migration-accordion" style="{_accordion_details_style()}">\n'
-                f'  <summary style="{_accordion_summary_style(alignment)}">{title_html}</summary>\n'
+                f'  <summary style="{_accordion_summary_style(alignment)}">{summary_label}</summary>\n'
                 f'  <div class="migration-accordion__panel" style="{_accordion_panel_style()}">{body_html}</div>\n'
                 f"</details>"
             )
 
-        return f"<h3>{title_html}</h3>\n<div>{body_html}</div>"
+        # Flatten mode: suppress the heading when the title is empty or is a
+        # generic D2L template placeholder such as "Section" so that no spurious
+        # headings appear in the converted document.
+        normalized_title = (title_text or "").lower().strip()
+        if title_html and normalized_title not in _ACCORDION_PLACEHOLDER_TITLES:
+            return f"<h3>{title_html}</h3>\n<div>{body_html}</div>"
+        return f"<div>{body_html}</div>"
 
     updated = _ACCORDION_CARD_PATTERN.sub(replace_card, content)
     return updated, converted
@@ -1046,6 +1089,40 @@ def apply_canvas_sanitizer(
 
     if applied_policy.sanitize_brightspace_assets:
         if applied_policy.strip_bootstrap_grid_classes:
+            # Pass 1 — before removing Bootstrap utility class tokens, promote
+            # those that carry visible layout intent to inline CSS so the visual
+            # effect (float, text-align, background, padding) is preserved.
+            _full_tag_pat = re.compile(r"<[a-z][a-z0-9]*\b[^>]*>", flags=re.IGNORECASE)
+            promoted_utility_css = 0
+
+            def _promote_utility_cls(m: re.Match[str]) -> str:
+                nonlocal promoted_utility_css
+                tag = m.group(0)
+                class_text = _extract_attr_value(tag, "class") or ""
+                if not class_text:
+                    return tag
+                css_props: dict[str, str] = {}
+                for token in class_text.split():
+                    props = _BOOTSTRAP_UTILITY_CSS_MAP.get(token)
+                    if props:
+                        css_props.update(props)
+                if not css_props:
+                    return tag
+                updated_tag, changed = _merge_inline_style(tag, css_props)
+                if changed:
+                    promoted_utility_css += 1
+                return updated_tag
+
+            updated = _full_tag_pat.sub(_promote_utility_cls, updated)
+            if promoted_utility_css:
+                applied.append(
+                    AppliedChange(
+                        category="sanitizer",
+                        description="Promoted Bootstrap utility classes to inline CSS to preserve visual layout in Canvas",
+                        count=promoted_utility_css,
+                    )
+                )
+            # Pass 2 — strip Bootstrap grid / utility / legacy template class tokens.
             class_attr_pattern = re.compile(
                 r'(?P<prefix>\sclass\s*=\s*)(?P<quote>["\'])(?P<classes>[^"\']*)(?P=quote)',
                 flags=re.IGNORECASE,
@@ -1301,17 +1378,32 @@ def apply_canvas_sanitizer(
             )
         )
 
-    # Remove empty spacer paragraphs that create odd vertical gaps after import.
-    empty_paragraph_pattern = re.compile(
-        r"<p\b[^>]*>\s*(?:&nbsp;|<br\s*/?>|\s|<span\b[^>]*>\s*(?:&nbsp;|<br\s*/?>|\s)*</span>)*</p>",
+    # Collapse *consecutive runs* of 3 or more empty spacer paragraphs to a
+    # single spacer.  Isolated or paired spacers are preserved because they are
+    # often intentional breathing room between content sections.  Only large
+    # runs (common in D2L Brightspace template pages) are collapsed.
+    _empty_p_src = (
+        r"(?:<p\b[^>]*>\s*(?:&nbsp;|<br\s*/?>|\s|"
+        r"<span\b[^>]*>\s*(?:&nbsp;|<br\s*/?>|\s)*</span>)*</p>)"
+    )
+    empty_para_run_pattern = re.compile(
+        rf"(?:{_empty_p_src}\s*){{3,}}",
         flags=re.IGNORECASE,
     )
-    updated, removed_empty_paragraphs = empty_paragraph_pattern.subn("", updated)
+    removed_empty_paragraphs = 0
+
+    def _collapse_empty_para_run(m: re.Match[str]) -> str:
+        nonlocal removed_empty_paragraphs
+        count = len(re.findall(r"<p\b", m.group(0), flags=re.IGNORECASE))
+        removed_empty_paragraphs += count - 1
+        return "<p>&nbsp;</p>\n"
+
+    updated = empty_para_run_pattern.sub(_collapse_empty_para_run, updated)
     if removed_empty_paragraphs:
         applied.append(
             AppliedChange(
                 category="sanitizer",
-                description="Removed empty spacer paragraphs to reduce Canvas layout drift",
+                description="Collapsed excessive empty-spacer paragraph runs (3+) to a single spacer to reduce Canvas layout drift while preserving intentional spacing",
                 count=removed_empty_paragraphs,
             )
         )
@@ -1429,14 +1521,50 @@ def apply_canvas_sanitizer(
 
     image_spacing_attr_pattern = re.compile(r"<img\b[^>]*>", flags=re.IGNORECASE)
     removed_image_spacing_attrs = 0
+    layout_attrs_converted = 0
 
     def strip_legacy_image_attrs(match: re.Match[str]) -> str:
         nonlocal removed_image_spacing_attrs
+        nonlocal layout_attrs_converted
         tag = match.group(0)
+        updated_tag = tag
+
+        # Before stripping deprecated HTML4 layout attributes, convert them to
+        # equivalent inline CSS so that image float and spacing layout is preserved
+        # in Canvas.  align → float/margin, hspace → margin-left/right,
+        # vspace → margin-top/bottom.
+        css_additions: dict[str, str] = {}
+
+        align_val = (_extract_attr_value(updated_tag, "align") or "").lower().strip()
+        if align_val == "left":
+            css_additions["float"] = "left"
+            css_additions.setdefault("margin", "0 12px 8px 0")
+        elif align_val == "right":
+            css_additions["float"] = "right"
+            css_additions.setdefault("margin", "0 0 8px 12px")
+        elif align_val == "center":
+            css_additions["display"] = "block"
+            css_additions["margin"] = "0 auto"
+
+        hspace_raw = (_extract_attr_value(updated_tag, "hspace") or "").strip()
+        if hspace_raw.isdigit() and int(hspace_raw) > 0:
+            css_additions.setdefault("margin-left",  f"{hspace_raw}px")
+            css_additions.setdefault("margin-right", f"{hspace_raw}px")
+
+        vspace_raw = (_extract_attr_value(updated_tag, "vspace") or "").strip()
+        if vspace_raw.isdigit() and int(vspace_raw) > 0:
+            css_additions.setdefault("margin-top",    f"{vspace_raw}px")
+            css_additions.setdefault("margin-bottom", f"{vspace_raw}px")
+
+        if css_additions:
+            updated_tag, css_changed = _merge_inline_style(updated_tag, css_additions)
+            if css_changed:
+                layout_attrs_converted += 1
+
         updated_tag, removed = re.subn(
             r"\s(?:align|border|hspace|vspace)\s*=\s*(?:([\"']).*?\1|[^\s>]+)",
             "",
-            tag,
+            updated_tag,
             flags=re.IGNORECASE | re.DOTALL,
         )
         if removed:
@@ -1444,12 +1572,84 @@ def apply_canvas_sanitizer(
         return updated_tag
 
     updated = image_spacing_attr_pattern.sub(strip_legacy_image_attrs, updated)
+    if layout_attrs_converted:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Converted deprecated image layout attributes (align/hspace/vspace) to inline CSS to preserve text-wrap and float layout",
+                count=layout_attrs_converted,
+            )
+        )
     if removed_image_spacing_attrs:
         applied.append(
             AppliedChange(
                 category="sanitizer",
-                description="Removed deprecated image spacing attributes that distort Canvas layout",
+                description="Removed deprecated image spacing attributes (align/border/hspace/vspace)",
                 count=removed_image_spacing_attrs,
+            )
+        )
+
+    # Ensure all content images scale responsively.  Add max-width: 100% and
+    # height: auto to any <img> that does not already carry a max-width style.
+    # Template asset icons are skipped here because the overlay pass already
+    # sets correct sizing on those.
+    img_responsive_pattern = re.compile(r"<img\b[^>]*>", flags=re.IGNORECASE)
+    images_made_responsive = 0
+
+    def _make_img_responsive(m: re.Match[str]) -> str:
+        nonlocal images_made_responsive
+        tag = m.group(0)
+        style_lower = (_extract_attr_value(tag, "style") or "").lower()
+        if "max-width" in style_lower:
+            return tag
+        src_lower = (_extract_attr_value(tag, "src") or "").lower()
+        if "templateassets/" in src_lower:
+            return tag
+        updated_tag, changed = _merge_inline_style(tag, {"max-width": "100%", "height": "auto"})
+        if changed:
+            images_made_responsive += 1
+        return updated_tag
+
+    updated = img_responsive_pattern.sub(_make_img_responsive, updated)
+    if images_made_responsive:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Added responsive max-width styling to content images to prevent Canvas overflow",
+                count=images_made_responsive,
+            )
+        )
+
+    # Convert fixed pixel-width tables wider than 500 px to a fluid layout so
+    # they do not cause horizontal scroll in Canvas.
+    wide_table_pattern = re.compile(r"<table\b[^>]*>", flags=re.IGNORECASE)
+    tables_made_responsive = 0
+
+    def _make_table_responsive(m: re.Match[str]) -> str:
+        nonlocal tables_made_responsive
+        tag = m.group(0)
+        style = _extract_attr_value(tag, "style") or ""
+        width_m = re.search(r"(?:^|;)\s*width\s*:\s*(\d+)px", style, flags=re.IGNORECASE)
+        if not width_m:
+            return tag
+        px_value = int(width_m.group(1))
+        if px_value <= 500:
+            return tag
+        updated_tag, _ = _remove_inline_style_keys(tag, {"width"})
+        updated_tag, changed = _merge_inline_style(
+            updated_tag, {"width": "100%", "max-width": f"{px_value}px"}
+        )
+        if changed:
+            tables_made_responsive += 1
+        return updated_tag
+
+    updated = wide_table_pattern.sub(_make_table_responsive, updated)
+    if tables_made_responsive:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Converted fixed-pixel table widths to fluid layout to prevent horizontal overflow in Canvas",
+                count=tables_made_responsive,
             )
         )
 
