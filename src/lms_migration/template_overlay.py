@@ -67,6 +67,51 @@ _DEFAULT_ICON_LABELS = {
     "exclamation.png": "Important",
     "info.png": "Information",
 }
+_TEMPLATE_HEADING_ICON_STYLE = "width: 45px; height: auto; vertical-align: middle; margin-right: 8px;"
+_PAGE_TITLE_HEADING_STYLE = (
+    "color: #ac1a2f",
+    "border-bottom: 10px solid #AC1A2F",
+    "padding: 10px",
+)
+_SECTION_HEADING_STYLE = ("color: #ac1a2f",)
+_INTRO_HEADING_SPECS = {
+    "introduction": {
+        "icon_basename": "star.png",
+        "label": "Introduction",
+        "styles": _PAGE_TITLE_HEADING_STYLE,
+    },
+    "learning objectives": {
+        "icon_basename": "bullseye.png",
+        "label": "Module Objectives",
+        "styles": _SECTION_HEADING_STYLE,
+    },
+    "module objectives": {
+        "icon_basename": "bullseye.png",
+        "label": "Module Objectives",
+        "styles": _SECTION_HEADING_STYLE,
+    },
+    "checklist": {
+        "icon_basename": "checkmark.png",
+        "label": "Module Checklist",
+        "styles": _SECTION_HEADING_STYLE,
+    },
+    "module checklist": {
+        "icon_basename": "checkmark.png",
+        "label": "Module Checklist",
+        "styles": _SECTION_HEADING_STYLE,
+    },
+}
+_ICON_BLOCK_PATTERN = (
+    r"<(?P<wrapper>p|div)\b[^>]*>\s*"
+    r"(?:\s|&nbsp;|</?(?:span|strong|em|b)\b[^>]*>)*"
+    r"(?P<img><img\b[^>]*src\s*=\s*[\"'][^\"']*templateassets/[^\"']+[\"'][^>]*>)"
+    r"(?:\s|&nbsp;|</?(?:span|strong|em|b)\b[^>]*>)*"
+    r"</(?P=wrapper)>"
+)
+_HEADING_PATTERN = re.compile(
+    r"<h(?P<level>[1-6])(?P<attrs>[^>]*)>(?P<body>.*?)</h(?P=level)>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
 def _normalize_basename(value: str) -> str:
@@ -160,6 +205,357 @@ def _canonical_icon_label(raw_label: str) -> str:
     return text
 
 
+def _extract_img_basename(tag_html: str) -> str:
+    src_match = re.search(
+        r'\bsrc\s*=\s*(["\'])(?P<src>[^"\']+)\1',
+        tag_html,
+        flags=re.IGNORECASE,
+    )
+    if src_match is None:
+        return ""
+    parsed = urlparse(src_match.group("src").strip())
+    return _normalize_basename(unquote(parsed.path))
+
+
+def _plain_text(value: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", " ", value, flags=re.IGNORECASE)
+    unescaped = html.unescape(without_tags).replace("\xa0", " ")
+    return re.sub(r"\s+", " ", unescaped).strip()
+
+
+def _normalize_heading_key(value: str) -> str:
+    lowered = _plain_text(value).lower()
+    lowered = lowered.replace("&", "and")
+    lowered = re.sub(r"[^a-z0-9 ]+", "", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def _canonical_heading_label(raw_label: str, *, icon_basename: str = "") -> str:
+    label = _canonical_icon_label(raw_label)
+    key = _normalize_heading_key(label)
+    basename = _normalize_basename(icon_basename)
+
+    if basename == "video.png" or key in {"view", "watch"}:
+        return "View"
+    if basename == "bookmark.png" and key in {"syllabus", "title", "bookmark"}:
+        return "Syllabus" if key == "syllabus" else "Title"
+    if key in {"objectives", "learning objectives", "module objectives"}:
+        return "Module Objectives"
+    if key in {"course materials and outcomes", "course material and outcomes", "course material"}:
+        return "Course Materials and Outcomes"
+    if basename in {"checkmark.png", "checklist.png"} or key in {"checklist", "module checklist"}:
+        return "Module Checklist"
+    if basename == "star.png" or key == "introduction":
+        return "Introduction"
+    if basename == "folder.png" or key in {
+        "additional resources",
+        "explore resources",
+        "resources",
+        "supplemental resource",
+        "supplemental resources",
+    }:
+        return "Additional Resources"
+    if basename == "circle-arrow.png" or key in {
+        "practice",
+        "practice games",
+        "practice and review",
+        "review",
+        "flashcards",
+    }:
+        return "Practice"
+    if basename == "exclamation.png" or key in {"important", "important note", "important information"}:
+        return "Important"
+    if basename == "info.png" or key in {"information", "info"}:
+        return "Information"
+    if basename == "calendar.png" or key in {"calendar", "due date", "due dates"}:
+        return "Due Dates"
+    if basename == "educator.png" or key in {"instructor information", "about the instructor", "contact information"}:
+        return "Instructor Information"
+    if basename == "gear.png" or key in {"technical support", "support", "canvas support"}:
+        return "Technical Support"
+    if basename == "flag.png" or key in {"main point", "guidelines", "guideline", "student support"}:
+        if key == "main point":
+            return "Main Point"
+        if key == "student support":
+            return "Student Support"
+        return "Guidelines"
+    if basename == "mail.png" or key in {"communication", "course communication"}:
+        return "Communication"
+    if basename == "question.png" or key in {"hints", "help links", "help"}:
+        return "Help Links"
+    if basename == "megaphone.png" or key in {"announcement", "announcements"}:
+        return "Announcement"
+    if basename == "paper.png" or key in {"do this"}:
+        return "Do This"
+    if basename == "pencil.png" or key in {"assignment", "instructions"}:
+        return "Instructions"
+    if basename == "ai-brain.png" or key in {"ai usage allowed", "ai usage", "artificial intelligence"}:
+        return "AI Usage Allowed"
+    return label
+
+
+def _contains_heading_phrase(value: str, phrases: tuple[str, ...]) -> bool:
+    normalized = _normalize_heading_key(value)
+    if not normalized:
+        return False
+    return any(phrase in normalized for phrase in phrases)
+
+
+def _resolve_semantic_icon_basename(
+    *,
+    current_basename: str,
+    label_text: str = "",
+    original_title: str = "",
+) -> str:
+    combined = " ".join(part for part in (label_text, original_title) if part).strip()
+    if not combined:
+        return current_basename
+    normalized_combined = _normalize_heading_key(combined)
+    normalized_label = _normalize_heading_key(label_text)
+
+    if _contains_heading_phrase(
+        combined,
+        (
+            "practice",
+            "review",
+            "practice games",
+            "flashcards",
+            "publisher materials",
+        ),
+    ):
+        return "circle-arrow.png"
+
+    if _contains_heading_phrase(
+        combined,
+        (
+            "resource",
+            "resources",
+            "explore resources",
+            "additional resources",
+            "supplemental resource",
+            "supplemental resources",
+            "sample forms",
+            "forms",
+            "files",
+            "documents",
+            "materials",
+        ),
+    ):
+        return "folder.png"
+
+    if _contains_heading_phrase(
+        combined,
+        (
+            "quiz",
+            "assessment",
+            "knowledge check",
+            "self check",
+            "check your understanding",
+        ),
+    ):
+        return "rocket.png"
+
+    if _contains_heading_phrase(combined, ("read", "reading", "article", "chapter", "textbook")):
+        return "book.png"
+
+    if _contains_heading_phrase(
+        combined,
+        ("technical support", "canvas support", "help desk", "helpdesk", "tech support"),
+    ):
+        return "gear.png"
+
+    if _contains_heading_phrase(
+        combined,
+        ("instructor information", "about the instructor", "contact information", "office hours"),
+    ):
+        return "educator.png"
+
+    if _contains_heading_phrase(
+        combined,
+        ("communication", "communicate", "course q and a", "course q a", "question board"),
+    ):
+        return "mail.png"
+
+    if _contains_heading_phrase(
+        combined,
+        ("main point", "guidelines", "classroom community", "student support"),
+    ):
+        return "flag.png"
+
+    if _contains_heading_phrase(combined, ("calendar", "due date", "due dates", "course summary")):
+        return "calendar.png"
+
+    if _contains_heading_phrase(combined, ("announcement", "announcements")):
+        return "megaphone.png"
+
+    if _contains_heading_phrase(combined, ("instructions", "assignment directions", "assignment instructions")):
+        return "pencil.png"
+
+    if _contains_heading_phrase(combined, ("ai usage", "artificial intelligence")):
+        return "ai-brain.png"
+
+    # A generic "View" label in the source normally means the template bookmark
+    # treatment, not a video cue. Only promote to the video icon when the title
+    # adds an actual video-specific signal.
+    if _contains_heading_phrase(
+        combined,
+        ("watch", "video", "lecture", "clip", "recording", "youtube", "vimeo", "ted talk"),
+    ):
+        return "video.png"
+    if current_basename in {"bookmark.png", "video.png", "view.png"} or normalized_label in {"view", "watch"}:
+        if normalized_combined in {"view", "watch"} or normalized_combined.startswith("view "):
+            return "bookmark.png"
+        return "bookmark.png"
+
+    if current_basename == "rocket.png":
+        return "folder.png"
+    if current_basename == "reminder.png":
+        return "circle-arrow.png"
+    return current_basename
+
+
+def _render_icon_heading_block(
+    *,
+    level: int,
+    attrs: str,
+    img_tag: str,
+    canonical_label: str,
+    original_title: str = "",
+) -> str:
+    normalized_canonical = _normalize_heading_key(canonical_label)
+    normalized_original = _normalize_heading_key(original_title)
+    heading_html = (
+        f'<h{level}{attrs}>{img_tag} <strong>{html.escape(canonical_label)}</strong></h{level}>'
+    )
+    if (
+        original_title
+        and normalized_original
+        and normalized_canonical
+        and normalized_original != normalized_canonical
+    ):
+        sub_level = min(level + 1, 6)
+        heading_html += f"\n<h{sub_level}>{html.escape(original_title)}</h{sub_level}>"
+    return heading_html
+
+
+def _merge_style_attr(
+    attrs: str,
+    *,
+    required_styles: tuple[str, ...],
+    remove_style_keys: set[str] | None = None,
+) -> str:
+    working_attrs = attrs or ""
+    style_match = re.search(
+        r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
+        working_attrs,
+        flags=re.IGNORECASE,
+    )
+    removed_keys = {key.strip().lower() for key in (remove_style_keys or set()) if key.strip()}
+    style_tokens: list[str] = []
+    seen_keys: set[str] = set()
+
+    if style_match is not None:
+        for token in style_match.group("style").split(";"):
+            cleaned = token.strip()
+            if not cleaned or ":" not in cleaned:
+                continue
+            key = cleaned.split(":", 1)[0].strip().lower()
+            if key in removed_keys:
+                continue
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            style_tokens.append(cleaned)
+
+    for token in required_styles:
+        key = token.split(":", 1)[0].strip().lower()
+        style_tokens = [item for item in style_tokens if item.split(":", 1)[0].strip().lower() != key]
+        style_tokens.append(token)
+        seen_keys.add(key)
+
+    rebuilt_style = "; ".join(style_tokens).strip()
+    if rebuilt_style and not rebuilt_style.endswith(";"):
+        rebuilt_style += ";"
+
+    if style_match is not None:
+        return (
+            working_attrs[: style_match.start("style")]
+            + rebuilt_style
+            + working_attrs[style_match.end("style") :]
+        )
+    if rebuilt_style:
+        return f'{working_attrs} style="{rebuilt_style}"'
+    return working_attrs
+
+
+def _build_heading_icon_tag(*, basename: str) -> str:
+    return (
+        f'<img src="TemplateAssets/{basename}" role="presentation" alt="" '
+        f'style="{_TEMPLATE_HEADING_ICON_STYLE}">'
+    )
+
+
+def _extract_non_template_heading_images(body: str) -> list[str]:
+    images = re.findall(r"<img\b[^>]*>", body, flags=re.IGNORECASE)
+    return [image for image in images if "templateassets/" not in image.lower()]
+
+
+def _extract_heading_title_and_media(body: str) -> tuple[str, list[str]]:
+    media = _extract_non_template_heading_images(body)
+    cleaned = body
+    for fragment in media:
+        cleaned = cleaned.replace(fragment, " ")
+    cleaned = re.sub(r"<br\b[^>]*>", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("&nbsp;", " ")
+    return _plain_text(cleaned), media
+
+
+def _render_heading_media_blocks(media: list[str]) -> str:
+    if not media:
+        return ""
+    return "".join(f"\n<p>{fragment}</p>" for fragment in media)
+
+
+def _extract_numeric_dimension(tag_html: str, *, attr_name: str) -> int | None:
+    attr_match = re.search(
+        rf'\b{attr_name}\s*=\s*(["\'])(?P<value>\d{{2,4}})\1',
+        tag_html,
+        flags=re.IGNORECASE,
+    )
+    if attr_match is not None:
+        try:
+            return int(attr_match.group("value"))
+        except ValueError:
+            return None
+
+    style_match = re.search(
+        r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
+        tag_html,
+        flags=re.IGNORECASE,
+    )
+    if style_match is None:
+        return None
+
+    px_match = re.search(
+        rf"(?:^|;)\s*{attr_name}\s*:\s*(?P<value>\d{{2,4}})px",
+        style_match.group("style"),
+        flags=re.IGNORECASE,
+    )
+    if px_match is None:
+        return None
+    try:
+        return int(px_match.group("value"))
+    except ValueError:
+        return None
+
+
+def _preferred_float_image_width(tag_html: str) -> int:
+    width = _extract_numeric_dimension(tag_html, attr_name="width")
+    if width is None:
+        return 320
+    return max(240, min(width, 360))
+
+
 def _load_icon_label_map(template_package: Path) -> dict[str, str]:
     icon_labels: dict[str, str] = {}
     try:
@@ -194,6 +590,9 @@ class TemplateOverlayConfig:
     template_package: Path
     alias_map_json_path: Path | None = None
     apply_visual_standards: bool = True
+    apply_color_standards: bool = True
+    apply_divider_standards: bool = True
+    image_layout_mode: str = "safe-block"
 
 
 @dataclass
@@ -205,6 +604,9 @@ class TemplateOverlayContext:
     file_name_collisions: dict[str, int]
     icon_label_by_basename: dict[str, str]
     apply_visual_standards: bool
+    apply_color_standards: bool
+    apply_divider_standards: bool
+    image_layout_mode: str
 
 
 def build_template_overlay_context(config: TemplateOverlayConfig) -> TemplateOverlayContext:
@@ -229,7 +631,70 @@ def build_template_overlay_context(config: TemplateOverlayConfig) -> TemplateOve
         file_name_collisions=collisions,
         icon_label_by_basename=icon_label_map,
         apply_visual_standards=bool(config.apply_visual_standards),
+        apply_color_standards=bool(config.apply_color_standards),
+        apply_divider_standards=bool(config.apply_divider_standards),
+        image_layout_mode=str(config.image_layout_mode or "safe-block").strip().lower(),
     )
+
+
+def _filter_required_styles(
+    styles: tuple[str, ...],
+    *,
+    context: TemplateOverlayContext,
+) -> tuple[str, ...]:
+    filtered: list[str] = []
+    for token in styles:
+        key = token.split(":", 1)[0].strip().lower()
+        if key == "color" and not context.apply_color_standards:
+            continue
+        if key == "border-bottom" and not context.apply_divider_standards:
+            continue
+        filtered.append(token)
+    return tuple(filtered)
+
+
+def _template_remove_style_keys(
+    *,
+    context: TemplateOverlayContext,
+    include_padding: bool = True,
+) -> set[str]:
+    keys: set[str] = set()
+    if context.apply_color_standards:
+        keys.add("color")
+    if context.apply_divider_standards:
+        keys.add("border-bottom")
+    if include_padding:
+        keys.add("padding")
+    return keys
+
+
+def _template_heading_attrs(
+    attrs: str,
+    *,
+    context: TemplateOverlayContext,
+) -> str:
+    working_attrs = attrs or ""
+    if not context.apply_color_standards:
+        return working_attrs
+    style_match = re.search(
+        r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
+        working_attrs,
+        flags=re.IGNORECASE,
+    )
+    if style_match is not None:
+        style_text = style_match.group("style")
+        if re.search(r"(?:^|;)\s*color\s*:", style_text, flags=re.IGNORECASE):
+            return working_attrs
+        rebuilt_style = style_text.strip()
+        if rebuilt_style and not rebuilt_style.endswith(";"):
+            rebuilt_style += ";"
+        rebuilt_style += " color: #ac1a2f;"
+        return (
+            working_attrs[: style_match.start("style")]
+            + rebuilt_style
+            + working_attrs[style_match.end("style") :]
+        )
+    return f'{working_attrs} style="color: #ac1a2f;"'
 
 
 def _resolve_target_basename(
@@ -324,6 +789,9 @@ def apply_template_overlay(
     icon_label_heading_updates = 0
     icon_block_heading_merges = 0
     responsive_image_updates = 0
+    promoted_icon_headings = 0
+    page_heading_updates = 0
+    leading_divider_removals = 0
 
     if context.apply_visual_standards:
         known_template_asset_basenames = set(context.assets_by_basename.keys())
@@ -335,6 +803,16 @@ def apply_template_overlay(
             | known_alias_basenames
             | set(context.icon_label_by_basename.keys())
         )
+        normalized_file_path = file_path.replace("\\", "/").lower()
+        learning_activities_match = re.search(
+            r"(?:^|/)learning activities(?:\s*-\s*[^/]+)?\.html$",
+            normalized_file_path,
+        )
+
+        def template_section_level(default_level: int) -> int:
+            if learning_activities_match:
+                return 2
+            return default_level
 
         def normalize_template_icon_tag(match: re.Match[str]) -> str:
             nonlocal icon_style_updates
@@ -370,11 +848,25 @@ def apply_template_overlay(
 
             if not is_template_asset and not is_known_visual_asset:
                 updated_tag = tag
+                initial_style_match = re.search(
+                    r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
+                    updated_tag,
+                    flags=re.IGNORECASE,
+                )
+                float_direction = ""
+                if initial_style_match is not None:
+                    float_match = re.search(
+                        r"(?:^|;)\s*float\s*:\s*(left|right)",
+                        initial_style_match.group("style"),
+                        flags=re.IGNORECASE,
+                    )
+                    if float_match is not None:
+                        float_direction = float_match.group(1).strip().lower()
                 has_large_width = bool(
                     re.search(r'\bwidth\s*=\s*(["\'])\s*(?:[2-9]\d{2,}|\d{4,})\s*\1', updated_tag, flags=re.IGNORECASE)
                     or re.search(r'width\s*:\s*(?:[2-9]\d{2,}|\d{4,})px', updated_tag, flags=re.IGNORECASE)
                 )
-                if not has_large_width:
+                if not has_large_width and float_direction not in {"left", "right"}:
                     return tag
 
                 updated_tag = re.sub(
@@ -396,14 +888,71 @@ def apply_template_overlay(
                         if not cleaned:
                             continue
                         key = cleaned.split(":", 1)[0].strip().lower()
-                        if key in {"width", "height", "max-width"}:
+                        if key == "float" and ":" in cleaned:
+                            float_direction = cleaned.split(":", 1)[1].strip().lower()
+                        if key in {
+                            "width",
+                            "height",
+                            "max-width",
+                            "float",
+                            "display",
+                            "clear",
+                            "margin",
+                            "margin-left",
+                            "margin-right",
+                            "margin-top",
+                            "margin-bottom",
+                            "padding",
+                            "padding-left",
+                            "padding-right",
+                            "padding-top",
+                            "padding-bottom",
+                        }:
                             continue
                         if key in seen_keys:
                             continue
                         seen_keys.add(key)
                         style_tokens.append(cleaned)
 
-                style_tokens.extend(["max-width: 100%", "height: auto"])
+                if float_direction in {"left", "right"} and context.image_layout_mode == "preserve-wrap":
+                    preferred_width = _preferred_float_image_width(tag)
+                    style_tokens.extend(
+                        [
+                            f"width: {preferred_width}px",
+                            "max-width: 45%",
+                            "height: auto",
+                            f"float: {float_direction}",
+                            "display: block",
+                            "clear: none",
+                            "margin: 4px 0 20px 24px"
+                            if float_direction == "right"
+                            else "margin: 4px 24px 20px 0",
+                        ]
+                    )
+                elif float_direction in {"left", "right"}:
+                    preferred_width = _preferred_float_image_width(tag)
+                    style_tokens.extend(
+                        [
+                            f"width: {preferred_width}px",
+                            "max-width: 100%",
+                            "height: auto",
+                            "display: block",
+                            "clear: both",
+                            "margin: 20px 0 20px auto"
+                            if float_direction == "right"
+                            else "margin: 20px auto 20px 0",
+                        ]
+                    )
+                else:
+                    style_tokens.extend(
+                        [
+                            "max-width: 100%",
+                            "height: auto",
+                            "display: block",
+                            "margin: 20px auto",
+                            "clear: both",
+                        ]
+                    )
                 rebuilt_style = "; ".join(style_tokens).strip()
                 if rebuilt_style and not rebuilt_style.endswith(";"):
                     rebuilt_style += ";"
@@ -441,11 +990,11 @@ def apply_template_overlay(
                         if not cleaned:
                             continue
                         lowered = cleaned.lower().replace(" ", "")
-                        if lowered.startswith(("max-width:", "width:", "height:", "display:")):
+                        if lowered.startswith(("max-width:", "min-width:", "width:", "height:", "display:")):
                             continue
                         style_tokens.append(cleaned)
 
-                style_tokens.extend(["width: 100%", "height: auto", "display: block"])
+                style_tokens.extend(["width: 100%", "min-width: 100%", "height: auto", "display: block"])
                 rebuilt_style = "; ".join(style_tokens).strip()
                 if rebuilt_style and not rebuilt_style.endswith(";"):
                     rebuilt_style += ";"
@@ -458,6 +1007,25 @@ def apply_template_overlay(
                     )
                 elif rebuilt_style:
                     updated_tag = append_attribute(updated_tag, f'style="{rebuilt_style}"')
+
+                updated_tag = re.sub(
+                    r'\s+alt\s*=\s*(["\']).*?\1',
+                    ' alt=""',
+                    updated_tag,
+                    count=1,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                if not re.search(r"\balt\s*=", updated_tag, flags=re.IGNORECASE):
+                    updated_tag = append_attribute(updated_tag, 'alt=""')
+                updated_tag, role_updates = re.subn(
+                    r'\s+role\s*=\s*(["\']).*?\1',
+                    ' role="presentation"',
+                    updated_tag,
+                    count=1,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                if role_updates == 0:
+                    updated_tag = append_attribute(updated_tag, 'role="presentation"')
 
                 if updated_tag != tag:
                     banner_style_updates += 1
@@ -543,107 +1111,69 @@ def apply_template_overlay(
                 flags=re.IGNORECASE,
             )
             alt_text = alt_match.group("alt").strip() if alt_match is not None else ""
-            if canonical_icon_label:
-                if alt_match is not None:
-                    if alt_text != canonical_icon_label:
-                        updated_tag = (
-                            updated_tag[: alt_match.start("alt")]
-                            + canonical_icon_label
-                            + updated_tag[alt_match.end("alt") :]
-                        )
-                        icon_alt_updates += 1
-                else:
-                    updated_tag = append_attribute(updated_tag, f'alt="{canonical_icon_label}"')
+            if alt_match is not None:
+                if alt_text:
+                    updated_tag = (
+                        updated_tag[: alt_match.start("alt")]
+                        + ""
+                        + updated_tag[alt_match.end("alt") :]
+                    )
                     icon_alt_updates += 1
-            elif not alt_text:
-                title_match = re.search(
-                    r'(?<=\s)title\s*=\s*(["\'])(?P<title>[^"\']*)\1',
-                    updated_tag,
-                    flags=re.IGNORECASE,
-                )
-                title_text = title_match.group("title").strip() if title_match is not None else ""
-                fallback_alt = (
-                    title_text
-                    if title_text
-                    else posixpath.splitext(src_basename)[0].replace("-", " ").replace("_", " ").strip().title()
-                )
-                if fallback_alt:
-                    if alt_match is not None:
-                        updated_tag = (
-                            updated_tag[: alt_match.start("alt")]
-                            + fallback_alt
-                            + updated_tag[alt_match.end("alt") :]
-                        )
-                    else:
-                        updated_tag = append_attribute(updated_tag, f'alt="{fallback_alt}"')
-                    icon_alt_updates += 1
+            else:
+                updated_tag = append_attribute(updated_tag, 'alt=""')
+                icon_alt_updates += 1
 
-            if canonical_icon_label:
-                title_match = re.search(
-                    r'(?<=\s)title\s*=\s*(["\'])(?P<title>[^"\']*)\1',
-                    updated_tag,
-                    flags=re.IGNORECASE,
-                )
-                title_text = title_match.group("title").strip() if title_match is not None else ""
-                if title_match is not None:
-                    if title_text != canonical_icon_label:
-                        updated_tag = (
-                            updated_tag[: title_match.start("title")]
-                            + canonical_icon_label
-                            + updated_tag[title_match.end("title") :]
-                        )
-                        icon_title_updates += 1
-                else:
-                    updated_tag = append_attribute(updated_tag, f'title="{canonical_icon_label}"')
-                    icon_title_updates += 1
+            title_match = re.search(
+                r'\s+title\s*=\s*(["\'])(?P<title>[^"\']*)\1',
+                updated_tag,
+                flags=re.IGNORECASE,
+            )
+            if title_match is not None:
+                updated_tag = updated_tag[: title_match.start()] + updated_tag[title_match.end() :]
+                icon_title_updates += 1
+
+            role_match = re.search(
+                r'(?<=\s)role\s*=\s*(["\'])(?P<role>[^"\']*)\1',
+                updated_tag,
+                flags=re.IGNORECASE,
+            )
+            role_value = role_match.group("role").strip().lower() if role_match is not None else ""
+            if role_match is not None:
+                if role_value != "presentation":
+                    updated_tag = (
+                        updated_tag[: role_match.start("role")]
+                        + "presentation"
+                        + updated_tag[role_match.end("role") :]
+                    )
+                    icon_style_updates += 1
+            else:
+                updated_tag = append_attribute(updated_tag, 'role="presentation"')
+                icon_style_updates += 1
 
             return updated_tag
 
         updated = _IMG_TAG_PATTERN.sub(normalize_template_icon_tag, updated)
 
-        def with_template_heading_color(attrs: str) -> str:
-            working_attrs = attrs or ""
-            style_match = re.search(
-                r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
-                working_attrs,
-                flags=re.IGNORECASE,
-            )
-            if style_match is not None:
-                style_text = style_match.group("style")
-                if re.search(r"(?:^|;)\s*color\s*:", style_text, flags=re.IGNORECASE):
-                    return working_attrs
-                rebuilt_style = style_text.strip()
-                if rebuilt_style and not rebuilt_style.endswith(";"):
-                    rebuilt_style += ";"
-                rebuilt_style += " color: #ac1a2f;"
-                return (
-                    working_attrs[: style_match.start("style")]
-                    + rebuilt_style
-                    + working_attrs[style_match.end("style") :]
-                )
-            return f'{working_attrs} style="color: #ac1a2f;"'
-
         def normalize_icon_only_heading(match: re.Match[str]) -> str:
             nonlocal icon_label_heading_updates
             full_heading = match.group(0)
             img_tag = match.group("img")
-            src_match = re.search(
-                r'\bsrc\s*=\s*(["\'])(?P<src>[^"\']+)\1',
-                img_tag,
-                flags=re.IGNORECASE,
-            )
-            if src_match is None:
-                return full_heading
-            src_value = src_match.group("src").strip()
-            parsed = urlparse(src_value)
-            src_basename = _normalize_basename(unquote(parsed.path))
+            src_basename = _extract_img_basename(img_tag)
             if not src_basename:
                 return full_heading
-            label = context.icon_label_by_basename.get(src_basename, "")
+            label = _canonical_heading_label(
+                context.icon_label_by_basename.get(src_basename, ""),
+                icon_basename=src_basename,
+            )
             if not label:
                 return full_heading
-            heading_attrs = with_template_heading_color(match.group("attrs"))
-            replacement = f'<h{match.group("level")}{heading_attrs}>{img_tag} {html.escape(label)}</h{match.group("level")}>'
+            heading_attrs = _template_heading_attrs(match.group("attrs"), context=context)
+            replacement = _render_icon_heading_block(
+                level=template_section_level(int(match.group("level"))),
+                attrs=heading_attrs,
+                img_tag=_build_heading_icon_tag(basename=src_basename),
+                canonical_label=label,
+            )
             if replacement != full_heading:
                 icon_label_heading_updates += 1
             return replacement
@@ -655,26 +1185,177 @@ def apply_template_overlay(
             flags=re.IGNORECASE | re.DOTALL,
         )
 
-        def merge_icon_block_with_heading(match: re.Match[str]) -> str:
+        def merge_icon_with_label_block(match: re.Match[str]) -> str:
             nonlocal icon_block_heading_merges
             img_tag = match.group("img")
-            heading_body = match.group("body").strip()
-            if not heading_body:
+            icon_basename = _extract_img_basename(img_tag)
+            label_body = match.group("body").strip()
+            if not label_body:
                 return match.group(0)
-            heading_attrs = with_template_heading_color(match.group("hattrs"))
-            replacement = (
-                f'<h{match.group("level")}{heading_attrs}>{img_tag} {heading_body}</h{match.group("level")}>'
+            if re.search(r"<(?:a|iframe|ul|ol|table|h[1-6]|details)\b", label_body, flags=re.IGNORECASE):
+                return match.group(0)
+            label_text, label_media = _extract_heading_title_and_media(label_body)
+            if not label_text or len(label_text) > 100 or len(label_text.split()) > 12:
+                return match.group(0)
+            icon_basename = _resolve_semantic_icon_basename(
+                current_basename=icon_basename,
+                label_text=label_text,
+                original_title=label_text,
             )
+            canonical_label = _canonical_heading_label(
+                context.icon_label_by_basename.get(icon_basename, "") or label_text,
+                icon_basename=icon_basename,
+            )
+            replacement = _render_icon_heading_block(
+                level=template_section_level(3),
+                attrs=' style="color: #ac1a2f;"' if context.apply_color_standards else "",
+                img_tag=_build_heading_icon_tag(basename=icon_basename),
+                canonical_label=canonical_label,
+                original_title=label_text,
+            )
+            replacement += _render_heading_media_blocks(label_media)
             icon_block_heading_merges += 1
             return replacement
 
         updated = re.sub(
-            r"<(?P<wrapper>p|div)\b[^>]*>\s*(?P<img><img\b[^>]*src\s*=\s*[\"'][^\"']*templateassets/[^\"']+[\"'][^>]*>)\s*</(?P=wrapper)>\s*"
-            r"<h(?P<level>[1-6])(?P<hattrs>[^>]*)>(?P<body>.*?)</h(?P=level)>",
+            _ICON_BLOCK_PATTERN
+            + r"\s*<(?P<label_wrapper>p|div)\b[^>]*>(?P<body>.*?)</(?P=label_wrapper)>",
+            merge_icon_with_label_block,
+            updated,
+            count=1_000,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        def merge_icon_block_with_heading(match: re.Match[str]) -> str:
+            nonlocal icon_block_heading_merges
+            img_tag = match.group("img")
+            icon_basename = _extract_img_basename(img_tag)
+            heading_body = match.group("body").strip()
+            if not heading_body:
+                return match.group(0)
+            heading_attrs = _template_heading_attrs(match.group("hattrs"), context=context)
+            original_title, heading_media = _extract_heading_title_and_media(heading_body)
+            if not original_title:
+                return match.group(0)
+            resolved_icon_basename = _resolve_semantic_icon_basename(
+                current_basename=icon_basename,
+                label_text=context.icon_label_by_basename.get(icon_basename, ""),
+                original_title=original_title,
+            )
+            canonical_label = _canonical_heading_label(
+                context.icon_label_by_basename.get(resolved_icon_basename, "") or original_title,
+                icon_basename=resolved_icon_basename,
+            )
+            replacement = _render_icon_heading_block(
+                level=template_section_level(int(match.group("level"))),
+                attrs=heading_attrs,
+                img_tag=_build_heading_icon_tag(basename=resolved_icon_basename),
+                canonical_label=canonical_label,
+                original_title=original_title,
+            )
+            replacement += _render_heading_media_blocks(heading_media)
+            icon_block_heading_merges += 1
+            return replacement
+
+        updated = re.sub(
+            _ICON_BLOCK_PATTERN
+            + r"\s*(?:</div>\s*){0,4}(?:<p\b[^>]*>(?:\s|&nbsp;|</?(?:span|strong|em|b)\b[^>]*>)*</p>\s*)*(?:<h[1-6][^>]*>(?:\s|&nbsp;|</?(?:span|strong|em|b)\b[^>]*>)*</h[1-6]>\s*)*(?:<(?:p|div)\b[^>]*>\s*</(?:p|div)>\s*)*<div\b[^>]*>\s*(?:<br\s*/?>\s*)*<h(?P<level>[1-6])(?P<hattrs>[^>]*)>(?P<body>.*?)</h(?P=level)>\s*</div>",
             merge_icon_block_with_heading,
             updated,
             flags=re.IGNORECASE | re.DOTALL,
         )
+
+        updated = re.sub(
+            _ICON_BLOCK_PATTERN
+            + r"\s*(?:</div>\s*){0,4}(?:<p\b[^>]*>(?:\s|&nbsp;|</?(?:span|strong|em|b)\b[^>]*>)*</p>\s*)*<h(?P<level>[1-6])(?P<hattrs>[^>]*)>(?P<body>.*?)</h(?P=level)>",
+            merge_icon_block_with_heading,
+            updated,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        def promote_template_icon_heading(match: re.Match[str]) -> str:
+            nonlocal promoted_icon_headings
+            level = int(match.group("level"))
+            if level != 4 or "templateassets/" not in match.group("body").lower():
+                return match.group(0)
+            promoted_icon_headings += 1
+            attrs = _template_heading_attrs(match.group("attrs"), context=context)
+            return f'<h{template_section_level(3)}{attrs}>{match.group("body")}</h{template_section_level(3)}>'
+
+        updated = _HEADING_PATTERN.sub(promote_template_icon_heading, updated)
+
+        def remove_leading_divider(payload: str, *, icon_basename: str) -> str:
+            nonlocal leading_divider_removals
+            updated_payload, removed = re.subn(
+                rf'(<body[^>]*>\s*(?:<div\b[^>]*>\s*){{0,4}}(?:<p\b[^>]*>\s*(?:<span\b[^>]*>\s*)?(?:&nbsp;|\s)*(?:</span>\s*)?</p>\s*)?)<hr\b[^>]*>\s*(?:</div>\s*){{0,4}}(?=(?:\s*<div\b[^>]*>\s*){{0,4}}<h2\b[^>]*>.*?(?:\.\./)?TemplateAssets/{re.escape(icon_basename)})',
+                r"\1",
+                payload,
+                count=1,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if removed:
+                leading_divider_removals += removed
+            return updated_payload
+
+        if normalized_file_path.endswith("introduction and objectives.html"):
+            seen_intro_heading_keys: set[str] = set()
+
+            def normalize_intro_heading(match: re.Match[str]) -> str:
+                nonlocal page_heading_updates
+                heading_key = _normalize_heading_key(match.group("body"))
+                spec = _INTRO_HEADING_SPECS.get(heading_key)
+                if spec is None or heading_key in seen_intro_heading_keys:
+                    return match.group(0)
+                seen_intro_heading_keys.add(heading_key)
+                attrs = _merge_style_attr(
+                    match.group("attrs"),
+                    required_styles=_filter_required_styles(tuple(spec["styles"]), context=context),
+                    remove_style_keys=_template_remove_style_keys(context=context),
+                )
+                heading_text = html.escape(str(spec["label"]))
+                _, heading_media = _extract_heading_title_and_media(match.group("body"))
+                replacement = (
+                    f'<h2{attrs}>{_build_heading_icon_tag(basename=str(spec["icon_basename"]))} '
+                    f"<strong>{heading_text}</strong></h2>"
+                )
+                replacement += _render_heading_media_blocks(heading_media)
+                if replacement != match.group(0):
+                    page_heading_updates += 1
+                return replacement
+
+            updated = _HEADING_PATTERN.sub(normalize_intro_heading, updated)
+            if context.apply_divider_standards:
+                updated = remove_leading_divider(updated, icon_basename="star.png")
+        if learning_activities_match:
+            page_title_done = False
+
+            def normalize_learning_title(match: re.Match[str]) -> str:
+                nonlocal page_heading_updates
+                nonlocal page_title_done
+                if page_title_done:
+                    return match.group(0)
+                if "templateassets/" in match.group("body").lower():
+                    return match.group(0)
+                heading_text = _plain_text(match.group("body"))
+                if not heading_text:
+                    return match.group(0)
+                page_title_done = True
+                attrs = _merge_style_attr(
+                    match.group("attrs"),
+                    required_styles=_filter_required_styles(_PAGE_TITLE_HEADING_STYLE, context=context),
+                    remove_style_keys=_template_remove_style_keys(context=context),
+                )
+                replacement = (
+                    f'<h2{attrs}><strong>{_build_heading_icon_tag(basename="bookmark.png")} '
+                    f"{html.escape(heading_text)}</strong></h2>"
+                )
+                if replacement != match.group(0):
+                    page_heading_updates += 1
+                return replacement
+
+            updated = _HEADING_PATTERN.sub(normalize_learning_title, updated, count=1)
+            if context.apply_divider_standards:
+                updated = remove_leading_divider(updated, icon_basename="bookmark.png")
 
     applied_changes: list[AppliedChange] = []
     if direct_mapped:
@@ -705,7 +1386,7 @@ def apply_template_overlay(
         applied_changes.append(
             AppliedChange(
                 category="template_overlay",
-                description="Normalized mapped template banner image sizing for Canvas rendering",
+                description="Normalized mapped template banner image sizing and decorative semantics for Canvas rendering",
                 count=banner_style_updates,
             )
         )
@@ -741,11 +1422,39 @@ def apply_template_overlay(
                 count=icon_block_heading_merges,
             )
         )
+    if promoted_icon_headings:
+        applied_changes.append(
+            AppliedChange(
+                category="template_overlay",
+                description="Promoted template icon section headings to maintain Canvas-safe heading order",
+                count=promoted_icon_headings,
+            )
+        )
+    if page_heading_updates:
+        applied_changes.append(
+            AppliedChange(
+                category="template_overlay",
+                description="Normalized page and section headings to match template heading styles",
+                count=page_heading_updates,
+            )
+        )
+    if leading_divider_removals:
+        applied_changes.append(
+            AppliedChange(
+                category="template_overlay",
+                description="Removed redundant leading dividers ahead of template-styled page headings",
+                count=leading_divider_removals,
+            )
+        )
     if responsive_image_updates:
         applied_changes.append(
             AppliedChange(
                 category="template_overlay",
-                description="Normalized large fixed-width images to responsive max-width styling for Canvas",
+                description=(
+                    "Preserved wrapped image layouts within Canvas-safe width limits"
+                    if context.image_layout_mode == "preserve-wrap"
+                    else "Normalized content image spacing and responsive sizing for Canvas-safe layouts"
+                ),
                 count=responsive_image_updates,
             )
         )

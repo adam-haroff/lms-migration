@@ -15,6 +15,7 @@ except Exception as exc:  # pragma: no cover
         "Tkinter is required for the local UI. Install a Python build that includes Tk."
     ) from exc
 
+from .approval_report import build_approval_report
 from .best_practices import run_audit
 from .canvas_api import (
     CanvasAPIError,
@@ -26,10 +27,16 @@ from .canvas_post_import import auto_relink_missing_links
 from .canvas_live_audit import run_live_link_audit
 from .canvas_snapshot import snapshot_canvas_course
 from .fix_checklist import build_fix_checklist
+from .math_audit import build_math_audit
+from .pattern_report import build_pattern_report
 from .pipeline import MigrationOutput, run_migration
 from .policy_profiles import list_policy_profiles
 from .reference_audit import run_reference_audit
+from .reference_docs import default_reference_doc_paths
+from .review_pack import build_review_pack
+from .review_writeback import apply_review_draft
 from .safe_summary import build_safe_summary_from_path
+from .template_standards import resolve_default_template_package
 from .visual_audit import build_visual_audit
 
 
@@ -48,11 +55,57 @@ def _default_visual_audit_json_path(converted_zip: Path) -> Path:
     return converted_zip.with_name(f"{stem}.visual-audit.json")
 
 
+def _default_math_audit_json_path(converted_zip: Path) -> Path:
+    stem = converted_zip.name
+    if stem.endswith(".canvas-ready.zip"):
+        stem = stem[: -len(".canvas-ready.zip")]
+    elif stem.endswith(".zip"):
+        stem = stem[: -len(".zip")]
+    return converted_zip.with_name(f"{stem}.math-audit.json")
+
+
+def _default_page_review_json_path(converted_zip: Path) -> Path:
+    stem = converted_zip.name
+    if stem.endswith(".canvas-ready.zip"):
+        stem = stem[: -len(".canvas-ready.zip")]
+    elif stem.endswith(".zip"):
+        stem = stem[: -len(".zip")]
+    return converted_zip.with_name(f"{stem}.page-review.json")
+
+
+def _default_review_draft_json_path(converted_zip: Path) -> Path:
+    stem = converted_zip.name
+    if stem.endswith(".canvas-ready.zip"):
+        stem = stem[: -len(".canvas-ready.zip")]
+    elif stem.endswith(".zip"):
+        stem = stem[: -len(".zip")]
+    return converted_zip.with_name(f"{stem}.review-draft.json")
+
+
+def _default_reviewed_zip_path(converted_zip: Path) -> Path:
+    name = converted_zip.name
+    if name.endswith(".canvas-ready.zip"):
+        return converted_zip.with_name(name.replace(".canvas-ready.zip", ".canvas-reviewed.zip"))
+    if name.endswith(".zip"):
+        return converted_zip.with_name(name[:-4] + ".reviewed.zip")
+    return converted_zip.with_name(name + ".reviewed.zip")
+
+
+def _default_pattern_report_json_path(converted_zip: Path) -> Path:
+    stem = converted_zip.name
+    if stem.endswith(".canvas-ready.zip"):
+        stem = stem[: -len(".canvas-ready.zip")]
+    elif stem.endswith(".zip"):
+        stem = stem[: -len(".zip")]
+    return converted_zip.with_name(f"{stem}.pattern-report.json")
+
+
 class LMSMigrationUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("LMS Migration Pilot - Local UI")
-        self.root.geometry("1050x760")
+        self.root.title("Canvas Migration Workbench")
+        self.root.geometry("1320x900")
+        self.root.minsize(1080, 760)
 
         self.is_busy = False
         self.latest_safe_summary = ""
@@ -60,22 +113,33 @@ class LMSMigrationUI:
         self.course_code_history = self._load_history("sinclair_course_code_history")
         self.input_zip_history = self._load_history("input_zip_history")
 
-        default_output = self._resolve_workspace_root() / "output"
-        default_template_package = (
-            self._resolve_workspace_root() / "resources" / "examples" / "template" / "elearn-standard-template-export.imscc"
-        )
-        self.policy_profiles_path = self._resolve_workspace_root() / "rules" / "policy_profiles.json"
+        workspace_root = self._resolve_workspace_root()
+        default_output = workspace_root / "output"
+        reference_doc_defaults = default_reference_doc_paths(workspace_root)
+        default_template_package = resolve_default_template_package(workspace_root)
+        self.policy_profiles_path = workspace_root / "rules" / "policy_profiles.json"
         self.available_policy_profiles = self._load_available_policy_profiles()
         self.input_zip_var = tk.StringVar(value="")
         self.rules_var = tk.StringVar(value=str(self._resolve_default_rules()))
         self.output_dir_var = tk.StringVar(value=str(default_output))
         self.enable_best_practice_enforcer_var = tk.BooleanVar(value=True)
-        self.enable_template_overlay_var = tk.BooleanVar(value=False)
-        self.template_package_var = tk.StringVar(value=str(default_template_package) if default_template_package.exists() else "")
+        self.enable_template_overlay_var = tk.BooleanVar(value=True)
+        self.template_package_var = tk.StringVar(
+            value=str(default_template_package)
+            if default_template_package is not None and default_template_package.exists()
+            else ""
+        )
         self.template_overlay_use_alias_map_var = tk.BooleanVar(value=True)
-        self.accordion_handling_var = tk.StringVar(value="flatten")
+        self.math_handling_var = tk.StringVar(value="preserve-semantic")
+        self.accordion_handling_var = tk.StringVar(value="smart")
+        self.accordion_alignment_var = tk.StringVar(value="left")
+        self.accordion_flatten_hints_var = tk.StringVar(value="")
+        self.accordion_details_hints_var = tk.StringVar(value="")
         self.template_module_structure_var = tk.BooleanVar(value=True)
         self.template_visual_standards_var = tk.BooleanVar(value=True)
+        self.template_color_standards_var = tk.BooleanVar(value=True)
+        self.template_divider_standards_var = tk.BooleanVar(value=True)
+        self.image_layout_mode_var = tk.StringVar(value="safe-block")
         default_policy = "strict" if "strict" in self.available_policy_profiles else self.available_policy_profiles[0]
         self.policy_profile_var = tk.StringVar(value=default_policy)
         self.report_json_var = tk.StringVar(value="")
@@ -84,13 +148,28 @@ class LMSMigrationUI:
         self.best_practices_file_var = tk.StringVar(value="")
         self.best_practices_sheet_var = tk.StringVar(value="")
 
-        self.ref_instructions_docx_var = tk.StringVar(value="")
-        self.ref_best_practices_docx_var = tk.StringVar(value="")
-        self.ref_page_templates_docx_var = tk.StringVar(value="")
-        self.ref_syllabus_template_docx_var = tk.StringVar(value="")
+        self.ref_instructions_docx_var = tk.StringVar(
+            value=str(reference_doc_defaults.get("instructions_docx") or "")
+        )
+        self.ref_best_practices_docx_var = tk.StringVar(
+            value=str(reference_doc_defaults.get("best_practices_docx") or "")
+        )
+        self.ref_setup_checklist_docx_var = tk.StringVar(
+            value=str(reference_doc_defaults.get("setup_checklist_docx") or "")
+        )
+        self.ref_page_templates_docx_var = tk.StringVar(
+            value=str(reference_doc_defaults.get("page_templates_docx") or "")
+        )
+        self.ref_syllabus_template_docx_var = tk.StringVar(
+            value=str(reference_doc_defaults.get("syllabus_template_docx") or "")
+        )
         self.visual_original_zip_var = tk.StringVar(value="")
         self.visual_converted_zip_var = tk.StringVar(value="")
         self.visual_audit_output_var = tk.StringVar(value="")
+        self.math_audit_output_var = tk.StringVar(value="")
+        self.review_draft_json_var = tk.StringVar(value="")
+        self.reviewed_zip_output_var = tk.StringVar(value="")
+        self.pattern_report_output_var = tk.StringVar(value="")
 
         self.canvas_base_url_var = tk.StringVar(value="https://sinclair.instructure.com")
         self.canvas_course_id_var = tk.StringVar(value="")
@@ -103,13 +182,19 @@ class LMSMigrationUI:
         self.template_alias_map_var = tk.StringVar(
             value=str(self._resolve_workspace_root() / "rules" / "template_asset_aliases.json")
         )
-        self.use_template_alias_map_var = tk.BooleanVar(value=False)
-        self.live_audit_apply_safe_fixes_var = tk.BooleanVar(value=False)
+        self.use_template_alias_map_var = tk.BooleanVar(value=True)
+        self.live_audit_apply_safe_fixes_var = tk.BooleanVar(value=True)
         self.ab_variant_var = tk.StringVar(value="A")
         self.ab_include_auto_relink_var = tk.BooleanVar(value=True)
         self.show_canvas_advanced_var = tk.BooleanVar(value=False)
         self.show_optional_tools_var = tk.BooleanVar(value=False)
         self.status_text_var = tk.StringVar(value="Status: Idle")
+        self.readiness_local_var = tk.StringVar(value="Local package: waiting for conversion.")
+        self.readiness_review_var = tk.StringVar(value="Upload review: not run.")
+        self.readiness_canvas_var = tk.StringVar(value="Canvas post-import: not run.")
+        self.readiness_next_step_var = tk.StringVar(
+            value="Next step: choose a D2L zip and click Prepare Canvas Package."
+        )
 
         self.sinclair_course_code_var.trace_add(
             "write", lambda *_: self._maybe_apply_course_folder_defaults()
@@ -120,6 +205,9 @@ class LMSMigrationUI:
         )
         self.ab_variant_var.trace_add(
             "write", lambda *_: self._sync_issues_output_for_ab_variant()
+        )
+        self.template_visual_standards_var.trace_add(
+            "write", lambda *_: self._sync_template_visual_subcontrols_state()
         )
 
         self._build_layout()
@@ -264,6 +352,15 @@ class LMSMigrationUI:
         cleaned = cleaned.strip("-._")
         return cleaned or "course"
 
+    def _split_hint_tokens(self, value: str) -> tuple[str, ...]:
+        tokens: list[str] = []
+        for part in re.split(r"[,;\n]+", value or ""):
+            token = part.strip().lower()
+            if not token or token in tokens:
+                continue
+            tokens.append(token)
+        return tuple(tokens)
+
     def _ab_artifact_prefix(self, variant: str) -> str:
         code = self.sinclair_course_code_var.get().strip()
         if not code:
@@ -315,7 +412,7 @@ class LMSMigrationUI:
                 self.optional_tools_frame.grid_remove()
         if hasattr(self, "optional_tools_toggle_btn"):
             self.optional_tools_toggle_btn.configure(
-                text="Hide Optional Tools (Summary/Audits)" if show else "Show Optional Tools (Summary/Audits)"
+                text="Hide Advanced Tools" if show else "Show Advanced Tools"
             )
 
     def _on_canvas_course_id_changed(self) -> None:
@@ -393,6 +490,8 @@ class LMSMigrationUI:
 
         self._maybe_sync_canvas_issues_output_path()
         self._maybe_sync_visual_audit_paths()
+        if hasattr(self, "readiness_local_var"):
+            self._refresh_readiness_snapshot()
 
     def _should_auto_reset_output_dir(self, output_dir: Path) -> bool:
         workspace_output = (self._resolve_workspace_root() / "output").resolve()
@@ -461,6 +560,13 @@ class LMSMigrationUI:
         ):
             self.visual_audit_output_var.set(str(visual_output_default))
 
+        math_output_default = _default_math_audit_json_path(converted_default)
+        if self._should_auto_reset_visual_audit_path(
+            self.math_audit_output_var.get().strip(),
+            ".math-audit.json",
+        ):
+            self.math_audit_output_var.set(str(math_output_default))
+
     def _build_layout(self) -> None:
         container = ttk.Frame(self.root)
         container.grid(row=0, column=0, sticky="nsew")
@@ -482,6 +588,7 @@ class LMSMigrationUI:
         self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
 
         main.columnconfigure(1, weight=1)
+        main.columnconfigure(2, weight=1)
 
         identifiers = ttk.LabelFrame(main, text="0) Course Identifiers", padding=10)
         identifiers.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
@@ -510,12 +617,15 @@ class LMSMigrationUI:
         )
         ttk.Label(
             identifiers,
-            text="Recommended flow: Pre-Import Pipeline -> Canvas Import -> A/B Variant Cycle -> Live Link Audit.",
+            text="Recommended flow: Prepare Canvas Package -> import into Canvas -> Run Canvas Cleanup + Audit -> Capture Course Snapshot -> Review Readiness.",
+            wraplength=920,
+            justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        migration = ttk.LabelFrame(main, text="1) Local Course Migration", padding=10)
+        migration = ttk.LabelFrame(main, text="1) Build Canvas Package", padding=10)
         migration.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         migration.columnconfigure(1, weight=1)
+        migration.columnconfigure(2, weight=1)
 
         ttk.Label(migration, text="D2L export ZIP").grid(row=0, column=0, sticky="w", pady=3)
         self.input_zip_combo = ttk.Combobox(
@@ -573,7 +683,7 @@ class LMSMigrationUI:
         )
         self.enable_template_overlay_check = ttk.Checkbutton(
             migration,
-            text="Apply Template Overlay (map known Brightspace template assets to Canvas template assets)",
+            text="Apply Template Overlay",
             variable=self.enable_template_overlay_var,
         )
         self.enable_template_overlay_check.grid(row=5, column=1, sticky="w", pady=(0, 3))
@@ -583,68 +693,213 @@ class LMSMigrationUI:
             variable=self.template_overlay_use_alias_map_var,
         )
         self.template_overlay_use_alias_map_check.grid(row=5, column=2, sticky="w", pady=(0, 3))
-        ttk.Label(migration, text="Policy profile").grid(row=6, column=0, sticky="w", pady=3)
+        ttk.Label(
+            migration,
+            text="Maps known Brightspace template assets to the Sinclair Canvas template while keeping the overlay optional.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=6, column=1, columnspan=2, sticky="w", pady=(0, 3))
+        ttk.Label(migration, text="Policy profile").grid(row=7, column=0, sticky="w", pady=3)
         self.policy_profile_combo = ttk.Combobox(
             migration,
             textvariable=self.policy_profile_var,
             values=self.available_policy_profiles,
             state="readonly",
         )
-        self.policy_profile_combo.grid(row=6, column=1, sticky="ew", padx=6, pady=3)
+        self.policy_profile_combo.grid(row=7, column=1, sticky="ew", padx=6, pady=3)
         self.policy_profile_combo.current(
             self.available_policy_profiles.index(self.policy_profile_var.get())
         )
-        ttk.Label(migration, text="Accordion handling").grid(row=7, column=0, sticky="w", pady=3)
+        ttk.Label(migration, text="Accordion handling").grid(row=8, column=0, sticky="w", pady=3)
         self.accordion_handling_combo = ttk.Combobox(
             migration,
             textvariable=self.accordion_handling_var,
-            values=("details", "flatten", "none"),
+            values=("smart", "details", "flatten", "none"),
             state="readonly",
         )
-        self.accordion_handling_combo.grid(row=7, column=1, sticky="w", padx=6, pady=3)
+        self.accordion_handling_combo.grid(row=8, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(
+            migration,
+            text="Smart mode keeps accessible details blocks on content pages and flattens syllabus/policy-style pages.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=8, column=2, sticky="w", pady=3)
+        ttk.Label(migration, text="Accordion title align").grid(row=9, column=0, sticky="w", pady=3)
+        self.accordion_alignment_combo = ttk.Combobox(
+            migration,
+            textvariable=self.accordion_alignment_var,
+            values=("left", "center"),
+            state="readonly",
+        )
+        self.accordion_alignment_combo.grid(row=9, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(
+            migration,
+            text="Left-aligned summaries match the current blueprint-friendly layout. Center remains available when you explicitly want it.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=9, column=2, sticky="w", pady=3)
+        ttk.Label(migration, text="Always flatten on pages containing").grid(row=10, column=0, sticky="w", pady=3)
+        ttk.Entry(migration, textvariable=self.accordion_flatten_hints_var).grid(
+            row=10, column=1, sticky="ew", padx=6, pady=3
+        )
+        ttk.Label(
+            migration,
+            text="Optional comma-separated path/title hints. Example: syllabus, instructor guide, policy.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=10, column=2, sticky="w", pady=3)
+        ttk.Label(migration, text="Always keep details on pages containing").grid(row=11, column=0, sticky="w", pady=3)
+        ttk.Entry(migration, textvariable=self.accordion_details_hints_var).grid(
+            row=11, column=1, sticky="ew", padx=6, pady=3
+        )
+        ttk.Label(
+            migration,
+            text="Optional comma-separated path/title hints. Example: student resources, faq, support, lesson.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=11, column=2, sticky="w", pady=3)
         self.template_module_structure_check = ttk.Checkbutton(
             migration,
-            text="Apply Template Module Structure (Overview/Activities/Review + module item naming)",
+            text="Apply Template Module Structure",
             variable=self.template_module_structure_var,
         )
-        self.template_module_structure_check.grid(row=8, column=1, sticky="w", pady=(0, 3))
+        self.template_module_structure_check.grid(row=12, column=1, sticky="w", pady=(0, 3))
+        ttk.Label(
+            migration,
+            text="Renames Topic -> Module where appropriate and applies the template's Overview / Learning Activities / Review structure.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=12, column=2, sticky="w", pady=(0, 3))
         self.template_visual_standards_check = ttk.Checkbutton(
             migration,
-            text="Apply Template Visual Standards (icon+heading layout, icon sizing/labels)",
+            text="Apply Template Visual Standards",
             variable=self.template_visual_standards_var,
         )
-        self.template_visual_standards_check.grid(row=9, column=1, sticky="w", pady=(0, 3))
+        self.template_visual_standards_check.grid(row=13, column=1, sticky="w", pady=(0, 3))
+        ttk.Label(
+            migration,
+            text="Normalizes icon + label pairs, divider styling, image presentation, and template heading fidelity.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=13, column=2, sticky="w", pady=(0, 3))
+        self.template_color_standards_check = ttk.Checkbutton(
+            migration,
+            text="Apply Template Color Standards",
+            variable=self.template_color_standards_var,
+        )
+        self.template_color_standards_check.grid(row=14, column=1, sticky="w", pady=(0, 3))
+        ttk.Label(
+            migration,
+            text="Applies template heading/text color treatment, especially Sinclair red heading accents. Turn this off if you want structure/icon cleanup without color normalization.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=14, column=2, sticky="w", pady=(0, 3))
+        self.template_divider_standards_check = ttk.Checkbutton(
+            migration,
+            text="Apply Template Divider Standards",
+            variable=self.template_divider_standards_var,
+        )
+        self.template_divider_standards_check.grid(row=15, column=1, sticky="w", pady=(0, 3))
+        ttk.Label(
+            migration,
+            text="Applies the template divider rules: 10px red page-heading underlines, 8px red closing rules, and normalized internal dividers. Turn this off to preserve incoming divider styling.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=15, column=2, sticky="w", pady=(0, 3))
+        ttk.Label(migration, text="Image layout mode").grid(row=16, column=0, sticky="w", pady=3)
+        self.image_layout_mode_combo = ttk.Combobox(
+            migration,
+            textvariable=self.image_layout_mode_var,
+            values=("safe-block", "preserve-wrap"),
+            state="readonly",
+        )
+        self.image_layout_mode_combo.grid(row=16, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(
+            migration,
+            text="Safe-block is the default and avoids text overlap. Preserve-wrap keeps original left/right wrapped-image layouts when present, but should be used only when that look is important.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=16, column=2, sticky="w", pady=3)
+        ttk.Label(migration, text="Math handling").grid(row=17, column=0, sticky="w", pady=3)
+        self.math_handling_combo = ttk.Combobox(
+            migration,
+            textvariable=self.math_handling_var,
+            values=("preserve-semantic", "canvas-equation-compatible", "audit-only"),
+            state="readonly",
+        )
+        self.math_handling_combo.grid(row=17, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(
+            migration,
+            text="Preserve semantic math keeps MathML/WIRIS when valid, removes empty stubs, and makes display equations responsive. Audit-only reports math without changing it.",
+            wraplength=640,
+            justify="left",
+        ).grid(row=17, column=2, sticky="w", pady=3)
         ttk.Checkbutton(
             migration,
             text="Apply Best-Practice Enforcer (safe subset)",
             variable=self.enable_best_practice_enforcer_var,
-        ).grid(row=10, column=1, sticky="w", pady=(0, 3))
+        ).grid(row=18, column=1, sticky="w", pady=(0, 3))
 
         self.run_migration_btn = ttk.Button(
             migration,
-            text="Run Migration",
+            text="Advanced: Convert Only",
             command=self._run_migration_clicked,
         )
-        self.run_migration_btn.grid(row=11, column=2, sticky="e", pady=(8, 0))
+        self.run_migration_btn.grid(row=19, column=2, sticky="e", pady=(8, 0))
         self.run_full_pipeline_btn = ttk.Button(
             migration,
-            text="Run Pre-Import Pipeline",
+            text="Prepare Canvas Package",
             command=self._run_pre_import_pipeline_clicked,
         )
-        self.run_full_pipeline_btn.grid(row=11, column=1, sticky="e", pady=(8, 0), padx=(0, 8))
+        self.run_full_pipeline_btn.grid(row=19, column=1, sticky="e", pady=(8, 0), padx=(0, 8))
+        self._sync_template_visual_subcontrols_state()
+
+        review = ttk.LabelFrame(main, text="2) Readiness Snapshot", padding=10)
+        review.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        review.columnconfigure(0, weight=1)
+        ttk.Label(
+            review,
+            text="This panel summarizes what is ready before upload and what still needs action.",
+            justify="left",
+            wraplength=1080,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            review,
+            textvariable=self.readiness_local_var,
+            justify="left",
+            wraplength=1080,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(
+            review,
+            textvariable=self.readiness_review_var,
+            justify="left",
+            wraplength=1080,
+        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(
+            review,
+            textvariable=self.readiness_canvas_var,
+            justify="left",
+            wraplength=1080,
+        ).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(
+            review,
+            textvariable=self.readiness_next_step_var,
+            justify="left",
+            wraplength=1080,
+        ).grid(row=4, column=0, sticky="w", pady=(8, 0))
 
         self.optional_tools_toggle_btn = ttk.Button(
             main,
-            text="Show Optional Tools (Summary/Audits)",
+            text="Show Advanced Tools",
             command=self._toggle_optional_tools,
         )
-        self.optional_tools_toggle_btn.grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        self.optional_tools_toggle_btn.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         self.optional_tools_frame = ttk.Frame(main)
-        self.optional_tools_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self.optional_tools_frame.grid(row=4, column=0, columnspan=3, sticky="ew")
         self.optional_tools_frame.columnconfigure(0, weight=1)
 
-        summary = ttk.LabelFrame(self.optional_tools_frame, text="2) Non-Sensitive Summary", padding=10)
+        summary = ttk.LabelFrame(self.optional_tools_frame, text="Summary / Clipboard", padding=10)
         summary.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         summary.columnconfigure(1, weight=1)
 
@@ -681,7 +936,7 @@ class LMSMigrationUI:
         )
         self.copy_summary_btn.grid(row=0, column=1)
 
-        audit = ttk.LabelFrame(self.optional_tools_frame, text="3) Best-Practices Audit (Optional)", padding=10)
+        audit = ttk.LabelFrame(self.optional_tools_frame, text="Spreadsheet Audit", padding=10)
         audit.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         audit.columnconfigure(1, weight=1)
 
@@ -704,7 +959,7 @@ class LMSMigrationUI:
         )
         self.run_audit_btn.grid(row=1, column=2, sticky="e", pady=3)
 
-        reference = ttk.LabelFrame(self.optional_tools_frame, text="4) Reference Docs Audit (Optional)", padding=10)
+        reference = ttk.LabelFrame(self.optional_tools_frame, text="Reference Docs Audit", padding=10)
         reference.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         reference.columnconfigure(1, weight=1)
 
@@ -727,6 +982,14 @@ class LMSMigrationUI:
         self._add_file_row(
             parent=reference,
             row=2,
+            label="Set-up checklist docx",
+            variable=self.ref_setup_checklist_docx_var,
+            button_text="Browse File",
+            filetypes=[("Word Document", "*.docx"), ("All files", "*.*")],
+        )
+        self._add_file_row(
+            parent=reference,
+            row=3,
             label="Page templates docx",
             variable=self.ref_page_templates_docx_var,
             button_text="Browse File",
@@ -734,20 +997,26 @@ class LMSMigrationUI:
         )
         self._add_file_row(
             parent=reference,
-            row=3,
+            row=4,
             label="Syllabus template docx",
             variable=self.ref_syllabus_template_docx_var,
             button_text="Browse File",
             filetypes=[("Word Document", "*.docx"), ("All files", "*.*")],
         )
+        ttk.Label(
+            reference,
+            text="The March 16, 2026 Canvas Blueprints file and the templated course set-up checklist are the default governance sources for naming, accordion, quiz, rubric, video, and release-readiness checks.",
+            wraplength=980,
+            justify="left",
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
         self.run_reference_audit_btn = ttk.Button(
             reference,
             text="Run Reference Audit",
             command=self._run_reference_audit_clicked,
         )
-        self.run_reference_audit_btn.grid(row=4, column=2, sticky="e", pady=(6, 0))
+        self.run_reference_audit_btn.grid(row=6, column=2, sticky="e", pady=(6, 0))
 
-        visual = ttk.LabelFrame(self.optional_tools_frame, text="5) Visual HTML Audit (Optional)", padding=10)
+        visual = ttk.LabelFrame(self.optional_tools_frame, text="Advanced ZIP Review", padding=10)
         visual.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         visual.columnconfigure(1, weight=1)
         self._add_file_row(
@@ -775,17 +1044,84 @@ class LMSMigrationUI:
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
             save_mode=True,
         )
-        self.run_visual_audit_btn = ttk.Button(
+        self._add_file_row(
+            parent=visual,
+            row=3,
+            label="Math audit JSON output",
+            variable=self.math_audit_output_var,
+            button_text="Save As",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            save_mode=True,
+        )
+        self._add_file_row(
+            parent=visual,
+            row=4,
+            label="Review draft JSON",
+            variable=self.review_draft_json_var,
+            button_text="Browse Draft",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        self._add_file_row(
+            parent=visual,
+            row=5,
+            label="Reviewed ZIP output",
+            variable=self.reviewed_zip_output_var,
+            button_text="Save As",
+            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")],
+            save_mode=True,
+        )
+        self._add_file_row(
+            parent=visual,
+            row=6,
+            label="Pattern report JSON output",
+            variable=self.pattern_report_output_var,
+            button_text="Save As",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            save_mode=True,
+        )
+        ttk.Label(
             visual,
+            text="Use the HTML workbench to export a review draft, then apply it here to generate a reviewed ZIP before Canvas import.",
+            wraplength=900,
+            justify="left",
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        visual_actions = ttk.Frame(visual)
+        visual_actions.grid(row=8, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        self.run_visual_audit_btn = ttk.Button(
+            visual_actions,
             text="Run Visual Audit",
             command=self._run_visual_audit_clicked,
         )
-        self.run_visual_audit_btn.grid(row=3, column=2, sticky="e", pady=(6, 0))
+        self.run_visual_audit_btn.grid(row=0, column=0, padx=(0, 8))
+        self.run_math_audit_btn = ttk.Button(
+            visual_actions,
+            text="Run Math Audit",
+            command=self._run_math_audit_clicked,
+        )
+        self.run_math_audit_btn.grid(row=0, column=1, padx=(0, 8))
+        self.build_page_review_btn = ttk.Button(
+            visual_actions,
+            text="Build Page Review Workbench",
+            command=self._build_page_review_clicked,
+        )
+        self.build_page_review_btn.grid(row=0, column=2, padx=(0, 8))
+        self.apply_review_draft_btn = ttk.Button(
+            visual_actions,
+            text="Apply Review Draft",
+            command=self._apply_review_draft_clicked,
+        )
+        self.apply_review_draft_btn.grid(row=0, column=3, padx=(0, 8))
+        self.build_pattern_report_btn = ttk.Button(
+            visual_actions,
+            text="Build Pattern Report",
+            command=self._build_pattern_report_clicked,
+        )
+        self.build_pattern_report_btn.grid(row=0, column=4)
 
         self._apply_optional_tools_visibility()
 
-        canvas = ttk.LabelFrame(main, text="6) Canvas Post-Import Tools", padding=10)
-        canvas.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        canvas = ttk.LabelFrame(main, text="3) Canvas Post-Import Review", padding=10)
+        canvas.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         canvas.columnconfigure(1, weight=1)
 
         ttk.Label(canvas, text="Canvas base URL").grid(row=0, column=0, sticky="w", pady=3)
@@ -873,13 +1209,13 @@ class LMSMigrationUI:
         canvas_secondary_actions.grid(row=5, column=0, columnspan=3, sticky="e", pady=(6, 0))
         self.fetch_canvas_imports_btn = ttk.Button(
             canvas_secondary_actions,
-            text="Fetch Imports",
+            text="Find Latest Import",
             command=self._fetch_canvas_imports_clicked,
         )
         self.fetch_canvas_imports_btn.grid(row=0, column=0, padx=(0, 8))
         self.export_canvas_issues_btn = ttk.Button(
             canvas_secondary_actions,
-            text="Export Issues JSON",
+            text="Save Import Issues",
             command=self._export_canvas_issues_clicked,
         )
         self.export_canvas_issues_btn.grid(row=0, column=1, padx=(0, 8))
@@ -891,22 +1227,28 @@ class LMSMigrationUI:
         self.build_fix_checklist_btn.grid(row=0, column=2, padx=(0, 8))
         self.snapshot_canvas_course_btn = ttk.Button(
             canvas_secondary_actions,
-            text="Snapshot Course",
+            text="Capture Course Snapshot",
             command=self._snapshot_canvas_course_clicked,
         )
         self.snapshot_canvas_course_btn.grid(row=0, column=3)
+        self.build_approval_report_btn = ttk.Button(
+            canvas_secondary_actions,
+            text="Review Readiness",
+            command=self._build_approval_report_clicked,
+        )
+        self.build_approval_report_btn.grid(row=0, column=4, padx=(8, 0))
 
         canvas_actions = ttk.Frame(canvas)
         canvas_actions.grid(row=5, column=0, columnspan=3, sticky="e", pady=(8, 0))
         self.run_full_post_import_btn = ttk.Button(
             canvas_actions,
-            text="Run Full Post-Import",
+            text="Run Canvas Cleanup + Audit",
             command=self._run_full_post_import_clicked,
         )
         self.run_full_post_import_btn.grid(row=0, column=0, padx=(0, 8))
         self.run_post_import_pipeline_btn = ttk.Button(
             canvas_actions,
-            text="Run Post-Import Pipeline",
+            text="Export Issues + Checklist",
             command=self._run_post_import_pipeline_clicked,
         )
         self.run_post_import_pipeline_btn.grid(row=0, column=1, padx=(0, 8))
@@ -930,7 +1272,7 @@ class LMSMigrationUI:
         self._apply_canvas_advanced_visibility()
 
         log_frame = ttk.LabelFrame(main, text="Run Log", padding=10)
-        log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(1, weight=1)
 
@@ -947,8 +1289,9 @@ class LMSMigrationUI:
         scroll.grid(row=1, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scroll.set)
 
-        self._log("Ready. Select a D2L zip and click Run Migration.")
+        self._log("Ready. Select a D2L zip and click Prepare Canvas Package.")
         self._bind_mousewheel()
+        self._refresh_readiness_snapshot()
 
     def _add_file_row(
         self,
@@ -999,11 +1342,27 @@ class LMSMigrationUI:
             if variable is self.input_zip_var:
                 self._remember_input_zip_path(path)
                 self._apply_input_zip_inference()
+            elif variable is self.visual_converted_zip_var:
+                self._sync_review_outputs_from_converted_zip(Path(path))
 
     def _browse_directory(self, variable: tk.StringVar) -> None:
         path = filedialog.askdirectory()
         if path:
             variable.set(path)
+
+    def _sync_review_outputs_from_converted_zip(self, converted_zip: Path) -> None:
+        if not converted_zip.exists():
+            return
+        if not self.visual_converted_zip_var.get().strip():
+            self.visual_converted_zip_var.set(str(converted_zip))
+        if not self.visual_audit_output_var.get().strip():
+            self.visual_audit_output_var.set(str(_default_visual_audit_json_path(converted_zip)))
+        if not self.review_draft_json_var.get().strip():
+            self.review_draft_json_var.set(str(_default_review_draft_json_path(converted_zip)))
+        if not self.reviewed_zip_output_var.get().strip():
+            self.reviewed_zip_output_var.set(str(_default_reviewed_zip_path(converted_zip)))
+        if not self.pattern_report_output_var.get().strip():
+            self.pattern_report_output_var.set(str(_default_pattern_report_json_path(converted_zip)))
 
     def _on_main_configure(self, event: tk.Event) -> None:
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
@@ -1045,6 +1404,21 @@ class LMSMigrationUI:
         self.log_text.delete("1.0", "end")
         self._log("Log cleared.")
 
+    def _sync_template_visual_subcontrols_state(self) -> None:
+        if (
+            not hasattr(self, "template_color_standards_check")
+            or not hasattr(self, "template_divider_standards_check")
+            or not hasattr(self, "image_layout_mode_combo")
+        ):
+            return
+        if self.is_busy:
+            state = "disabled"
+        else:
+            state = "normal" if self.template_visual_standards_var.get() else "disabled"
+        self.template_color_standards_check.configure(state=state)
+        self.template_divider_standards_check.configure(state=state)
+        self.image_layout_mode_combo.configure(state="readonly" if state == "normal" else "disabled")
+
     def _set_busy(self, busy: bool) -> None:
         self.is_busy = busy
         state = "disabled" if busy else "normal"
@@ -1053,22 +1427,31 @@ class LMSMigrationUI:
         self.run_full_pipeline_btn.configure(state=state)
         self.run_full_post_import_btn.configure(state=state)
         self.policy_profile_combo.configure(state="disabled" if busy else "readonly")
+        self.math_handling_combo.configure(state="disabled" if busy else "readonly")
+        self.image_layout_mode_combo.configure(state="disabled" if busy else "readonly")
         self.accordion_handling_combo.configure(state="disabled" if busy else "readonly")
+        self.accordion_alignment_combo.configure(state="disabled" if busy else "readonly")
         self.template_overlay_use_alias_map_check.configure(state=state)
         self.enable_template_overlay_check.configure(state=state)
         self.template_module_structure_check.configure(state=state)
         self.template_visual_standards_check.configure(state=state)
+        self._sync_template_visual_subcontrols_state()
         self.build_summary_btn.configure(state=state)
         self.copy_summary_btn.configure(state=state if self.latest_safe_summary else "disabled")
         self.run_audit_btn.configure(state=state)
         self.run_reference_audit_btn.configure(state=state)
         self.run_visual_audit_btn.configure(state=state)
+        self.run_math_audit_btn.configure(state=state)
+        self.build_page_review_btn.configure(state=state)
+        self.apply_review_draft_btn.configure(state=state)
+        self.build_pattern_report_btn.configure(state=state)
         self.run_post_import_pipeline_btn.configure(state=state)
         self.fetch_canvas_imports_btn.configure(state=state)
         self.export_canvas_issues_btn.configure(state=state)
         self.auto_relink_btn.configure(state=state)
         self.build_fix_checklist_btn.configure(state=state)
         self.snapshot_canvas_course_btn.configure(state=state)
+        self.build_approval_report_btn.configure(state=state)
         self.live_link_audit_btn.configure(state=state)
         self.run_ab_variant_cycle_btn.configure(state=state)
         self.canvas_advanced_toggle_btn.configure(state=state)
@@ -1102,76 +1485,315 @@ class LMSMigrationUI:
 
     def _task_succeeded(self, task_name: str) -> None:
         self._log(f"[DONE] {task_name}")
+        try:
+            self._refresh_readiness_snapshot()
+        except Exception:
+            pass
         self._set_busy(False)
         self.status_text_var.set(f"Status: Idle (last: {task_name})")
 
-    def _run_migration_clicked(self) -> None:
+    def _collect_local_migration_request(self) -> dict | None:
         self._maybe_apply_course_folder_defaults()
         input_zip = Path(self.input_zip_var.get().strip())
         rules_path = Path(self.rules_var.get().strip())
         output_dir = Path(self.output_dir_var.get().strip())
         policy_profile_id = self.policy_profile_var.get().strip()
         best_practice_enforcer = bool(self.enable_best_practice_enforcer_var.get())
+        math_handling = self.math_handling_var.get().strip().lower() or "preserve-semantic"
         accordion_handling = self.accordion_handling_var.get().strip().lower() or "flatten"
+        accordion_alignment = self.accordion_alignment_var.get().strip().lower() or "left"
+        accordion_flatten_hints = self._split_hint_tokens(self.accordion_flatten_hints_var.get())
+        accordion_details_hints = self._split_hint_tokens(self.accordion_details_hints_var.get())
         apply_template_module_structure = bool(self.template_module_structure_var.get())
         apply_template_visual_standards = bool(self.template_visual_standards_var.get())
+        apply_template_color_standards = bool(self.template_color_standards_var.get())
+        apply_template_divider_standards = bool(self.template_divider_standards_var.get())
+        image_layout_mode = self.image_layout_mode_var.get().strip().lower() or "safe-block"
         template_overlay_enabled = bool(self.enable_template_overlay_var.get())
         template_package: Path | None = None
         template_alias_map_json: Path | None = None
 
         if not input_zip.exists():
             messagebox.showwarning("Missing input", "Select a valid D2L export ZIP.")
-            return
+            return None
         if not rules_path.exists():
             messagebox.showwarning("Missing rules", "Select a valid rules JSON file.")
-            return
+            return None
         if not self.policy_profiles_path.exists():
             messagebox.showwarning("Missing profiles", f"Policy profiles file not found: {self.policy_profiles_path}")
-            return
+            return None
         if template_overlay_enabled:
             template_package_text = self.template_package_var.get().strip()
             if not template_package_text:
-                messagebox.showwarning("Missing template package", "Select a template package (.imscc) or disable Template Overlay.")
-                return
+                messagebox.showwarning(
+                    "Missing template package",
+                    "Select a template package (.imscc) or disable Template Overlay.",
+                )
+                return None
             template_package = Path(template_package_text)
             if not template_package.exists():
                 messagebox.showwarning("Missing template package", f"Template package does not exist: {template_package}")
-                return
+                return None
             if self.template_overlay_use_alias_map_var.get():
                 alias_map_text = self.template_alias_map_var.get().strip()
                 if alias_map_text:
                     alias_path = Path(alias_map_text)
                     if not alias_path.exists():
                         messagebox.showwarning("Missing alias map", f"Template alias map JSON does not exist: {alias_path}")
-                        return
+                        return None
                     template_alias_map_json = alias_path
+
         if not self.visual_original_zip_var.get().strip():
             self.visual_original_zip_var.set(str(input_zip))
         self._remember_sinclair_course_code()
         self._remember_input_zip_path(str(input_zip))
 
+        return {
+            "input_zip": input_zip,
+            "rules_path": rules_path,
+            "output_dir": output_dir,
+            "policy_profile_id": policy_profile_id,
+            "best_practice_enforcer": best_practice_enforcer,
+            "math_handling": math_handling,
+            "accordion_handling": accordion_handling,
+            "accordion_alignment": accordion_alignment,
+            "accordion_flatten_hints": accordion_flatten_hints,
+            "accordion_details_hints": accordion_details_hints,
+            "apply_template_module_structure": apply_template_module_structure,
+            "apply_template_visual_standards": apply_template_visual_standards,
+            "apply_template_color_standards": apply_template_color_standards,
+            "apply_template_divider_standards": apply_template_divider_standards,
+            "image_layout_mode": image_layout_mode,
+            "template_package": template_package,
+            "template_alias_map_json": template_alias_map_json,
+            "reference_audit_json": self._find_reference_audit_json(),
+        }
+
+    def _run_migration_clicked(self) -> None:
+        request = self._collect_local_migration_request()
+        if request is None:
+            return
+
         def task() -> None:
-            reference_audit_json = self._find_reference_audit_json()
             result = run_migration(
-                input_zip=input_zip,
-                output_dir=output_dir,
-                rules_path=rules_path,
-                policy_profile_id=policy_profile_id,
+                input_zip=request["input_zip"],
+                output_dir=request["output_dir"],
+                rules_path=request["rules_path"],
+                policy_profile_id=request["policy_profile_id"],
                 policy_profiles_path=self.policy_profiles_path,
-                reference_audit_json=reference_audit_json,
-                best_practice_enforcer=best_practice_enforcer,
-                template_package=template_package,
-                template_alias_map_json=template_alias_map_json,
-                accordion_handling=accordion_handling,
-                apply_template_module_structure=apply_template_module_structure,
-                apply_template_visual_standards=apply_template_visual_standards,
+                reference_audit_json=request["reference_audit_json"],
+                best_practice_enforcer=request["best_practice_enforcer"],
+                template_package=request["template_package"],
+                template_alias_map_json=request["template_alias_map_json"],
+                math_handling=request["math_handling"],
+                accordion_handling=request["accordion_handling"],
+                accordion_alignment=request["accordion_alignment"],
+                accordion_flatten_hints=request["accordion_flatten_hints"],
+                accordion_details_hints=request["accordion_details_hints"],
+                apply_template_module_structure=request["apply_template_module_structure"],
+                apply_template_visual_standards=request["apply_template_visual_standards"],
+                apply_template_color_standards=request["apply_template_color_standards"],
+                apply_template_divider_standards=request["apply_template_divider_standards"],
+                image_layout_mode=request["image_layout_mode"],
             )
-            self.root.after(0, lambda: self._handle_migration_result(result, reference_audit_json))
+            self.root.after(0, lambda: self._handle_migration_result(result, request["reference_audit_json"]))
 
         self._run_background("Run local migration", task)
 
     def _run_pre_import_pipeline_clicked(self) -> None:
-        self._run_migration_clicked()
+        request = self._collect_local_migration_request()
+        if request is None:
+            return
+
+        def task() -> None:
+            result = run_migration(
+                input_zip=request["input_zip"],
+                output_dir=request["output_dir"],
+                rules_path=request["rules_path"],
+                policy_profile_id=request["policy_profile_id"],
+                policy_profiles_path=self.policy_profiles_path,
+                reference_audit_json=request["reference_audit_json"],
+                best_practice_enforcer=request["best_practice_enforcer"],
+                template_package=request["template_package"],
+                template_alias_map_json=request["template_alias_map_json"],
+                math_handling=request["math_handling"],
+                accordion_handling=request["accordion_handling"],
+                accordion_alignment=request["accordion_alignment"],
+                accordion_flatten_hints=request["accordion_flatten_hints"],
+                accordion_details_hints=request["accordion_details_hints"],
+                apply_template_module_structure=request["apply_template_module_structure"],
+                apply_template_visual_standards=request["apply_template_visual_standards"],
+                apply_template_color_standards=request["apply_template_color_standards"],
+                apply_template_divider_standards=request["apply_template_divider_standards"],
+                image_layout_mode=request["image_layout_mode"],
+            )
+
+            safe_summary_path = _default_safe_summary_path(result.report_json)
+            safe_summary = build_safe_summary_from_path(result.report_json)
+            safe_summary_path.write_text(safe_summary, encoding="utf-8")
+
+            visual_json = _default_visual_audit_json_path(result.output_zip)
+            visual_markdown = visual_json.with_suffix(".md")
+            visual_report = build_visual_audit(
+                original_zip=request["input_zip"],
+                converted_zip=result.output_zip,
+            )
+            visual_json.write_text(json.dumps(visual_report, indent=2), encoding="utf-8")
+            visual_summary = visual_report.get("summary", {})
+            visual_markdown.write_text(
+                "\n".join(
+                    [
+                        "# Visual Audit",
+                        "",
+                        "## Summary",
+                        "",
+                        f"- Files scanned: {visual_summary.get('files_scanned', 0)}",
+                        f"- Duplicate title/first-block files: {visual_summary.get('files_with_duplicate_title_first_block', 0)}",
+                        f"- Remaining shared template refs: {visual_summary.get('files_with_remaining_shared_template_refs', 0)}",
+                        f"- Remaining title tags: {visual_summary.get('files_with_remaining_title_tags', 0)}",
+                        f"- Nonstandard divider files: {visual_summary.get('files_with_nonstandard_hr', 0)}",
+                        f"- Icon-size anomaly files: {visual_summary.get('files_with_icon_size_anomalies', 0)}",
+                        f"- Accordion cards (original): {visual_summary.get('total_original_accordion_cards', 0)}",
+                        f"- Details blocks (converted): {visual_summary.get('total_converted_details_blocks', 0)}",
+                        f"- MathML expressions (original): {visual_summary.get('total_original_mathml', 0)}",
+                        f"- MathML expressions (converted): {visual_summary.get('total_converted_mathml', 0)}",
+                        f"- Remaining WIRIS annotations: {visual_summary.get('total_converted_wiris_annotations', 0)}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            math_json = _default_math_audit_json_path(result.output_zip)
+            math_markdown = math_json.with_suffix(".md")
+            math_report = build_math_audit(
+                original_zip=request["input_zip"],
+                converted_zip=result.output_zip,
+            )
+            math_json.write_text(json.dumps(math_report, indent=2), encoding="utf-8")
+            math_summary = math_report.get("summary", {})
+            math_markdown.write_text(
+                "\n".join(
+                    [
+                        "# Math Audit",
+                        "",
+                        "## Summary",
+                        "",
+                        f"- Files with math: {math_summary.get('files_with_math', 0)}",
+                        f"- Files with math review flags: {math_summary.get('files_with_math_review_flags', 0)}",
+                        f"- Mixed math-mode files: {math_summary.get('files_with_mixed_math_modes', 0)}",
+                        f"- Canvas equation images: {math_summary.get('total_converted_equation_images', 0)}",
+                        f"- Raw TeX delimiters: {math_summary.get('total_converted_raw_tex_delimiters', 0)}",
+                        f"- Empty MathML stubs: {math_summary.get('total_converted_empty_mathml_stubs', 0)}",
+                        f"- Absolute equation-image URLs: {math_summary.get('total_absolute_equation_image_urls', 0)}",
+                        f"- Equation images missing alt: {math_summary.get('total_equation_images_missing_alt', 0)}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            page_review_json = _default_page_review_json_path(result.output_zip)
+            page_review_markdown = page_review_json.with_suffix(".md")
+            page_review_html = page_review_json.with_suffix(".html")
+            page_review_json, page_review_markdown, page_review_html = build_review_pack(
+                original_zip=request["input_zip"],
+                converted_zip=result.output_zip,
+                migration_report_json=result.report_json,
+                visual_audit_json=visual_json,
+                output_json_path=page_review_json,
+                output_markdown_path=page_review_markdown,
+                output_html_path=page_review_html,
+            )
+            page_review_report = json.loads(page_review_json.read_text(encoding="utf-8"))
+            page_review_summary = page_review_report.get("summary", {})
+
+            output_dir = result.output_zip.parent
+            snapshot_json = self._find_latest_snapshot_json(output_dir, self.canvas_course_id_var.get().strip())
+            if snapshot_json is not None and not snapshot_json.exists():
+                snapshot_json = None
+            pre_issues_json = output_dir / "canvas-migration-issues-pre.json"
+            if not pre_issues_json.exists():
+                pre_issues_json = None
+            post_issues_json = output_dir / "canvas-migration-issues-post.json"
+            if not post_issues_json.exists():
+                fallback_issues = output_dir / "canvas-migration-issues.json"
+                post_issues_json = fallback_issues if fallback_issues.exists() else None
+            live_audit_json = output_dir / "canvas-live-link-audit.json"
+            if not live_audit_json.exists():
+                live_audit_json = None
+            if not self._artifact_is_current(snapshot_json, result.report_json):
+                snapshot_json = None
+            if not self._artifact_is_current(pre_issues_json, result.report_json):
+                pre_issues_json = None
+            if not self._artifact_is_current(post_issues_json, result.report_json):
+                post_issues_json = None
+            if not self._artifact_is_current(live_audit_json, result.report_json):
+                live_audit_json = None
+            approval_json = result.report_json.with_name(
+                result.report_json.name.replace(".migration-report.json", ".approval-report.json")
+            )
+            approval_markdown = approval_json.with_suffix(".md")
+            approval_json, approval_markdown = build_approval_report(
+                current_course_code=self.sinclair_course_code_var.get().strip() or output_dir.name,
+                current_source_zip=request["input_zip"],
+                current_converted_zip=result.output_zip,
+                current_migration_report_json=result.report_json,
+                current_visual_audit_json=visual_json,
+                current_template_overlay_json=result.template_overlay_report_json,
+                current_snapshot_json=snapshot_json,
+                pre_issues_json=pre_issues_json,
+                post_issues_json=post_issues_json,
+                live_audit_json=live_audit_json,
+                examples_dir=self._resolve_workspace_root() / "resources" / "examples",
+                training_metadata_root=self._resolve_workspace_root() / "resources" / "training-corpus-v2" / "courses",
+                output_root=self._resolve_workspace_root() / "output",
+                output_json_path=approval_json,
+                output_markdown_path=approval_markdown,
+            )
+            approval_report = json.loads(approval_json.read_text(encoding="utf-8"))
+            pattern_json = _default_pattern_report_json_path(result.output_zip)
+            pattern_markdown = pattern_json.with_suffix(".md")
+            template_package_for_patterns = request["template_package"]
+            if template_package_for_patterns is None:
+                fallback_template = Path(self.template_package_var.get().strip()) if self.template_package_var.get().strip() else None
+                template_package_for_patterns = fallback_template if fallback_template is not None and fallback_template.exists() else None
+            pattern_json, pattern_markdown = build_pattern_report(
+                current_course_code=self.sinclair_course_code_var.get().strip() or output_dir.name,
+                current_source_zip=request["input_zip"],
+                current_converted_zip=result.output_zip,
+                training_courses_root=self._resolve_workspace_root() / "resources" / "training-corpus-v2" / "courses",
+                template_package=template_package_for_patterns,
+                best_practices_docx=Path(self.ref_best_practices_docx_var.get().strip())
+                if self.ref_best_practices_docx_var.get().strip()
+                else None,
+                output_json_path=pattern_json,
+                output_markdown_path=pattern_markdown,
+            )
+            pattern_report = json.loads(pattern_json.read_text(encoding="utf-8"))
+            payload = {
+                "result": result,
+                "reference_audit_json": request["reference_audit_json"],
+                "safe_summary_path": safe_summary_path,
+                "safe_summary": safe_summary,
+                "visual_json": visual_json,
+                "visual_markdown": visual_markdown,
+                "visual_summary": visual_summary,
+                "math_json": math_json,
+                "math_markdown": math_markdown,
+                "math_summary": math_summary,
+                "page_review_json": page_review_json,
+                "page_review_markdown": page_review_markdown,
+                "page_review_html": page_review_html,
+                "page_review_summary": page_review_summary,
+                "approval_json": approval_json,
+                "approval_markdown": approval_markdown,
+                "approval_report": approval_report,
+                "pattern_json": pattern_json,
+                "pattern_markdown": pattern_markdown,
+                "pattern_report": pattern_report,
+            }
+            self.root.after(0, lambda: self._handle_pre_import_pipeline_result(payload))
+
+        self._run_background("Prepare Canvas package", task)
 
     def _find_manual_review_source(self, folders: list[Path]) -> Path | None:
         for folder in folders:
@@ -1652,6 +2274,10 @@ class LMSMigrationUI:
         self.safe_summary_path_var.set(str(safe_summary_path))
         self.visual_converted_zip_var.set(str(result.output_zip))
         self.visual_audit_output_var.set(str(_default_visual_audit_json_path(result.output_zip)))
+        self.math_audit_output_var.set(str(_default_math_audit_json_path(result.output_zip)))
+        self.review_draft_json_var.set(str(_default_review_draft_json_path(result.output_zip)))
+        self.reviewed_zip_output_var.set(str(_default_reviewed_zip_path(result.output_zip)))
+        self.pattern_report_output_var.set(str(_default_pattern_report_json_path(result.output_zip)))
         self.latest_safe_summary = safe_summary
 
         self._log(f"Canvas-ready zip: {result.output_zip}")
@@ -1662,9 +2288,14 @@ class LMSMigrationUI:
         if result.template_overlay_report_json is not None:
             self._log(f"Template overlay report JSON: {result.template_overlay_report_json}")
         self._log(f"Policy profile used: {result.policy_profile_id}")
+        self._log(f"Math handling: {self.math_handling_var.get()}")
         self._log(f"Accordion handling: {self.accordion_handling_var.get()}")
+        self._log(f"Accordion title align: {self.accordion_alignment_var.get()}")
+        self._log(f"Image layout mode: {self.image_layout_mode_var.get()}")
         self._log(f"Template module structure: {self.template_module_structure_var.get()}")
         self._log(f"Template visual standards: {self.template_visual_standards_var.get()}")
+        self._log(f"Template color standards: {self.template_color_standards_var.get()}")
+        self._log(f"Template divider standards: {self.template_divider_standards_var.get()}")
         self._log(f"Best-practice enforcer: {self.enable_best_practice_enforcer_var.get()}")
         self._log(f"Reference alignment input: {reference_audit_json if reference_audit_json else 'none'}")
         self._log(f"Safe summary: {safe_summary_path}")
@@ -1686,6 +2317,87 @@ class LMSMigrationUI:
             reference_audit_json=reference_audit_json,
         )
         self._task_succeeded("Run local migration")
+
+    def _handle_pre_import_pipeline_result(self, payload: dict) -> None:
+        result = payload["result"]
+        safe_summary_path = payload["safe_summary_path"]
+        safe_summary = payload["safe_summary"]
+        reference_audit_json = payload.get("reference_audit_json")
+        visual_json = payload["visual_json"]
+        visual_markdown = payload["visual_markdown"]
+        visual_summary = payload["visual_summary"]
+        math_json = payload["math_json"]
+        math_markdown = payload["math_markdown"]
+        math_summary = payload["math_summary"]
+        page_review_json = payload["page_review_json"]
+        page_review_markdown = payload["page_review_markdown"]
+        page_review_html = payload["page_review_html"]
+        page_review_summary = payload["page_review_summary"]
+        approval_json = payload["approval_json"]
+        approval_markdown = payload["approval_markdown"]
+        approval_report = payload["approval_report"]
+        pattern_json = payload["pattern_json"]
+        pattern_markdown = payload["pattern_markdown"]
+        pattern_report = payload["pattern_report"]
+
+        self._apply_migration_result(
+            result=result,
+            safe_summary_path=safe_summary_path,
+            safe_summary=safe_summary,
+            reference_audit_json=reference_audit_json,
+        )
+        self.visual_audit_output_var.set(str(visual_json))
+        self.math_audit_output_var.set(str(math_json))
+        self._log(f"Visual audit JSON: {visual_json}")
+        self._log(f"Visual audit Markdown: {visual_markdown}")
+        self._log(
+            "Visual audit summary: "
+            f"files={visual_summary.get('files_scanned', 0)} | "
+            f"dup_title={visual_summary.get('files_with_duplicate_title_first_block', 0)} | "
+            f"shared_refs={visual_summary.get('files_with_remaining_shared_template_refs', 0)} | "
+            f"title_tags={visual_summary.get('files_with_remaining_title_tags', 0)}"
+        )
+        self._log(f"Math audit JSON: {math_json}")
+        self._log(f"Math audit Markdown: {math_markdown}")
+        self._log(
+            "Math audit summary: "
+            f"files_with_math={math_summary.get('files_with_math', 0)} | "
+            f"review_flags={math_summary.get('files_with_math_review_flags', 0)} | "
+            f"equation_images={math_summary.get('total_converted_equation_images', 0)} | "
+            f"raw_tex={math_summary.get('total_converted_raw_tex_delimiters', 0)} | "
+            f"empty_mathml={math_summary.get('total_converted_empty_mathml_stubs', 0)}"
+        )
+        self._log(f"Page review JSON: {page_review_json}")
+        self._log(f"Page review Markdown: {page_review_markdown}")
+        self._log(f"Page review HTML workbench: {page_review_html}")
+        self._log(
+            "Page review summary: "
+            f"high={page_review_summary.get('files_with_high_priority_review', 0)} | "
+            f"medium={page_review_summary.get('files_with_medium_priority_review', 0)} | "
+            f"manual_pages={page_review_summary.get('files_with_manual_issues', 0)} | "
+            f"a11y_pages={page_review_summary.get('files_with_accessibility_issues', 0)}"
+        )
+        approval_summary = approval_report.get("summary", {}) if isinstance(approval_report, dict) else {}
+        self._log(f"Approval report JSON: {approval_json}")
+        self._log(f"Approval report Markdown: {approval_markdown}")
+        self._log(
+            "Approval summary: "
+            f"status={approval_summary.get('overall_status', 'unknown')} | "
+            f"score={approval_summary.get('approval_score', 0)} | "
+            f"cohort={approval_summary.get('reference_cohort_label', 'unknown')}"
+        )
+        pattern_summary = pattern_report.get("summary", {}) if isinstance(pattern_report, dict) else {}
+        self.pattern_report_output_var.set(str(pattern_json))
+        self._log(f"Pattern report JSON: {pattern_json}")
+        self._log(f"Pattern report Markdown: {pattern_markdown}")
+        self._log(
+            "Pattern summary: "
+            f"training_pairs={pattern_summary.get('training_course_pairs', 0)} | "
+            f"consensus={pattern_summary.get('consensus_transforms', 0)} | "
+            f"current_matches={pattern_summary.get('current_matching_transforms', 0)} | "
+            f"current_missing={pattern_summary.get('current_missing_transforms', 0)}"
+        )
+        self._task_succeeded("Prepare Canvas package")
 
     def _generate_safe_summary_clicked(self) -> None:
         report_path = Path(self.report_json_var.get().strip())
@@ -1743,6 +2455,8 @@ class LMSMigrationUI:
     def _run_reference_audit_clicked(self) -> None:
         instructions_docx = Path(self.ref_instructions_docx_var.get().strip())
         best_practices_docx = Path(self.ref_best_practices_docx_var.get().strip())
+        setup_checklist_text = self.ref_setup_checklist_docx_var.get().strip()
+        setup_checklist_docx = Path(setup_checklist_text) if setup_checklist_text else None
         page_templates_docx = Path(self.ref_page_templates_docx_var.get().strip())
         syllabus_template_docx = Path(self.ref_syllabus_template_docx_var.get().strip())
         output_dir = Path(self.output_dir_var.get().strip()) / "reference_audit"
@@ -1760,7 +2474,8 @@ class LMSMigrationUI:
             rules_json,
             findings_markdown,
         )
-        missing = [str(path) for path in required if not path.exists()]
+        optional = tuple(path for path in (setup_checklist_docx,) if path is not None)
+        missing = [str(path) for path in (*required, *optional) if not path.exists()]
         if missing:
             messagebox.showwarning(
                 "Missing file(s)",
@@ -1773,6 +2488,7 @@ class LMSMigrationUI:
                 instructions_docx=instructions_docx,
                 draft_markdown=draft_markdown,
                 best_practices_docx=best_practices_docx,
+                setup_checklist_docx=setup_checklist_docx,
                 page_templates_docx=page_templates_docx,
                 syllabus_template_docx=syllabus_template_docx,
                 rules_json=rules_json,
@@ -1847,6 +2563,438 @@ class LMSMigrationUI:
             f"details_blocks={summary.get('total_converted_details_blocks', 0)}"
         )
         self._task_succeeded("Run visual HTML audit")
+
+    def _run_math_audit_clicked(self) -> None:
+        original_zip = Path(self.visual_original_zip_var.get().strip())
+        converted_zip = Path(self.visual_converted_zip_var.get().strip())
+        output_json_text = self.math_audit_output_var.get().strip()
+
+        if not original_zip.exists():
+            messagebox.showwarning("Missing original ZIP", "Select a valid original D2L export ZIP.")
+            return
+        if not converted_zip.exists():
+            messagebox.showwarning("Missing converted ZIP", "Select a valid converted canvas-ready ZIP.")
+            return
+
+        output_json = Path(output_json_text) if output_json_text else _default_math_audit_json_path(converted_zip)
+        output_markdown = output_json.with_suffix(".md")
+
+        def task() -> None:
+            report = build_math_audit(
+                original_zip=original_zip,
+                converted_zip=converted_zip,
+            )
+            output_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
+            summary = report.get("summary", {})
+            markdown_lines = [
+                "# Math Audit",
+                "",
+                "## Summary",
+                "",
+                f"- Files with math: {summary.get('files_with_math', 0)}",
+                f"- Files with math review flags: {summary.get('files_with_math_review_flags', 0)}",
+                f"- Mixed math-mode files: {summary.get('files_with_mixed_math_modes', 0)}",
+                f"- Canvas equation images: {summary.get('total_converted_equation_images', 0)}",
+                f"- Raw TeX delimiters: {summary.get('total_converted_raw_tex_delimiters', 0)}",
+                f"- Empty MathML stubs: {summary.get('total_converted_empty_mathml_stubs', 0)}",
+                f"- Absolute equation-image URLs: {summary.get('total_absolute_equation_image_urls', 0)}",
+                f"- Equation images missing alt: {summary.get('total_equation_images_missing_alt', 0)}",
+                "",
+            ]
+            output_markdown.write_text("\n".join(markdown_lines), encoding="utf-8")
+            self.root.after(0, lambda: self._handle_math_audit_result(output_json, output_markdown, summary))
+
+        self._run_background("Run math audit", task)
+
+    def _handle_math_audit_result(self, json_path: Path, md_path: Path, summary: dict) -> None:
+        self.math_audit_output_var.set(str(json_path))
+        self._log(f"Math audit JSON: {json_path}")
+        self._log(f"Math audit Markdown: {md_path}")
+        self._log(
+            "Math audit summary: "
+            f"files_with_math={summary.get('files_with_math', 0)} | "
+            f"review_flags={summary.get('files_with_math_review_flags', 0)} | "
+            f"equation_images={summary.get('total_converted_equation_images', 0)} | "
+            f"raw_tex={summary.get('total_converted_raw_tex_delimiters', 0)} | "
+            f"empty_mathml={summary.get('total_converted_empty_mathml_stubs', 0)}"
+        )
+        self._task_succeeded("Run math audit")
+
+    def _build_page_review_clicked(self) -> None:
+        original_zip = Path(self.visual_original_zip_var.get().strip())
+        converted_zip = Path(self.visual_converted_zip_var.get().strip())
+
+        if not original_zip.exists():
+            messagebox.showwarning("Missing original ZIP", "Select a valid original D2L export ZIP.")
+            return
+        if not converted_zip.exists():
+            messagebox.showwarning("Missing converted ZIP", "Select a valid converted canvas-ready ZIP.")
+            return
+
+        migration_report_json = Path(self.report_json_var.get().strip()) if self.report_json_var.get().strip() else None
+        if migration_report_json is not None and not migration_report_json.exists():
+            migration_report_json = None
+        if migration_report_json is None:
+            migration_report_json = self._find_latest_matching_file(converted_zip.parent, "*.migration-report.json")
+
+        visual_audit_json = Path(self.visual_audit_output_var.get().strip()) if self.visual_audit_output_var.get().strip() else None
+        if visual_audit_json is not None and not visual_audit_json.exists():
+            visual_audit_json = None
+
+        output_json = _default_page_review_json_path(converted_zip)
+        output_markdown = output_json.with_suffix(".md")
+        output_html = output_json.with_suffix(".html")
+
+        def task() -> None:
+            json_path, md_path, html_path = build_review_pack(
+                original_zip=original_zip,
+                converted_zip=converted_zip,
+                migration_report_json=migration_report_json,
+                visual_audit_json=visual_audit_json,
+                output_json_path=output_json,
+                output_markdown_path=output_markdown,
+                output_html_path=output_html,
+            )
+            report = json.loads(json_path.read_text(encoding="utf-8"))
+            summary = report.get("summary", {})
+            self.root.after(
+                0,
+                lambda: self._handle_page_review_result(
+                    json_path=json_path,
+                    md_path=md_path,
+                    html_path=html_path,
+                    summary=summary,
+                ),
+            )
+
+        self._run_background("Build page review workbench", task)
+
+    def _handle_page_review_result(
+        self,
+        *,
+        json_path: Path,
+        md_path: Path,
+        html_path: Path,
+        summary: dict,
+    ) -> None:
+        self._log(f"Page review JSON: {json_path}")
+        self._log(f"Page review Markdown: {md_path}")
+        self._log(f"Page review HTML workbench: {html_path}")
+        converted_zip = Path(self.visual_converted_zip_var.get().strip()) if self.visual_converted_zip_var.get().strip() else None
+        if converted_zip is not None and converted_zip.exists():
+            self.review_draft_json_var.set(str(_default_review_draft_json_path(converted_zip)))
+            self.reviewed_zip_output_var.set(str(_default_reviewed_zip_path(converted_zip)))
+        self._log(
+            "Page review summary: "
+            f"high={summary.get('files_with_high_priority_review', 0)} | "
+            f"medium={summary.get('files_with_medium_priority_review', 0)} | "
+            f"manual_pages={summary.get('files_with_manual_issues', 0)} | "
+            f"a11y_pages={summary.get('files_with_accessibility_issues', 0)}"
+        )
+        self._task_succeeded("Build page review workbench")
+
+    def _apply_review_draft_clicked(self) -> None:
+        draft_json = Path(self.review_draft_json_var.get().strip())
+        converted_zip = Path(self.visual_converted_zip_var.get().strip())
+        original_zip_text = self.visual_original_zip_var.get().strip()
+        original_zip = Path(original_zip_text) if original_zip_text else None
+
+        if not draft_json.exists():
+            messagebox.showwarning(
+                "Missing review draft",
+                "Select a valid review draft JSON exported from the page review workbench.",
+            )
+            return
+        if not converted_zip.exists():
+            messagebox.showwarning("Missing converted ZIP", "Select a valid converted canvas-ready ZIP.")
+            return
+
+        output_zip_text = self.reviewed_zip_output_var.get().strip()
+        output_zip = Path(output_zip_text) if output_zip_text else _default_reviewed_zip_path(converted_zip)
+        rules_path = Path(self.rules_var.get().strip()) if self.rules_var.get().strip() else None
+        if rules_path is not None and not rules_path.exists():
+            rules_path = None
+
+        migration_report_json = Path(self.report_json_var.get().strip()) if self.report_json_var.get().strip() else None
+        if migration_report_json is not None and not migration_report_json.exists():
+            migration_report_json = None
+
+        def task() -> None:
+            result = apply_review_draft(
+                draft_json=draft_json,
+                converted_zip=converted_zip,
+                rules_path=rules_path,
+                policy_profile_id=self.policy_profile_var.get().strip(),
+                policy_profiles_path=self.policy_profiles_path,
+                math_handling=self.math_handling_var.get().strip().lower() or "preserve-semantic",
+                accordion_handling=self.accordion_handling_var.get().strip().lower() or "smart",
+                accordion_alignment=self.accordion_alignment_var.get().strip().lower() or "left",
+                accordion_flatten_hints=self._split_hint_tokens(self.accordion_flatten_hints_var.get()),
+                accordion_details_hints=self._split_hint_tokens(self.accordion_details_hints_var.get()),
+                apply_template_divider_standards=bool(self.template_divider_standards_var.get()),
+                best_practice_enforcer=bool(self.enable_best_practice_enforcer_var.get()),
+                output_zip_path=output_zip,
+            )
+
+            visual_json = None
+            visual_markdown = None
+            visual_summary = {}
+            math_json = None
+            math_markdown = None
+            math_summary = {}
+            page_review_json = None
+            page_review_markdown = None
+            page_review_html = None
+            page_review_summary = {}
+            pattern_json = None
+            pattern_markdown = None
+            pattern_report = {}
+
+            if original_zip is not None and original_zip.exists():
+                visual_json = _default_visual_audit_json_path(result.output_zip)
+                visual_markdown = visual_json.with_suffix(".md")
+                visual_report = build_visual_audit(
+                    original_zip=original_zip,
+                    converted_zip=result.output_zip,
+                )
+                visual_summary = visual_report.get("summary", {})
+                visual_json.write_text(json.dumps(visual_report, indent=2), encoding="utf-8")
+                visual_markdown.write_text(
+                    "\n".join(
+                        [
+                            "# Visual Audit",
+                            "",
+                            "## Summary",
+                            "",
+                            f"- Files scanned: {visual_summary.get('files_scanned', 0)}",
+                            f"- Shared template refs: {visual_summary.get('files_with_remaining_shared_template_refs', 0)}",
+                            f"- Nonstandard divider files: {visual_summary.get('files_with_nonstandard_hr', 0)}",
+                            f"- Icon-size anomaly files: {visual_summary.get('files_with_icon_size_anomalies', 0)}",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                math_json = _default_math_audit_json_path(result.output_zip)
+                math_markdown = math_json.with_suffix(".md")
+                math_report = build_math_audit(
+                    original_zip=original_zip,
+                    converted_zip=result.output_zip,
+                )
+                math_summary = math_report.get("summary", {})
+                math_json.write_text(json.dumps(math_report, indent=2), encoding="utf-8")
+                math_markdown.write_text(
+                    "\n".join(
+                        [
+                            "# Math Audit",
+                            "",
+                            "## Summary",
+                            "",
+                            f"- Files with math: {math_summary.get('files_with_math', 0)}",
+                            f"- Files with math review flags: {math_summary.get('files_with_math_review_flags', 0)}",
+                            f"- Canvas equation images: {math_summary.get('total_converted_equation_images', 0)}",
+                            f"- Raw TeX delimiters: {math_summary.get('total_converted_raw_tex_delimiters', 0)}",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                page_review_json = _default_page_review_json_path(result.output_zip)
+                page_review_markdown = page_review_json.with_suffix(".md")
+                page_review_html = page_review_json.with_suffix(".html")
+                page_review_json, page_review_markdown, page_review_html = build_review_pack(
+                    original_zip=original_zip,
+                    converted_zip=result.output_zip,
+                    migration_report_json=migration_report_json,
+                    visual_audit_json=visual_json,
+                    output_json_path=page_review_json,
+                    output_markdown_path=page_review_markdown,
+                    output_html_path=page_review_html,
+                )
+                page_review_report = json.loads(page_review_json.read_text(encoding="utf-8"))
+                page_review_summary = page_review_report.get("summary", {})
+
+                pattern_json = _default_pattern_report_json_path(result.output_zip)
+                pattern_markdown = pattern_json.with_suffix(".md")
+                template_package_path = Path(self.template_package_var.get().strip()) if self.template_package_var.get().strip() else None
+                if template_package_path is not None and not template_package_path.exists():
+                    template_package_path = None
+                pattern_json, pattern_markdown = build_pattern_report(
+                    current_course_code=self.sinclair_course_code_var.get().strip() or result.output_zip.parent.name,
+                    current_source_zip=original_zip,
+                    current_converted_zip=result.output_zip,
+                    training_courses_root=self._resolve_workspace_root() / "resources" / "training-corpus-v2" / "courses",
+                    template_package=template_package_path,
+                    best_practices_docx=Path(self.ref_best_practices_docx_var.get().strip())
+                    if self.ref_best_practices_docx_var.get().strip()
+                    else None,
+                    output_json_path=pattern_json,
+                    output_markdown_path=pattern_markdown,
+                )
+                pattern_report = json.loads(pattern_json.read_text(encoding="utf-8"))
+
+            writeback_report = json.loads(result.report_json.read_text(encoding="utf-8"))
+            self.root.after(
+                0,
+                lambda: self._handle_review_writeback_result(
+                    result=result,
+                    report=writeback_report,
+                    visual_json=visual_json,
+                    visual_markdown=visual_markdown,
+                    visual_summary=visual_summary,
+                    math_json=math_json,
+                    math_markdown=math_markdown,
+                    math_summary=math_summary,
+                    page_review_json=page_review_json,
+                    page_review_markdown=page_review_markdown,
+                    page_review_html=page_review_html,
+                    page_review_summary=page_review_summary,
+                    pattern_json=pattern_json,
+                    pattern_markdown=pattern_markdown,
+                    pattern_report=pattern_report,
+                ),
+            )
+
+        self._run_background("Apply review draft", task)
+
+    def _handle_review_writeback_result(
+        self,
+        *,
+        result,
+        report: dict,
+        visual_json: Path | None,
+        visual_markdown: Path | None,
+        visual_summary: dict,
+        math_json: Path | None,
+        math_markdown: Path | None,
+        math_summary: dict,
+        page_review_json: Path | None,
+        page_review_markdown: Path | None,
+        page_review_html: Path | None,
+        page_review_summary: dict,
+        pattern_json: Path | None,
+        pattern_markdown: Path | None,
+        pattern_report: dict,
+    ) -> None:
+        summary = report.get("summary", {}) if isinstance(report, dict) else {}
+        self.visual_converted_zip_var.set(str(result.output_zip))
+        self.math_audit_output_var.set(str(_default_math_audit_json_path(result.output_zip)))
+        self.review_draft_json_var.set(str(_default_review_draft_json_path(result.output_zip)))
+        self.reviewed_zip_output_var.set(str(result.output_zip))
+        self.pattern_report_output_var.set(str(_default_pattern_report_json_path(result.output_zip)))
+        self._log(f"Reviewed zip: {result.output_zip}")
+        self._log(f"Review write-back JSON: {result.report_json}")
+        self._log(f"Review write-back Markdown: {result.report_markdown}")
+        self._log(
+            "Write-back summary: "
+            f"updated={summary.get('pages_updated', 0)} | "
+            f"missing={summary.get('pages_missing', 0)} | "
+            f"manual={summary.get('manual_review_issues', 0)} | "
+            f"a11y={summary.get('accessibility_issues', 0)}"
+        )
+        if visual_json is not None:
+            self.visual_audit_output_var.set(str(visual_json))
+            self._log(f"Reviewed visual audit JSON: {visual_json}")
+            if visual_markdown is not None:
+                self._log(f"Reviewed visual audit Markdown: {visual_markdown}")
+            self._log(
+                "Reviewed visual summary: "
+                f"files={visual_summary.get('files_scanned', 0)} | "
+                f"shared_refs={visual_summary.get('files_with_remaining_shared_template_refs', 0)} | "
+                f"nonstandard_hr={visual_summary.get('files_with_nonstandard_hr', 0)}"
+            )
+        if math_json is not None:
+            self.math_audit_output_var.set(str(math_json))
+            self._log(f"Reviewed math audit JSON: {math_json}")
+            if math_markdown is not None:
+                self._log(f"Reviewed math audit Markdown: {math_markdown}")
+            self._log(
+                "Reviewed math summary: "
+                f"files_with_math={math_summary.get('files_with_math', 0)} | "
+                f"review_flags={math_summary.get('files_with_math_review_flags', 0)} | "
+                f"equation_images={math_summary.get('total_converted_equation_images', 0)} | "
+                f"raw_tex={math_summary.get('total_converted_raw_tex_delimiters', 0)}"
+            )
+        if page_review_json is not None:
+            self._log(f"Reviewed page review JSON: {page_review_json}")
+            if page_review_markdown is not None:
+                self._log(f"Reviewed page review Markdown: {page_review_markdown}")
+            if page_review_html is not None:
+                self._log(f"Reviewed page review HTML workbench: {page_review_html}")
+            self._log(
+                "Reviewed page review summary: "
+                f"high={page_review_summary.get('files_with_high_priority_review', 0)} | "
+                f"manual_pages={page_review_summary.get('files_with_manual_issues', 0)} | "
+                f"a11y_pages={page_review_summary.get('files_with_accessibility_issues', 0)}"
+            )
+        if pattern_json is not None:
+            pattern_summary = pattern_report.get("summary", {}) if isinstance(pattern_report, dict) else {}
+            self.pattern_report_output_var.set(str(pattern_json))
+            self._log(f"Reviewed pattern report JSON: {pattern_json}")
+            if pattern_markdown is not None:
+                self._log(f"Reviewed pattern report Markdown: {pattern_markdown}")
+            self._log(
+                "Reviewed pattern summary: "
+                f"current_matches={pattern_summary.get('current_matching_transforms', 0)} | "
+                f"current_missing={pattern_summary.get('current_missing_transforms', 0)}"
+            )
+        self._task_succeeded("Apply review draft")
+
+    def _build_pattern_report_clicked(self) -> None:
+        converted_zip_text = self.visual_converted_zip_var.get().strip()
+        converted_zip = Path(converted_zip_text) if converted_zip_text else None
+        source_zip_text = self.visual_original_zip_var.get().strip()
+        source_zip = Path(source_zip_text) if source_zip_text else None
+
+        if converted_zip is None or not converted_zip.exists():
+            messagebox.showwarning("Missing converted ZIP", "Select a valid converted ZIP first.")
+            return
+        if source_zip is not None and not source_zip.exists():
+            source_zip = None
+
+        output_json_text = self.pattern_report_output_var.get().strip()
+        output_json = Path(output_json_text) if output_json_text else _default_pattern_report_json_path(converted_zip)
+        output_markdown = output_json.with_suffix(".md")
+        template_package_path = Path(self.template_package_var.get().strip()) if self.template_package_var.get().strip() else None
+        if template_package_path is not None and not template_package_path.exists():
+            template_package_path = None
+
+        def task() -> None:
+            json_path, md_path = build_pattern_report(
+                current_course_code=self.sinclair_course_code_var.get().strip() or converted_zip.parent.name,
+                current_source_zip=source_zip,
+                current_converted_zip=converted_zip,
+                training_courses_root=self._resolve_workspace_root() / "resources" / "training-corpus-v2" / "courses",
+                template_package=template_package_path,
+                best_practices_docx=Path(self.ref_best_practices_docx_var.get().strip())
+                if self.ref_best_practices_docx_var.get().strip()
+                else None,
+                output_json_path=output_json,
+                output_markdown_path=output_markdown,
+            )
+            report = json.loads(json_path.read_text(encoding="utf-8"))
+            self.root.after(
+                0,
+                lambda: self._handle_pattern_report_result(
+                    json_path=json_path,
+                    md_path=md_path,
+                    report=report,
+                ),
+            )
+
+        self._run_background("Build pattern report", task)
+
+    def _handle_pattern_report_result(self, *, json_path: Path, md_path: Path, report: dict) -> None:
+        summary = report.get("summary", {})
+        self.pattern_report_output_var.set(str(json_path))
+        self._log(f"Pattern report JSON: {json_path}")
+        self._log(f"Pattern report Markdown: {md_path}")
+        self._log(
+            "Pattern summary: "
+            f"training_pairs={summary.get('training_course_pairs', 0)} | "
+            f"consensus={summary.get('consensus_transforms', 0)} | "
+            f"current_matches={summary.get('current_matching_transforms', 0)} | "
+            f"current_missing={summary.get('current_missing_transforms', 0)}"
+        )
+        self._task_succeeded("Build pattern report")
 
     def _get_canvas_credentials(self) -> tuple[str, str, str] | None:
         base_url = self.canvas_base_url_var.get().strip()
@@ -2152,6 +3300,123 @@ class LMSMigrationUI:
         self._log(f"Canvas snapshot Markdown: {md_path}")
         self._task_succeeded("Snapshot Canvas course")
 
+    def _build_approval_report_clicked(self) -> None:
+        self._maybe_apply_course_folder_defaults()
+        self._remember_sinclair_course_code()
+
+        course_code = self.sinclair_course_code_var.get().strip()
+        output_dir_text = self.output_dir_var.get().strip()
+        output_dir = Path(output_dir_text) if output_dir_text else (self._resolve_workspace_root() / "output")
+
+        source_zip = Path(self.input_zip_var.get().strip()) if self.input_zip_var.get().strip() else None
+        if source_zip is not None and not source_zip.exists():
+            source_zip = None
+
+        converted_zip = (
+            Path(self.visual_converted_zip_var.get().strip()) if self.visual_converted_zip_var.get().strip() else None
+        )
+        if converted_zip is not None and not converted_zip.exists():
+            converted_zip = None
+        if converted_zip is None:
+            converted_zip = self._find_latest_matching_file(output_dir, "*.canvas-ready.zip")
+
+        migration_report_json = Path(self.report_json_var.get().strip()) if self.report_json_var.get().strip() else None
+        if migration_report_json is not None and not migration_report_json.exists():
+            migration_report_json = None
+        if migration_report_json is None:
+            migration_report_json = self._find_latest_matching_file(output_dir, "*.migration-report.json")
+
+        visual_audit_json = (
+            Path(self.visual_audit_output_var.get().strip()) if self.visual_audit_output_var.get().strip() else None
+        )
+        if visual_audit_json is not None and not visual_audit_json.exists():
+            visual_audit_json = None
+        if visual_audit_json is None:
+            visual_audit_json = self._find_latest_matching_file(output_dir, "*.visual-audit.json")
+
+        template_overlay_json = self._find_latest_matching_file(output_dir, "*.template-overlay-report.json")
+        live_audit_json = output_dir / "canvas-live-link-audit.json"
+        if not live_audit_json.exists():
+            live_audit_json = None
+
+        course_id = self.canvas_course_id_var.get().strip()
+        snapshot_json = self._find_latest_snapshot_json(output_dir, course_id)
+        if snapshot_json is not None and not snapshot_json.exists():
+            snapshot_json = None
+
+        pre_issues_json = output_dir / "canvas-migration-issues-pre.json"
+        if not pre_issues_json.exists():
+            pre_issues_json = None
+
+        post_issues_json = output_dir / "canvas-migration-issues-post.json"
+        if not post_issues_json.exists():
+            issues_text = self.canvas_issues_output_var.get().strip()
+            fallback_issues = Path(issues_text) if issues_text else (output_dir / "canvas-migration-issues.json")
+            post_issues_json = fallback_issues if fallback_issues.exists() else None
+
+        if migration_report_json is not None:
+            if not self._artifact_is_current(snapshot_json, migration_report_json):
+                snapshot_json = None
+            if not self._artifact_is_current(pre_issues_json, migration_report_json):
+                pre_issues_json = None
+            if not self._artifact_is_current(post_issues_json, migration_report_json):
+                post_issues_json = None
+            if not self._artifact_is_current(live_audit_json, migration_report_json):
+                live_audit_json = None
+
+        workspace_root = self._resolve_workspace_root()
+        output_json = self._default_approval_report_json_path(output_dir)
+        output_markdown = output_json.with_suffix(".md")
+
+        def task() -> None:
+            json_path, md_path = build_approval_report(
+                current_course_code=course_code or output_dir.name,
+                current_source_zip=source_zip,
+                current_converted_zip=converted_zip,
+                current_migration_report_json=migration_report_json,
+                current_visual_audit_json=visual_audit_json,
+                current_template_overlay_json=template_overlay_json,
+                current_snapshot_json=snapshot_json,
+                pre_issues_json=pre_issues_json,
+                post_issues_json=post_issues_json,
+                live_audit_json=live_audit_json,
+                examples_dir=workspace_root / "resources" / "examples",
+                training_metadata_root=workspace_root / "resources" / "training-corpus-v2" / "courses",
+                output_root=workspace_root / "output",
+                output_json_path=output_json,
+                output_markdown_path=output_markdown,
+            )
+            report = json.loads(json_path.read_text(encoding="utf-8"))
+            self.root.after(
+                0,
+                lambda: self._handle_approval_report_result(
+                    json_path=json_path,
+                    md_path=md_path,
+                    report=report,
+                ),
+            )
+
+        self._run_background("Build approval report", task)
+
+    def _handle_approval_report_result(self, *, json_path: Path, md_path: Path, report: dict) -> None:
+        summary = report.get("summary", {})
+        references = report.get("top_reference_courses", [])
+        reference_text = ", ".join(
+            f"{row.get('course_code', '')} ({row.get('similarity_score', 0)})"
+            for row in references[:3]
+            if isinstance(row, dict)
+        )
+        self._log(f"Approval report JSON: {json_path}")
+        self._log(f"Approval report Markdown: {md_path}")
+        self._log(
+            "Approval summary: "
+            f"status={summary.get('overall_status', 'unknown')} | "
+            f"score={summary.get('approval_score', 0)} | "
+            f"cohort={summary.get('reference_cohort_label', 'unknown')}"
+        )
+        self._log(f"Closest references: {reference_text or 'none'}")
+        self._task_succeeded("Build approval report")
+
     def _find_latest_manual_review_csv(self, folder: Path) -> Path | None:
         candidates = sorted(
             folder.glob("*.manual-review.csv"),
@@ -2159,6 +3424,199 @@ class LMSMigrationUI:
             reverse=True,
         )
         return candidates[0] if candidates else None
+
+    def _find_latest_matching_file(self, folder: Path, pattern: str) -> Path | None:
+        candidates = sorted(
+            [path for path in folder.glob(pattern) if path.is_file()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return candidates[0] if candidates else None
+
+    def _find_latest_snapshot_json(self, folder: Path, course_id: str = "") -> Path | None:
+        normalized_course_id = course_id.strip()
+        if normalized_course_id:
+            exact = folder / f"canvas-course-{normalized_course_id}.snapshot.json"
+            if exact.exists():
+                return exact
+        return self._find_latest_matching_file(folder, "canvas-course-*.snapshot.json")
+
+    def _default_approval_report_json_path(self, folder: Path) -> Path:
+        report_path = self._find_latest_matching_file(folder, "*.migration-report.json")
+        if report_path is not None and report_path.name.endswith(".migration-report.json"):
+            filename = report_path.name.replace(".migration-report.json", ".approval-report.json")
+            return folder / filename
+        return folder / "migration-approval-report.json"
+
+    def _load_json_file(self, path: Path | None) -> dict | list | None:
+        if path is None or not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _artifact_is_current(self, artifact_path: Path | None, baseline_path: Path | None) -> bool:
+        if artifact_path is None or not artifact_path.exists():
+            return False
+        if baseline_path is None or not baseline_path.exists():
+            return True
+        return artifact_path.stat().st_mtime >= baseline_path.stat().st_mtime
+
+    def _refresh_readiness_snapshot(self) -> None:
+        output_dir_text = self.output_dir_var.get().strip()
+        output_dir = Path(output_dir_text) if output_dir_text else (self._resolve_workspace_root() / "output")
+
+        migration_report_path = self._find_latest_matching_file(output_dir, "*.migration-report.json")
+        visual_audit_path = self._find_latest_matching_file(output_dir, "*.visual-audit.json")
+        math_audit_path = self._find_latest_matching_file(output_dir, "*.math-audit.json")
+        page_review_path = self._find_latest_matching_file(output_dir, "*.page-review.json")
+        approval_report_path = self._find_latest_matching_file(output_dir, "*.approval-report.json")
+        pattern_report_path = self._find_latest_matching_file(output_dir, "*.pattern-report.json")
+        snapshot_path = self._find_latest_snapshot_json(output_dir, self.canvas_course_id_var.get().strip())
+        issues_path = output_dir / "canvas-migration-issues-post.json"
+        if not issues_path.exists():
+            issues_path = output_dir / "canvas-migration-issues.json"
+        if not issues_path.exists():
+            issues_path = None
+        live_audit_path = output_dir / "canvas-live-link-audit.json"
+        if not live_audit_path.exists():
+            live_audit_path = None
+
+        if not self._artifact_is_current(visual_audit_path, migration_report_path):
+            visual_audit_path = None
+        if not self._artifact_is_current(math_audit_path, migration_report_path):
+            math_audit_path = None
+        if not self._artifact_is_current(page_review_path, migration_report_path):
+            page_review_path = None
+        if not self._artifact_is_current(approval_report_path, migration_report_path):
+            approval_report_path = None
+        if not self._artifact_is_current(pattern_report_path, migration_report_path):
+            pattern_report_path = None
+        if not self._artifact_is_current(snapshot_path, migration_report_path):
+            snapshot_path = None
+        if not self._artifact_is_current(issues_path, migration_report_path):
+            issues_path = None
+        if not self._artifact_is_current(live_audit_path, migration_report_path):
+            live_audit_path = None
+
+        migration_report = self._load_json_file(migration_report_path)
+        visual_audit = self._load_json_file(visual_audit_path)
+        math_audit = self._load_json_file(math_audit_path)
+        page_review = self._load_json_file(page_review_path)
+        approval_report = self._load_json_file(approval_report_path)
+        pattern_report = self._load_json_file(pattern_report_path)
+        snapshot_report = self._load_json_file(snapshot_path)
+        issues_report = self._load_json_file(issues_path)
+        live_audit_report = self._load_json_file(live_audit_path)
+
+        if isinstance(migration_report, dict):
+            summary = migration_report.get("summary", {})
+            math_summary = math_audit.get("summary", {}) if isinstance(math_audit, dict) else {}
+            self.readiness_local_var.set(
+                "Local package: ready"
+                f" | html changed {summary.get('html_files_changed', 0)}/{summary.get('html_files_scanned', 0)}"
+                f" | manual {summary.get('manual_review_issues', 0)}"
+                f" | accessibility {summary.get('accessibility_issues', 0)}"
+                f" | math flags {math_summary.get('files_with_math_review_flags', 0)}"
+            )
+        else:
+            self.readiness_local_var.set("Local package: waiting for conversion.")
+
+        if isinstance(approval_report, dict):
+            approval_summary = approval_report.get("summary", {})
+            references = approval_report.get("top_reference_courses", [])
+            reference_codes = ", ".join(
+                str(row.get("course_code", "")).strip()
+                for row in references[:3]
+                if isinstance(row, dict) and str(row.get("course_code", "")).strip()
+            )
+            page_review_summary = page_review.get("summary", {}) if isinstance(page_review, dict) else {}
+            pattern_summary = pattern_report.get("summary", {}) if isinstance(pattern_report, dict) else {}
+            math_summary = math_audit.get("summary", {}) if isinstance(math_audit, dict) else {}
+            self.readiness_review_var.set(
+                "Upload review: "
+                f"{approval_summary.get('overall_status', 'unknown')}"
+                f" | score {approval_summary.get('approval_score', 0)}"
+                f" | cohort {approval_summary.get('reference_cohort_label', 'unknown')}"
+                f" | refs {reference_codes or 'none'}"
+                f" | page review {page_review_summary.get('files_with_high_priority_review', 0)} high"
+                f" | pattern gaps {pattern_summary.get('current_missing_transforms', 0)}"
+                f" | math flags {math_summary.get('files_with_math_review_flags', 0)}"
+            )
+        elif isinstance(pattern_report, dict):
+            pattern_summary = pattern_report.get("summary", {})
+            math_summary = math_audit.get("summary", {}) if isinstance(math_audit, dict) else {}
+            self.readiness_review_var.set(
+                "Upload review: pattern report ready"
+                f" | matches {pattern_summary.get('current_matching_transforms', 0)}"
+                f" | gaps {pattern_summary.get('current_missing_transforms', 0)}"
+                f" | consensus {pattern_summary.get('consensus_transforms', 0)}"
+                f" | math flags {math_summary.get('files_with_math_review_flags', 0)}"
+            )
+        elif isinstance(page_review, dict):
+            review_summary = page_review.get("summary", {})
+            math_summary = math_audit.get("summary", {}) if isinstance(math_audit, dict) else {}
+            self.readiness_review_var.set(
+                "Upload review: page review ready"
+                f" | high {review_summary.get('files_with_high_priority_review', 0)}"
+                f" | medium {review_summary.get('files_with_medium_priority_review', 0)}"
+                f" | manual pages {review_summary.get('files_with_manual_issues', 0)}"
+                f" | math flags {math_summary.get('files_with_math_review_flags', 0)}"
+            )
+        elif isinstance(math_audit, dict):
+            math_summary = math_audit.get("summary", {})
+            self.readiness_review_var.set(
+                "Upload review: math audit ready"
+                f" | files with math {math_summary.get('files_with_math', 0)}"
+                f" | review flags {math_summary.get('files_with_math_review_flags', 0)}"
+                f" | raw tex {math_summary.get('total_converted_raw_tex_delimiters', 0)}"
+            )
+        elif isinstance(visual_audit, dict):
+            visual_summary = visual_audit.get("summary", {})
+            self.readiness_review_var.set(
+                "Upload review: visual audit ready"
+                f" | duplicate title {visual_summary.get('files_with_duplicate_title_first_block', 0)}"
+                f" | shared refs {visual_summary.get('files_with_remaining_shared_template_refs', 0)}"
+                " | approval report not run"
+            )
+        else:
+            self.readiness_review_var.set("Upload review: not run.")
+
+        issues_count = len(issues_report) if isinstance(issues_report, list) else 0
+        live_findings = 0
+        if isinstance(live_audit_report, dict):
+            live_findings = int(((live_audit_report.get("counts") or {}).get("findings_total", 0)) or 0)
+        if isinstance(snapshot_report, dict) or issues_count or live_findings:
+            snapshot_course_id = ""
+            if isinstance(snapshot_report, dict):
+                snapshot_course_id = str(snapshot_report.get("course_id", "")).strip()
+            self.readiness_canvas_var.set(
+                "Canvas post-import: "
+                f"issues {issues_count}"
+                f" | live findings {live_findings}"
+                f" | snapshot {snapshot_course_id or 'not captured'}"
+            )
+        else:
+            self.readiness_canvas_var.set("Canvas post-import: not run.")
+
+        next_step = "Next step: choose a D2L zip and click Prepare Canvas Package."
+        if isinstance(migration_report, dict):
+            next_step = "Next step: click Review Readiness before upload, or import the package into Canvas."
+        if isinstance(page_review, dict) and not isinstance(approval_report, dict):
+            page_review_summary = page_review.get("summary", {})
+            if int(page_review_summary.get("files_with_high_priority_review", 0) or 0) > 0:
+                next_step = "Next step: review the high-priority pages in the page review workbench before upload."
+        if isinstance(approval_report, dict):
+            approval_summary = approval_report.get("summary", {})
+            status = str(approval_summary.get("overall_status", "")).strip().lower()
+            if not (isinstance(snapshot_report, dict) or issues_count or live_findings):
+                next_step = "Next step: import into Canvas, then run Canvas Cleanup + Audit and Capture Course Snapshot."
+            elif status == "approved" and issues_count == 0 and live_findings == 0:
+                next_step = "Next step: the course is in a strong state for handoff or final Canvas spot-checks."
+            else:
+                next_step = "Next step: work the remaining checklist items, then rerun Review Readiness."
+        self.readiness_next_step_var.set(next_step)
 
     def _find_reference_audit_json(self) -> Path | None:
         output_root_text = self.output_dir_var.get().strip()

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import posixpath
 import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .canvas_api import (
     fetch_course_announcements,
@@ -25,6 +26,10 @@ from .canvas_post_import import _build_file_index, _load_alias_map, _rewrite_pag
 
 _LEGACY_D2L_RE = re.compile(r"^/?(?:d2l/|content/enforced/)", flags=re.IGNORECASE)
 _SHARED_TEMPLATE_RE = re.compile(r"^/?shared/brightspace_html_template/", flags=re.IGNORECASE)
+_NEUTRALIZED_ANCHOR_RE = re.compile(
+    r"<a\b(?P<tag>[^>]*)data-migration-link-status\s*=\s*([\"'])needs-review\2(?P<tail>[^>]*)>(?P<body>.*?)</a>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
 def _extract_attr_refs(html_text: str) -> list[tuple[str, str]]:
@@ -36,6 +41,188 @@ def _extract_attr_refs(html_text: str) -> list[tuple[str, str]]:
     for match in pattern.finditer(html_text):
         refs.append((str(match.group("attr")).lower(), str(match.group("url")).strip()))
     return refs
+
+
+def _plain_text(value: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", value, flags=re.IGNORECASE)
+    text = html.unescape(text).replace("\xa0", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_title_key(value: str) -> str:
+    lowered = _plain_text(value).lower().replace("&", "and")
+    lowered = re.sub(r"[^a-z0-9 ]+", " ", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def _unescape_repeated(value: str) -> str:
+    current = value
+    for _ in range(4):
+        updated = html.unescape(current)
+        if updated == current:
+            break
+        current = updated
+    return current
+
+
+def _build_content_targets(
+    *,
+    items: list[dict],
+    course_id: str,
+    title_key: str,
+    fallback_path_template: str,
+) -> list[dict]:
+    rows: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get(title_key, "")).strip()
+        if not title:
+            continue
+        html_url = str(item.get("html_url", "")).strip()
+        item_id = str(item.get("id", "")).strip()
+        if not html_url and item_id:
+            html_url = fallback_path_template.format(course_id=course_id, item_id=item_id)
+        if not html_url:
+            continue
+        rows.append(
+            {
+                "title": title,
+                "key": _normalize_title_key(title),
+                "url": html_url,
+            }
+        )
+    return rows
+
+
+def _match_assignment_target(link_text: str, assignment_targets: list[dict]) -> str:
+    normalized = _normalize_title_key(link_text)
+    if not normalized:
+        return ""
+    scored: list[tuple[int, str]] = []
+    for row in assignment_targets:
+        key = str(row.get("key", ""))
+        score = -1
+        if key == normalized:
+            score = 100
+        elif key == f"{normalized} survey":
+            score = 95
+        elif key == f"{normalized} quiz":
+            score = 94
+        elif key.startswith(f"{normalized} survey"):
+            score = 93
+        elif key.startswith(normalized):
+            score = 90
+        elif normalized in key:
+            score = 80
+        if score >= 0:
+            scored.append((score, str(row.get("url", ""))))
+    if not scored:
+        return ""
+    scored.sort(reverse=True)
+    return scored[0][1]
+
+
+def _match_page_target(link_text: str, page_targets: list[dict]) -> str:
+    normalized = _normalize_title_key(link_text)
+    if normalized != "syllabus":
+        return ""
+    scored: list[tuple[int, str]] = []
+    for row in page_targets:
+        key = str(row.get("key", ""))
+        score = -1
+        if key.startswith("syllabus ") and "online" in key and "f2f" not in key:
+            score = 100
+        elif key.startswith("syllabus ") and "f2f" not in key:
+            score = 95
+        elif key == "syllabus":
+            score = 90
+        elif key.startswith("syllabus") and "f2f" not in key:
+            score = 85
+        if score >= 0:
+            scored.append((score, str(row.get("url", ""))))
+    if not scored:
+        return ""
+    scored.sort(reverse=True)
+    return scored[0][1]
+
+
+def _suggest_neutralized_target(
+    *,
+    original_href: str,
+    link_text: str,
+    page_targets: list[dict],
+    assignment_targets: list[dict],
+) -> str:
+    normalized_href = _unescape_repeated(original_href.strip())
+    if not normalized_href:
+        return ""
+    parsed = urlparse(normalized_href)
+    path = parsed.path.lower()
+    query = {key.lower(): values for key, values in parse_qs(parsed.query).items()}
+
+    if any(value.lower() == "survey" for value in query.get("type", [])) or "quicklink.d2l" in path:
+        return _match_assignment_target(link_text, assignment_targets)
+    if "/d2l/le/content/" in path:
+        return _match_page_target(link_text, page_targets)
+    return ""
+
+
+def _rewrite_neutralized_page_links(
+    *,
+    html_text: str,
+    page_targets: list[dict],
+    assignment_targets: list[dict],
+) -> tuple[str, int]:
+    rewrites = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal rewrites
+        open_tag = f"<a{match.group('tag')}{match.group('tail')}>"
+        body = match.group("body")
+        original_href_match = re.search(
+            r'data-migration-original-href\s*=\s*([\"\'])(?P<value>[^\"\']+)\1',
+            open_tag,
+            flags=re.IGNORECASE,
+        )
+        if original_href_match is None:
+            return match.group(0)
+        suggestion = _suggest_neutralized_target(
+            original_href=original_href_match.group("value"),
+            link_text=_plain_text(body),
+            page_targets=page_targets,
+            assignment_targets=assignment_targets,
+        )
+        if not suggestion:
+            return match.group(0)
+
+        if re.search(r'\bhref\s*=\s*[\"\'][^\"\']*[\"\']', open_tag, flags=re.IGNORECASE):
+            open_tag = re.sub(
+                r'(\bhref\s*=\s*)([\"\'])([^\"\']*)(\2)',
+                lambda item: f'{item.group(1)}"{suggestion}"',
+                open_tag,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        else:
+            open_tag = open_tag[:-1] + f' href="{suggestion}">'
+
+        for attr_name in (
+            "data-migration-link-status",
+            "data-migration-link-reason",
+            "data-migration-original-href",
+        ):
+            open_tag = re.sub(
+                rf'\s{attr_name}\s*=\s*([\"\'])(?:.*?)\1',
+                "",
+                open_tag,
+                flags=re.IGNORECASE,
+            )
+
+        rewrites += 1
+        return f"{open_tag}{body}</a>"
+
+    return _NEUTRALIZED_ANCHOR_RE.sub(replace, html_text), rewrites
 
 
 def _is_local_candidate(url: str) -> bool:
@@ -95,19 +282,24 @@ def _audit_html(
     file_index: dict[str, list],
     alias_map: dict[str, tuple[str, ...]],
     course_id: str,
+    page_targets: list[dict],
+    assignment_targets: list[dict],
 ) -> list[dict]:
     findings: list[dict] = []
 
-    for match in re.finditer(
-        r"<a\b[^>]*data-migration-link-status\s*=\s*([\"'])needs-review\1[^>]*>",
-        html_text,
-        flags=re.IGNORECASE,
-    ):
-        tag = match.group(0)
+    for match in _NEUTRALIZED_ANCHOR_RE.finditer(html_text):
+        tag = f"<a{match.group('tag')}{match.group('tail')}>"
         original_href_match = re.search(
             r'data-migration-original-href\s*=\s*([\"\'])(?P<value>[^\"\']+)\1',
             tag,
             flags=re.IGNORECASE,
+        )
+        original_href = original_href_match.group("value").strip() if original_href_match else ""
+        suggested_target = _suggest_neutralized_target(
+            original_href=original_href,
+            link_text=_plain_text(match.group("body")),
+            page_targets=page_targets,
+            assignment_targets=assignment_targets,
         )
         findings.append(
             {
@@ -118,9 +310,13 @@ def _audit_html(
                 "field": "html",
                 "issue_type": "neutralized_migration_link",
                 "severity": "warning",
-                "ref": original_href_match.group("value").strip() if original_href_match else "",
-                "suggested_target": "",
-                "note": "Link is marked needs-review and should be relinked in Canvas.",
+                "ref": original_href,
+                "suggested_target": suggested_target,
+                "note": (
+                    "Link is marked needs-review and should be relinked in Canvas."
+                    if not suggested_target
+                    else "Deterministic Canvas target was found for this needs-review link."
+                ),
             }
         )
 
@@ -246,12 +442,25 @@ def run_live_link_audit(
         course_id=course_id,
         token=token,
     )
+    page_targets = _build_content_targets(
+        items=page_summaries,
+        course_id=course_id,
+        title_key="title",
+        fallback_path_template="/courses/{course_id}/pages/{item_id}",
+    )
+    assignment_targets = _build_content_targets(
+        items=assignments,
+        course_id=course_id,
+        title_key="name",
+        fallback_path_template="/courses/{course_id}/assignments/{item_id}",
+    )
 
     findings: list[dict] = []
     pages_updated = 0
     total_rewrites = 0
     total_alias_rewrites = 0
     total_unresolved = 0
+    total_neutralized_rewrites = 0
     alias_keys_used: set[str] = set()
 
     for page_summary in page_summaries:
@@ -278,6 +487,11 @@ def run_live_link_audit(
                 course_id=course_id,
                 alias_map=alias_map,
             )
+            updated_body, neutralized_rewrites = _rewrite_neutralized_page_links(
+                html_text=updated_body,
+                page_targets=page_targets,
+                assignment_targets=assignment_targets,
+            )
             if rewrites and updated_body != page_body:
                 update_course_page_body(
                     base_url=normalized_base,
@@ -288,9 +502,20 @@ def run_live_link_audit(
                 )
                 pages_updated += 1
                 final_body = updated_body
-            total_rewrites += rewrites
+            elif neutralized_rewrites and updated_body != page_body:
+                update_course_page_body(
+                    base_url=normalized_base,
+                    course_id=course_id,
+                    page_url=page_url,
+                    body_html=updated_body,
+                    token=token,
+                )
+                pages_updated += 1
+                final_body = updated_body
+            total_rewrites += rewrites + neutralized_rewrites
             total_unresolved += unresolved
             total_alias_rewrites += alias_rewrites
+            total_neutralized_rewrites += neutralized_rewrites
             alias_keys_used.update(page_alias_keys)
 
         page_id = str(page.get("page_id") or page_summary.get("page_id") or "")
@@ -305,6 +530,8 @@ def run_live_link_audit(
                 file_index=file_index,
                 alias_map=alias_map,
                 course_id=course_id,
+                page_targets=page_targets,
+                assignment_targets=assignment_targets,
             )
         )
 
@@ -324,6 +551,8 @@ def run_live_link_audit(
                 file_index=file_index,
                 alias_map=alias_map,
                 course_id=course_id,
+                page_targets=page_targets,
+                assignment_targets=assignment_targets,
             )
         )
 
@@ -343,6 +572,8 @@ def run_live_link_audit(
                 file_index=file_index,
                 alias_map=alias_map,
                 course_id=course_id,
+                page_targets=page_targets,
+                assignment_targets=assignment_targets,
             )
         )
 
@@ -362,6 +593,8 @@ def run_live_link_audit(
                 file_index=file_index,
                 alias_map=alias_map,
                 course_id=course_id,
+                page_targets=page_targets,
+                assignment_targets=assignment_targets,
             )
         )
 
@@ -388,6 +621,7 @@ def run_live_link_audit(
             "pages_updated": pages_updated,
             "total_rewrites": total_rewrites,
             "total_alias_rewrites": total_alias_rewrites,
+            "total_neutralized_rewrites": total_neutralized_rewrites,
             "total_unresolved_local_refs": total_unresolved,
             "alias_keys_used": sorted(alias_keys_used),
         },
@@ -425,6 +659,7 @@ def run_live_link_audit(
         f"- Pages updated: {report['safe_fix_summary']['pages_updated']}",
         f"- Total rewrites: {report['safe_fix_summary']['total_rewrites']}",
         f"- Alias rewrites: {report['safe_fix_summary']['total_alias_rewrites']}",
+        f"- Neutralized link rewrites: {report['safe_fix_summary']['total_neutralized_rewrites']}",
         f"- Unresolved local refs: {report['safe_fix_summary']['total_unresolved_local_refs']}",
         "",
         "## Findings By Issue Type",

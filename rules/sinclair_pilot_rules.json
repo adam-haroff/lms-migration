@@ -53,10 +53,10 @@
       "reason": "Embedded iframe requires manual accessibility and policy review",
       "pattern": "(?i)<iframe\\b"
     },
-    {
-      "reason": "Question bank migration requires manual verification of pool/randomization logic",
-      "pattern": "(?i)item bank|question bank|question pool"
-    },
+  {
+    "reason": "Question bank migration requires manual verification of pool/randomization logic",
+    "pattern": "(?i)item bank|question bank|question pool|question librar(?:y|ies)"
+  },
     {
       "reason": "Announcement migration behavior is non-standard; verify posting/notification settings",
       "pattern": "(?i)announcement"

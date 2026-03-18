@@ -64,11 +64,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional alias map JSON used with --template-package for legacy-to-template basename mapping.",
     )
     parser.add_argument(
+        "--math-handling",
+        type=str,
+        choices=("preserve-semantic", "canvas-equation-compatible", "audit-only"),
+        default="preserve-semantic",
+        help="Math handling policy. Preserve semantic math is the recommended default; audit-only skips math cleanup.",
+    )
+    parser.add_argument(
         "--accordion-handling",
         type=str,
-        choices=("none", "details", "flatten"),
-        default="flatten",
-        help="How to handle legacy Bootstrap accordions during conversion.",
+        choices=("none", "details", "flatten", "smart"),
+        default="smart",
+        help="How to handle legacy Bootstrap accordions during conversion. 'smart' flattens document-style pages and keeps accessible details blocks on content pages.",
+    )
+    parser.add_argument(
+        "--accordion-align",
+        type=str,
+        choices=("left", "center"),
+        default="left",
+        help="Summary alignment for converted accessible accordion blocks.",
+    )
+    parser.add_argument(
+        "--accordion-flatten-hints",
+        type=str,
+        default="",
+        help="Comma-separated path/title hints that should always flatten legacy accordions.",
+    )
+    parser.add_argument(
+        "--accordion-details-hints",
+        type=str,
+        default="",
+        help="Comma-separated path/title hints that should always convert legacy accordions to accessible details blocks.",
     )
     parser.add_argument(
         "--no-template-module-structure",
@@ -79,6 +105,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-template-visual-standards",
         action="store_true",
         help="Disable template visual normalization (icon+heading layout, icon sizing/labels, heading color hints).",
+    )
+    parser.add_argument(
+        "--no-template-color-standards",
+        action="store_true",
+        help="Disable template color normalization while leaving other template visual standards enabled.",
+    )
+    parser.add_argument(
+        "--no-template-divider-standards",
+        action="store_true",
+        help="Disable template divider normalization while leaving other template visual standards enabled.",
+    )
+    parser.add_argument(
+        "--image-layout-mode",
+        type=str,
+        choices=("safe-block", "preserve-wrap"),
+        default="safe-block",
+        help="How to handle large floated content images. safe-block avoids text overlap; preserve-wrap keeps optional wrapped-text layouts within safer width limits.",
     )
     return parser
 
@@ -113,9 +156,20 @@ def main() -> None:
             best_practice_enforcer=bool(args.best_practice_enforcer),
             template_package=args.template_package,
             template_alias_map_json=args.template_alias_map_json,
+            math_handling=args.math_handling,
             accordion_handling=args.accordion_handling,
+            accordion_alignment=args.accordion_align,
+            accordion_flatten_hints=tuple(
+                token.strip().lower() for token in args.accordion_flatten_hints.split(",") if token.strip()
+            ),
+            accordion_details_hints=tuple(
+                token.strip().lower() for token in args.accordion_details_hints.split(",") if token.strip()
+            ),
             apply_template_module_structure=not bool(args.no_template_module_structure),
             apply_template_visual_standards=not bool(args.no_template_visual_standards),
+            apply_template_color_standards=not bool(args.no_template_color_standards),
+            apply_template_divider_standards=not bool(args.no_template_divider_standards),
+            image_layout_mode=args.image_layout_mode,
         )
     except ValueError as exc:
         parser.error(str(exc))

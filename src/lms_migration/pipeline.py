@@ -196,6 +196,21 @@ def _normalize_module_checklist_wording(fragment: str) -> str:
     )
     updated = re.sub(r"(?i)\bthis topic\b", "this module", updated)
     updated = re.sub(r"(?i)\bthe topic\b", "the module", updated)
+    updated = re.sub(
+        r"(?i)after completing the learning activities for this module,\s*you will be able to\s*:",
+        "By the end of this module, you will be able to:",
+        updated,
+    )
+    updated = re.sub(
+        r"(?i)to meet the learning objectives for this module,\s*you will complete(?: these| the following)? activities\s*:",
+        "In order to successfully complete this module, please do the following:",
+        updated,
+    )
+    updated = re.sub(
+        r"(?i)\bintroduction and objectives\b",
+        "Introduction and Checklist",
+        updated,
+    )
     return updated
 
 
@@ -205,6 +220,28 @@ def _is_intro_objectives_page(file_path: str) -> bool:
 
 
 _MODULE_NUMBERED_TITLE_RE = re.compile(r"^\s*Module\s*0*(?P<number>\d+)\s*:\s*(?P<label>.+?)\s*$", flags=re.IGNORECASE)
+_START_HERE_TITLE = "Start Here"
+_INSTRUCTOR_MODULE_TITLE = "Instructor Module (Do Not Publish)"
+_START_HERE_CARRYOVER_TITLE = "D2L Start Here Carryover (Manual Placement)"
+_INSTRUCTOR_CARRYOVER_TITLE = "D2L Instructor Carryover (Manual Placement)"
+_TITLE_DELIMITER_PREFIX_HINTS = (
+    "assignment",
+    "discussion",
+    "lesson",
+    "quiz",
+    "exam",
+    "survey",
+    "syllabus",
+    "course overview",
+    "course requirements",
+    "grading information",
+    "guidelines",
+    "preparing your course",
+    "review",
+    "announcement",
+    "instructor guide",
+    "start here",
+)
 
 
 def _module_number_from_title(value: str) -> int | None:
@@ -285,6 +322,64 @@ def _strip_title_prefix(value: str, pattern: str) -> str:
     return stripped.strip("-:| ")
 
 
+def _normalize_canvas_title_delimiters(value: str) -> tuple[str, bool]:
+    normalized_value = re.sub(r"\s+", " ", value or "").strip()
+    if "|" not in normalized_value:
+        return normalized_value, False
+
+    parts = [part.strip(" -:|") for part in normalized_value.split("|")]
+    parts = [part for part in parts if part]
+    if len(parts) < 2:
+        return normalized_value, False
+
+    prefix = parts[0]
+    label_number_match = re.match(r"^(?P<label>[A-Za-z ]+):\s*(?P<number>\d+)\s*$", prefix)
+    if label_number_match is not None:
+        prefix = f"{label_number_match.group('label').strip()} {label_number_match.group('number').strip()}".strip()
+    normalized_prefix = _normalize_compare_text(prefix)
+    if not any(normalized_prefix.startswith(hint) for hint in _TITLE_DELIMITER_PREFIX_HINTS):
+        return normalized_value, False
+
+    suffix = " ".join(parts[1:]).strip()
+    if not suffix:
+        rebuilt = prefix
+    else:
+        rebuilt = f"{prefix}: {suffix}"
+    return rebuilt, rebuilt != normalized_value
+
+
+def _normalize_child_item_title_delimiters(parent_item: ET.Element) -> int:
+    renamed = 0
+    for child in parent_item.iter():
+        if child is parent_item or _local_name(child.tag) != "item":
+            continue
+        child_title_element, child_title = _extract_item_title(child)
+        if child_title_element is None or not child_title:
+            continue
+        normalized_title, changed = _normalize_canvas_title_delimiters(child_title)
+        if not changed:
+            continue
+        child_title_element.text = normalized_title
+        renamed += 1
+    return renamed
+
+
+def _normalize_manifest_item_title_delimiters(root: ET.Element) -> int:
+    renamed = 0
+    for item in root.iter():
+        if _local_name(item.tag) != "item":
+            continue
+        title_element, title_text = _extract_item_title(item)
+        if title_element is None or not title_text:
+            continue
+        normalized_title, changed = _normalize_canvas_title_delimiters(title_text)
+        if not changed:
+            continue
+        title_element.text = normalized_title
+        renamed += 1
+    return renamed
+
+
 def _template_module_child_title(*, module_number: int, original_title: str, kind: str) -> str:
     if kind == "overview_intro":
         return f"Module {module_number}: Introduction and Checklist"
@@ -321,9 +416,11 @@ def _apply_template_module_structure_to_organization(
     organization: ET.Element,
     *,
     existing_identifiers: set[str],
-) -> tuple[int, int, int, int]:
+    preserve_template_shell_modules: bool = False,
+) -> tuple[int, int, int, int, int]:
     top_level_renames = 0
     child_title_renames = 0
+    delimiter_title_renames = 0
     reordered_modules = 0
     inserted_subheaders = 0
 
@@ -334,22 +431,44 @@ def _apply_template_module_structure_to_organization(
 
         top_normalized = _normalize_compare_text(top_title)
         desired_top_title = ""
-        if top_normalized.startswith("faculty resources") or "hidden from students" in top_normalized:
-            desired_top_title = "Instructor Module (Do Not Publish)"
-        elif top_normalized.startswith("course overview") or top_normalized == "start here":
-            desired_top_title = "Start Here"
+        if (
+            top_normalized.startswith("faculty resources")
+            or "hidden from students" in top_normalized
+            or top_normalized == _normalize_compare_text(_INSTRUCTOR_MODULE_TITLE)
+        ):
+            desired_top_title = (
+                _INSTRUCTOR_CARRYOVER_TITLE
+                if preserve_template_shell_modules
+                else _INSTRUCTOR_MODULE_TITLE
+            )
+        elif (
+            top_normalized.startswith("course overview")
+            or top_normalized == _normalize_compare_text(_START_HERE_TITLE)
+        ):
+            desired_top_title = (
+                _START_HERE_CARRYOVER_TITLE
+                if preserve_template_shell_modules
+                else _START_HERE_TITLE
+            )
         if desired_top_title and top_title != desired_top_title:
             top_title_element.text = desired_top_title
             top_title = desired_top_title
             top_level_renames += 1
 
+        delimiter_title_renames += _normalize_child_item_title_delimiters(top_item)
         module_number = _module_number_from_title(top_title)
         if module_number is None:
             top_child_items = [child for child in list(top_item) if _local_name(child.tag) == "item"]
             top_child_titles = [_extract_item_title(child)[1] for child in top_child_items]
             normalized_top_title = _normalize_compare_text(top_title)
 
-            if normalized_top_title == _normalize_compare_text("Start Here"):
+            if preserve_template_shell_modules and normalized_top_title in {
+                _normalize_compare_text(_START_HERE_CARRYOVER_TITLE),
+                _normalize_compare_text(_INSTRUCTOR_CARRYOVER_TITLE),
+            }:
+                continue
+
+            if normalized_top_title == _normalize_compare_text(_START_HERE_TITLE):
                 has_support_subheader = any(
                     _normalize_compare_text(child_title) == _normalize_compare_text("Canvas Support Resources")
                     for child_title in top_child_titles
@@ -380,7 +499,7 @@ def _apply_template_module_structure_to_organization(
                         reordered_modules += 1
                         inserted_subheaders += 1
 
-            if normalized_top_title == _normalize_compare_text("Instructor Module (Do Not Publish)"):
+            if normalized_top_title == _normalize_compare_text(_INSTRUCTOR_MODULE_TITLE):
                 has_about_subheader = any(
                     _normalize_compare_text(child_title) == _normalize_compare_text("About This Template")
                     for child_title in top_child_titles
@@ -490,11 +609,90 @@ def _apply_template_module_structure_to_organization(
             reordered_modules += 1
             inserted_subheaders += module_headers
 
-    return top_level_renames, child_title_renames, reordered_modules, inserted_subheaders
+    return (
+        top_level_renames,
+        child_title_renames,
+        delimiter_title_renames,
+        reordered_modules,
+        inserted_subheaders,
+    )
 
 
 def _to_serializable_issue(issue: ManualReviewIssue) -> dict[str, str]:
     return {"reason": issue.reason, "evidence": issue.evidence}
+
+
+def _build_issue_summary(file_results: list[FileResult]) -> dict:
+    manual_files = 0
+    a11y_files = 0
+    manual_reason_counts = Counter()
+    a11y_reason_counts = Counter()
+    file_issue_rows: list[dict] = []
+
+    for result in file_results:
+        manual_count = len(result.manual_issues)
+        a11y_count = len(result.a11y_issues)
+        if manual_count:
+            manual_files += 1
+            manual_reason_counts.update(
+                issue.reason for issue in result.manual_issues if issue.reason
+            )
+        if a11y_count:
+            a11y_files += 1
+            a11y_reason_counts.update(
+                issue.reason for issue in result.a11y_issues if issue.reason
+            )
+        if manual_count or a11y_count:
+            file_issue_rows.append(
+                {
+                    "path": result.path,
+                    "manual_review_issues": manual_count,
+                    "accessibility_issues": a11y_count,
+                    "total_issues": manual_count + a11y_count,
+                }
+            )
+
+    file_issue_rows.sort(
+        key=lambda row: (-int(row["total_issues"]), -int(row["manual_review_issues"]), str(row["path"]))
+    )
+
+    return {
+        "files_with_manual_review_issues": manual_files,
+        "files_with_accessibility_issues": a11y_files,
+        "top_manual_review_reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in manual_reason_counts.most_common(15)
+        ],
+        "top_accessibility_reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in a11y_reason_counts.most_common(15)
+        ],
+        "top_issue_files": file_issue_rows[:20],
+    }
+
+
+def _upsert_file_result(
+    file_results: list[FileResult],
+    replacement: FileResult,
+    *,
+    merge_applied_changes: bool = False,
+) -> None:
+    for index in range(len(file_results) - 1, -1, -1):
+        if file_results[index].path != replacement.path:
+            continue
+        if merge_applied_changes:
+            existing = file_results[index]
+            replacement = FileResult(
+                path=replacement.path,
+                changed=existing.changed or replacement.changed,
+                applied_changes=existing.applied_changes + replacement.applied_changes,
+                manual_issues=replacement.manual_issues,
+                a11y_issues=replacement.a11y_issues,
+            )
+        file_results[index] = replacement
+        return
+
+    file_results.append(replacement)
 
 
 def _build_report(
@@ -505,6 +703,7 @@ def _build_report(
     manifest_found: bool,
     file_results: list[FileResult],
     best_practice_enforcer_enabled: bool = False,
+    math_handling: str = "preserve-semantic",
     reference_alignment: dict | None = None,
     template_overlay: dict | None = None,
 ) -> dict:
@@ -514,6 +713,7 @@ def _build_report(
     change_count = sum(change.count for result in file_results for change in result.applied_changes)
     manual_issue_count = sum(len(result.manual_issues) for result in file_results)
     a11y_issue_count = sum(len(result.a11y_issues) for result in file_results)
+    issue_summary = _build_issue_summary(file_results)
 
     report = {
         "input_zip": str(input_zip),
@@ -524,6 +724,7 @@ def _build_report(
             "description": policy_profile.description,
         },
         "best_practice_enforcer_enabled": bool(best_practice_enforcer_enabled),
+        "math_handling": math_handling,
         "manifest_found": manifest_found,
         "summary": {
             "html_files_scanned": total_files,
@@ -532,6 +733,7 @@ def _build_report(
             "manual_review_issues": manual_issue_count,
             "accessibility_issues": a11y_issue_count,
         },
+        "issue_summary": issue_summary,
         "files": [
             {
                 "path": result.path,
@@ -620,6 +822,7 @@ def _write_markdown_report(report: dict, output_path: Path) -> None:
         f"Output zip: `{report['output_zip']}`",
         f"Rules: `{report['rules']}`",
         f"Policy profile: `{report['policy_profile']['id']}`",
+        f"Math handling: `{report.get('math_handling', 'preserve-semantic')}`",
         f"Best-practice enforcer enabled: `{report.get('best_practice_enforcer_enabled', False)}`",
         f"IMS manifest found: `{report['manifest_found']}`",
         "",
@@ -632,6 +835,36 @@ def _write_markdown_report(report: dict, output_path: Path) -> None:
         f"- Accessibility issues: {summary['accessibility_issues']}",
         "",
     ]
+
+    issue_summary = report.get("issue_summary", {})
+    top_manual_reasons = issue_summary.get("top_manual_review_reasons", [])
+    top_a11y_reasons = issue_summary.get("top_accessibility_reasons", [])
+    top_issue_files = issue_summary.get("top_issue_files", [])
+    if issue_summary:
+        lines.extend(
+            [
+                "## Unresolved / Manual Items",
+                "",
+                f"- Files with manual review issues: {issue_summary.get('files_with_manual_review_issues', 0)}",
+                f"- Files with accessibility issues: {issue_summary.get('files_with_accessibility_issues', 0)}",
+            ]
+        )
+        if top_manual_reasons:
+            lines.append("- Top manual review reasons:")
+            for row in top_manual_reasons[:8]:
+                lines.append(f"  - ({row.get('count', 0)}) {row.get('reason', '')}")
+        if top_a11y_reasons:
+            lines.append("- Top accessibility reasons:")
+            for row in top_a11y_reasons[:8]:
+                lines.append(f"  - ({row.get('count', 0)}) {row.get('reason', '')}")
+        if top_issue_files:
+            lines.append("- Most-affected files:")
+            for row in top_issue_files[:8]:
+                lines.append(
+                    f"  - `{row.get('path', '')}` (manual: {row.get('manual_review_issues', 0)}, "
+                    f"a11y: {row.get('accessibility_issues', 0)})"
+                )
+        lines.append("")
 
     template_overlay = report.get("template_overlay")
     if isinstance(template_overlay, dict):
@@ -816,9 +1049,16 @@ def run_migration(
     best_practice_enforcer: bool = False,
     template_package: Path | None = None,
     template_alias_map_json: Path | None = None,
-    accordion_handling: str = "flatten",
+    math_handling: str = "preserve-semantic",
+    accordion_handling: str = "smart",
+    accordion_alignment: str = "left",
+    accordion_flatten_hints: tuple[str, ...] = (),
+    accordion_details_hints: tuple[str, ...] = (),
     apply_template_module_structure: bool = True,
     apply_template_visual_standards: bool = True,
+    apply_template_color_standards: bool = True,
+    apply_template_divider_standards: bool = True,
+    image_layout_mode: str = "safe-block",
 ) -> MigrationOutput:
     rules = load_rules(rules_path)
     policy_profile = get_policy_profile(policy_profile_id, policy_profiles_path)
@@ -839,6 +1079,9 @@ def run_migration(
                 template_package=template_package,
                 alias_map_json_path=template_alias_map_json,
                 apply_visual_standards=apply_template_visual_standards,
+                apply_color_standards=apply_template_visual_standards and apply_template_color_standards,
+                apply_divider_standards=apply_template_visual_standards and apply_template_divider_standards,
+                image_layout_mode=image_layout_mode,
             )
         )
 
@@ -873,7 +1116,12 @@ def run_migration(
             neutralize_legacy_d2l_links=policy_profile.neutralize_legacy_d2l_links,
             use_alt_text_for_removed_template_images=policy_profile.use_alt_text_for_removed_template_images,
             repair_missing_local_references=policy_profile.repair_missing_local_references,
+            normalize_divider_styling=bool(apply_template_divider_standards),
+            math_handling=math_handling,
             accordion_handling=accordion_handling,
+            accordion_summary_alignment=accordion_alignment,
+            accordion_flatten_hints=accordion_flatten_hints,
+            accordion_details_hints=accordion_details_hints,
         )
 
         for html_file in html_files:
@@ -904,6 +1152,7 @@ def run_migration(
             updated, sanitizer_changes = apply_canvas_sanitizer(
                 updated,
                 policy=sanitizer_policy,
+                file_path=relative_html_path,
             )
             applied_changes.extend(sanitizer_changes)
 
@@ -1072,7 +1321,11 @@ def run_migration(
                     applied_changes.extend(overlay_changes)
                     template_overlay_file_summaries.append(overlay_file_summary)
 
-                updated, sanitizer_changes = apply_canvas_sanitizer(updated, policy=sanitizer_policy)
+                updated, sanitizer_changes = apply_canvas_sanitizer(
+                    updated,
+                    policy=sanitizer_policy,
+                    file_path=f"{relative_manifest_path}::item[{title_text or item.attrib.get('identifier', '')}]",
+                )
                 applied_changes.extend(sanitizer_changes)
 
                 if sanitizer_policy.repair_missing_local_references:
@@ -1189,25 +1442,93 @@ def run_migration(
                         continue
 
                     intro_updated = _append_html_fragment(intro_original, module_description)
+                    intro_applied_changes: list[AppliedChange] = [
+                        AppliedChange(
+                            category="structure",
+                            description="Moved module learning objectives/checklist block into Introduction and Objectives page",
+                            count=1,
+                        )
+                    ]
+                    intro_overlay_issues: list[ManualReviewIssue] = []
+                    intro_relative_path = str(intro_html_path.relative_to(unpack_dir).as_posix())
+
+                    if template_overlay_context is not None:
+                        (
+                            intro_updated,
+                            intro_overlay_changes,
+                            intro_overlay_issues,
+                            intro_overlay_file_summary,
+                        ) = apply_template_overlay(
+                            intro_updated,
+                            file_path=intro_relative_path,
+                            context=template_overlay_context,
+                        )
+                        intro_applied_changes.extend(intro_overlay_changes)
+                        template_overlay_file_summaries.append(intro_overlay_file_summary)
+
+                    intro_updated, intro_sanitizer_changes = apply_canvas_sanitizer(
+                        intro_updated,
+                        policy=sanitizer_policy,
+                        file_path=intro_relative_path,
+                    )
+                    intro_applied_changes.extend(intro_sanitizer_changes)
+
+                    if sanitizer_policy.repair_missing_local_references:
+                        intro_updated, intro_repaired_ref_changes = repair_missing_local_references(
+                            intro_updated,
+                            file_path=intro_relative_path,
+                            available_paths=available_paths,
+                            keep_alt_text_for_missing_images=sanitizer_policy.use_alt_text_for_removed_template_images,
+                        )
+                        intro_applied_changes.extend(intro_repaired_ref_changes)
+
+                    if best_practice_enforcer:
+                        intro_updated, intro_best_practice_changes = apply_best_practice_enforcer(
+                            intro_updated,
+                            file_path=intro_relative_path,
+                            policy=BestPracticeEnforcerPolicy(
+                                enabled=True,
+                                enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
+                                ensure_external_links_new_tab=True,
+                            ),
+                        )
+                        intro_applied_changes.extend(intro_best_practice_changes)
+
                     if intro_updated != intro_original:
                         _write_text(intro_html_path, intro_updated)
                     module_item.attrib.pop("description", None)
                     manifest_changed = True
                     topic_description_merged += 1
-                    file_results.append(
-                        FileResult(
-                            path=str(intro_html_path.relative_to(unpack_dir).as_posix()),
-                            changed=True,
-                            applied_changes=[
-                                AppliedChange(
-                                    category="structure",
-                                    description="Moved module learning objectives/checklist block into Introduction and Objectives page",
-                                    count=1,
-                                )
-                            ],
-                            manual_issues=[],
-                            a11y_issues=[],
+                    intro_manual_issues = detect_manual_review_issues(
+                        intro_updated,
+                        rules.manual_review_triggers,
+                    )
+                    intro_manual_issues.extend(intro_overlay_issues)
+                    if policy_profile.template_checks_enabled:
+                        intro_manual_issues.extend(
+                            check_template_heuristics(
+                                intro_updated,
+                                file_path=intro_relative_path,
+                                policy=TemplateCheckPolicy(
+                                    check_instructor_notes=policy_profile.check_instructor_notes,
+                                    check_template_placeholders=policy_profile.check_template_placeholders,
+                                    check_legacy_quiz_wording=policy_profile.check_legacy_quiz_wording,
+                                    require_mc_closing_bullet=policy_profile.require_mc_closing_bullet,
+                                ),
+                            )
                         )
+                    intro_a11y_issues = check_accessibility_heuristics(intro_updated)
+
+                    _upsert_file_result(
+                        file_results,
+                        FileResult(
+                            path=intro_relative_path,
+                            changed=True,
+                            applied_changes=intro_applied_changes,
+                            manual_issues=intro_manual_issues,
+                            a11y_issues=intro_a11y_issues,
+                        ),
+                        merge_applied_changes=True,
                     )
 
             if topic_title_renamed:
@@ -1252,22 +1573,27 @@ def run_migration(
                 }
                 top_level_renames = 0
                 child_title_renames = 0
+                delimiter_title_renames = 0
                 reordered_modules = 0
                 inserted_subheaders = 0
                 for organization in [element for element in root.iter() if _local_name(element.tag) == "organization"]:
                     (
                         org_top_level_renames,
                         org_child_title_renames,
+                        org_delimiter_title_renames,
                         org_reordered_modules,
                         org_inserted_subheaders,
                     ) = _apply_template_module_structure_to_organization(
                         organization,
                         existing_identifiers=manifest_item_identifiers,
+                        preserve_template_shell_modules=template_package is not None,
                     )
                     top_level_renames += org_top_level_renames
                     child_title_renames += org_child_title_renames
+                    delimiter_title_renames += org_delimiter_title_renames
                     reordered_modules += org_reordered_modules
                     inserted_subheaders += org_inserted_subheaders
+                delimiter_title_renames += _normalize_manifest_item_title_delimiters(root)
 
                 if top_level_renames:
                     manifest_changed = True
@@ -1278,7 +1604,11 @@ def run_migration(
                             applied_changes=[
                                 AppliedChange(
                                     category="structure",
-                                    description='Aligned top-level module names to template conventions (e.g., "Start Here", "Instructor Module")',
+                                    description=(
+                                        'Staged D2L overview/instructor modules for manual placement so template shell modules stay intact'
+                                        if template_package is not None
+                                        else 'Aligned top-level module names to template conventions (e.g., "Start Here", "Instructor Module")'
+                                    ),
                                     count=top_level_renames,
                                 )
                             ],
@@ -1297,6 +1627,23 @@ def run_migration(
                                     category="structure",
                                     description="Aligned numbered module item titles to template naming conventions",
                                     count=child_title_renames,
+                                )
+                            ],
+                            manual_issues=[],
+                            a11y_issues=[],
+                        )
+                    )
+                if delimiter_title_renames:
+                    manifest_changed = True
+                    file_results.append(
+                        FileResult(
+                            path=f"{relative_manifest_path}::organization",
+                            changed=True,
+                            applied_changes=[
+                                AppliedChange(
+                                    category="structure",
+                                    description="Normalized legacy pipe-delimited page titles to Canvas colon-style naming",
+                                    count=delimiter_title_renames,
                                 )
                             ],
                             manual_issues=[],
@@ -1329,6 +1676,55 @@ def run_migration(
             if manifest_changed:
                 tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
 
+        if best_practice_enforcer:
+            for html_file in html_files:
+                relative_html_path = str(html_file.relative_to(unpack_dir).as_posix())
+                original = _read_text(html_file)
+                updated, final_best_practice_changes = apply_best_practice_enforcer(
+                    original,
+                    file_path=relative_html_path,
+                    policy=BestPracticeEnforcerPolicy(
+                        enabled=True,
+                        enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
+                        ensure_external_links_new_tab=True,
+                    ),
+                )
+                if not final_best_practice_changes and updated == original:
+                    continue
+
+                if updated != original:
+                    _write_text(html_file, updated)
+
+                final_manual_issues = detect_manual_review_issues(
+                    updated,
+                    rules.manual_review_triggers,
+                )
+                if policy_profile.template_checks_enabled:
+                    final_manual_issues.extend(
+                        check_template_heuristics(
+                            updated,
+                            file_path=relative_html_path,
+                            policy=TemplateCheckPolicy(
+                                check_instructor_notes=policy_profile.check_instructor_notes,
+                                check_template_placeholders=policy_profile.check_template_placeholders,
+                                check_legacy_quiz_wording=policy_profile.check_legacy_quiz_wording,
+                                require_mc_closing_bullet=policy_profile.require_mc_closing_bullet,
+                            ),
+                        )
+                    )
+                final_a11y_issues = check_accessibility_heuristics(updated)
+                _upsert_file_result(
+                    file_results,
+                    FileResult(
+                        path=relative_html_path,
+                        changed=updated != original,
+                        applied_changes=final_best_practice_changes,
+                        manual_issues=final_manual_issues,
+                        a11y_issues=final_a11y_issues,
+                    ),
+                    merge_applied_changes=True,
+                )
+
         if template_overlay_context is not None:
             template_overlay_report_json = output_dir / f"{input_zip.stem}.template-overlay-report.json"
             template_overlay_report_payload = build_template_overlay_report(
@@ -1350,6 +1746,7 @@ def run_migration(
         manifest_found=manifest_found,
         file_results=file_results,
         best_practice_enforcer_enabled=best_practice_enforcer,
+        math_handling=math_handling,
         reference_alignment=reference_alignment,
         template_overlay={
             "enabled": template_overlay_context is not None,
@@ -1358,11 +1755,17 @@ def run_migration(
                     "template_package": str(template_package),
                     "alias_map_json": str(template_alias_map_json) if template_alias_map_json is not None else "",
                     "apply_visual_standards": bool(apply_template_visual_standards),
+                    "apply_color_standards": bool(apply_template_color_standards),
+                    "apply_divider_standards": bool(apply_template_divider_standards),
+                    "image_layout_mode": image_layout_mode,
                     "apply_module_structure": bool(apply_template_module_structure),
                 }
                 if template_overlay_context is not None
                 else {
                     "apply_visual_standards": bool(apply_template_visual_standards),
+                    "apply_color_standards": bool(apply_template_color_standards),
+                    "apply_divider_standards": bool(apply_template_divider_standards),
+                    "image_layout_mode": image_layout_mode,
                     "apply_module_structure": bool(apply_template_module_structure),
                 }
             ),

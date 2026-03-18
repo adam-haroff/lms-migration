@@ -78,7 +78,13 @@ def build_visual_audit(*, original_zip: Path, converted_zip: Path) -> dict:
                 flags=re.IGNORECASE,
             )
         )
-        details_converted = converted.count('<details class="migration-accordion">')
+        details_converted = len(
+            re.findall(
+                r"<details\b[^>]*class\s*=\s*['\"][^'\"]*\bmigration-accordion\b[^'\"]*['\"][^>]*>",
+                converted,
+                flags=re.IGNORECASE,
+            )
+        )
         shared_template_refs = converted.lower().count("/shared/brightspace_html_template/")
         title_tags_converted = len(re.findall(r"<title\b", converted, flags=re.IGNORECASE))
         hr_tags = re.findall(r"<hr\b[^>]*>", converted, flags=re.IGNORECASE)

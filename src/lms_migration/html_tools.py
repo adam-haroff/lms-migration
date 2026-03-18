@@ -9,6 +9,11 @@ from difflib import SequenceMatcher
 from typing import Iterable
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
+from .math_tools import (
+    find_equation_image_tags,
+    normalize_math_handling,
+    strip_empty_mathml_stubs,
+)
 from .rules import BannerRule, LinkRewrite, ManualTrigger, RegexReplacement
 
 
@@ -40,7 +45,12 @@ class CanvasSanitizerPolicy:
     use_alt_text_for_removed_template_images: bool = True
     repair_missing_local_references: bool = True
     strip_bootstrap_grid_classes: bool = True
-    accordion_handling: str = "details"
+    normalize_divider_styling: bool = True
+    math_handling: str = "preserve-semantic"
+    accordion_handling: str = "smart"
+    accordion_summary_alignment: str = "left"
+    accordion_flatten_hints: tuple[str, ...] = ()
+    accordion_details_hints: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,20 @@ _BOOTSTRAP_GRID_CLASS_RE = re.compile(
     r"^(?:container(?:-fluid)?|row|col(?:-[a-z]+)?-\d{1,2}|offset(?:-[a-z]+)?-\d{1,2})$",
     flags=re.IGNORECASE,
 )
+_BOOTSTRAP_UTILITY_CLASS_RE = re.compile(
+    r"^(?:"
+    r"(?:m|p)(?:[trblxy])?-(?:0|1|2|3|4|5|auto)|"
+    r"bg-(?:light|white)|"
+    r"text-(?:left|center|right)|"
+    r"float-(?:left|right)|"
+    r"w-100|h-100"
+    r")$",
+    flags=re.IGNORECASE,
+)
+_LEGACY_TEMPLATE_CLASS_RE = re.compile(
+    r"^(?:banner-img|courseLink|courseTable|grade|datatable|courseHeader|accordion|card|card-body|card-header|card-title|collapse)$",
+    flags=re.IGNORECASE,
+)
 _ACCORDION_CARD_PATTERN = re.compile(
     r"<div\b[^>]*class\s*=\s*[\"'][^\"']*\bcard\b[^\"']*[\"'][^>]*>\s*"
     r"<div\b[^>]*class\s*=\s*[\"'][^\"']*\bcard-header\b[^\"']*[\"'][^>]*>\s*(?P<header>.*?)\s*</div>\s*"
@@ -69,9 +93,642 @@ _ACCORDION_CARD_PATTERN = re.compile(
     r"<div\b[^>]*class\s*=\s*[\"'][^\"']*\bcard-body\b[^\"']*[\"'][^>]*>\s*(?P<body>.*?)\s*</div>\s*</div>\s*</div>",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_TITLE_TEXT_RE = re.compile(r"<title\b[^>]*>(?P<body>.*?)</title>", flags=re.IGNORECASE | re.DOTALL)
+_FIRST_HEADING_RE = re.compile(r"<h[1-6]\b[^>]*>(?P<body>.*?)</h[1-6]>", flags=re.IGNORECASE | re.DOTALL)
+_STRIP_TAGS_RE = re.compile(r"<[^>]+>")
+_SMART_ACCORDION_FLATTEN_HINTS = (
+    "syllabus",
+    "instructor guide",
+    "faculty",
+    "artificial intelligence in this course",
+    "policy",
+    "do not publish",
+)
+_SMART_ACCORDION_DETAILS_HINTS = (
+    "lesson",
+    "student resources",
+    "support",
+    "faq",
+    "how do i",
+    "help",
+    "resource",
+)
+_EDITOR_ARTIFACT_ATTR_RE = re.compile(
+    r"\s(?:"
+    r"data-start|data-end|data-ccp-props|data-contrast|data-is-last-node|"
+    r"data-is-only-node|data-d2l-editor-default-img-style"
+    r")\s*=\s*(?:([\"']).*?\1|[^\s>]+)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_D2L_STYLE_TOKEN_RE = re.compile(
+    r"(?:^|;)\s*--d2l-[a-z0-9-]+\s*:\s*[^;]+",
+    flags=re.IGNORECASE,
+)
+_DISPLAY_EQUATION_BLOCK_RE = re.compile(
+    r"<(?P<tag>p|div)\b(?P<attrs>[^>]*)>\s*"
+    r"(?P<body>(?:<span\b[^>]*>\s*)?(?:<img\b[^>]*>|<math\b[^>]*>.*?</math>)(?:\s*</span>)?)\s*"
+    r"</(?P=tag)>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_DISPLAY_MATHML_RE = re.compile(
+    r"<math\b[^>]*(?:\bdisplay\s*=\s*([\"'])block\1|\bmode\s*=\s*([\"'])display\2)[^>]*>.*?</math>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
-def _convert_bootstrap_accordion_cards(content: str, mode: str) -> tuple[str, int]:
+def _plain_text(value: str) -> str:
+    cleaned = _STRIP_TAGS_RE.sub(" ", value)
+    cleaned = html.unescape(cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _extract_attr_value(tag_html: str, attr_name: str) -> str | None:
+    match = re.search(
+        rf"\b{attr_name}\s*=\s*([\"'])(?P<value>.*?)\1",
+        tag_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match is None:
+        return None
+    return html.unescape(match.group("value"))
+
+
+def _set_or_add_attr(tag_html: str, attr_name: str, value: str) -> str:
+    pattern = re.compile(
+        rf"(\b{attr_name}\s*=\s*)([\"'])(?P<value>.*?)(\2)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if pattern.search(tag_html):
+        return pattern.sub(lambda m: f'{m.group(1)}"{html.escape(value, quote=True)}"', tag_html, count=1)
+    if tag_html.endswith("/>"):
+        return f'{tag_html[:-2].rstrip()} {attr_name}="{html.escape(value, quote=True)}" />'
+    return f'{tag_html[:-1].rstrip()} {attr_name}="{html.escape(value, quote=True)}">'
+
+
+def _remove_attr(tag_html: str, attr_name: str) -> tuple[str, bool]:
+    pattern = re.compile(
+        rf"\s{attr_name}\s*=\s*(?:([\"']).*?\1|[^\s>]+)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    updated, removed = pattern.subn("", tag_html, count=1)
+    return updated, bool(removed)
+
+
+def _merge_inline_style(tag_html: str, additions: dict[str, str]) -> tuple[str, bool]:
+    style_pattern = re.compile(
+        r'(\bstyle\s*=\s*)(["\'])(?P<value>.*?)(\2)',
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    match = style_pattern.search(tag_html)
+    style_text = match.group("value") if match is not None else ""
+    declarations: list[str] = []
+    index_by_key: dict[str, int] = {}
+    for chunk in style_text.split(";"):
+        piece = chunk.strip()
+        if not piece or ":" not in piece:
+            continue
+        key, raw_value = piece.split(":", 1)
+        lowered = key.strip().lower()
+        index_by_key[lowered] = len(declarations)
+        declarations.append(f"{lowered}: {raw_value.strip()}")
+
+    changed = False
+    for key, value in additions.items():
+        lowered = key.strip().lower()
+        desired = f"{lowered}: {value.strip()}"
+        if lowered in index_by_key:
+            index = index_by_key[lowered]
+            if declarations[index] != desired:
+                declarations[index] = desired
+                changed = True
+            continue
+        index_by_key[lowered] = len(declarations)
+        declarations.append(desired)
+        changed = True
+
+    if not declarations:
+        return tag_html, False
+    merged_style = "; ".join(declarations).strip() + ";"
+    if match is None:
+        return _set_or_add_attr(tag_html, "style", merged_style), True
+    rebuilt = (
+        tag_html[: match.start("value")]
+        + merged_style
+        + tag_html[match.end("value") :]
+    )
+    return rebuilt, changed
+
+
+def _remove_inline_style_keys(tag_html: str, keys: set[str]) -> tuple[str, bool]:
+    style_pattern = re.compile(
+        r'(\bstyle\s*=\s*)(["\'])(?P<value>.*?)(\2)',
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    match = style_pattern.search(tag_html)
+    if match is None:
+        return tag_html, False
+
+    kept: list[str] = []
+    changed = False
+    for chunk in match.group("value").split(";"):
+        piece = chunk.strip()
+        if not piece or ":" not in piece:
+            continue
+        key, raw_value = piece.split(":", 1)
+        lowered = key.strip().lower()
+        if lowered in keys:
+            changed = True
+            continue
+        kept.append(f"{lowered}: {raw_value.strip()}")
+
+    if not changed:
+        return tag_html, False
+
+    if not kept:
+        rebuilt = tag_html[: match.start()] + tag_html[match.end() :]
+        rebuilt = re.sub(r"\s{2,}", " ", rebuilt)
+        rebuilt = rebuilt.replace("< ", "<")
+        return rebuilt, True
+
+    merged_style = "; ".join(kept).strip() + ";"
+    rebuilt = (
+        tag_html[: match.start("value")]
+        + merged_style
+        + tag_html[match.end("value") :]
+    )
+    return rebuilt, True
+
+
+def _merge_class_names(tag_html: str, class_names: Iterable[str]) -> tuple[str, bool]:
+    class_pattern = re.compile(
+        r'(\bclass\s*=\s*)(["\'])(?P<value>.*?)(\2)',
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    match = class_pattern.search(tag_html)
+    desired = [token.strip() for token in class_names if token.strip()]
+    if not desired:
+        return tag_html, False
+
+    if match is None:
+        return _set_or_add_attr(tag_html, "class", " ".join(desired)), True
+
+    existing_tokens = [token for token in match.group("value").split() if token]
+    merged_tokens = list(existing_tokens)
+    changed = False
+    for token in desired:
+        if token not in merged_tokens:
+            merged_tokens.append(token)
+            changed = True
+    if not changed:
+        return tag_html, False
+
+    rebuilt = (
+        tag_html[: match.start("value")]
+        + " ".join(merged_tokens)
+        + tag_html[match.end("value") :]
+    )
+    return rebuilt, True
+
+
+def _normalize_equation_image_styles(content: str) -> tuple[str, int]:
+    styled = 0
+
+    def replace_tag(match: re.Match[str]) -> str:
+        nonlocal styled
+        tag_html = match.group(0)
+        updated_tag, changed = _merge_inline_style(
+            tag_html,
+            {
+                "max-width": "100%",
+                "height": "auto",
+                "vertical-align": "middle",
+            },
+        )
+        if changed:
+            styled += 1
+        return updated_tag
+
+    updated = re.sub(
+        r"<img\b[^>]*>",
+        lambda match: replace_tag(match) if "equation_image" in match.group(0).lower() else match.group(0),
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return updated, styled
+
+
+def _is_syllabus_like_page(*, file_path: str, document_title_text: str, content: str) -> bool:
+    context = " ".join(
+        filter(
+            None,
+            (
+                file_path.replace("\\", "/").lower(),
+                document_title_text.lower(),
+                _extract_document_heading_text(content).lower(),
+            ),
+        )
+    )
+    if "syllabus quiz" in context:
+        return False
+    return "syllabus" in context or "class meeting schedule" in context
+
+
+def _top_level_table_spans(fragment: str) -> list[tuple[int, int]]:
+    token_pattern = re.compile(r"</?table\b[^>]*>", flags=re.IGNORECASE | re.DOTALL)
+    starts: list[int] = []
+    spans: list[tuple[int, int]] = []
+    for match in token_pattern.finditer(fragment):
+        tag_html = match.group(0).lower()
+        if tag_html.startswith("</table"):
+            if not starts:
+                continue
+            start = starts.pop()
+            if not starts:
+                spans.append((start, match.end()))
+            continue
+        starts.append(match.start())
+    return spans
+
+
+def _normalize_syllabus_tables(fragment: str) -> tuple[str, int]:
+    spans = _top_level_table_spans(fragment)
+    if not spans:
+        return fragment, 0
+
+    pieces: list[str] = []
+    last_index = 0
+    total_updates = 0
+    for start, end in spans:
+        pieces.append(fragment[last_index:start])
+        normalized_table, table_updates, section_heading = _normalize_single_syllabus_table(fragment[start:end])
+        if section_heading and pieces:
+            pieces[-1] = re.sub(
+                r"(?is)<h3>\s*Section\s*</h3>\s*<div>\s*$",
+                "<div>",
+                pieces[-1],
+                count=1,
+            )
+        pieces.append(normalized_table)
+        total_updates += table_updates
+        last_index = end
+    pieces.append(fragment[last_index:])
+    return "".join(pieces), total_updates
+
+
+def _flatten_nested_table_markup(value_html: str) -> str:
+    if "<table" not in value_html.lower():
+        return value_html.strip()
+    updated = value_html
+    updated = re.sub(r"</(?:td|th)>\s*<(?:td|th)\b[^>]*>", "<br>", updated, flags=re.IGNORECASE | re.DOTALL)
+    updated = re.sub(r"</tr>\s*<tr\b[^>]*>", "<br>", updated, flags=re.IGNORECASE | re.DOTALL)
+    updated = re.sub(r"</?(?:table|tbody|thead|tfoot|tr|td|th)\b[^>]*>", "", updated, flags=re.IGNORECASE | re.DOTALL)
+    updated = re.sub(r"(?:<br\s*/?>\s*){3,}", "<br><br>", updated, flags=re.IGNORECASE)
+    return updated.strip()
+
+
+def _convert_syllabus_row_header_table_to_list(table_html: str, section_heading: str) -> str | None:
+    table_match = re.match(r"<table\b[^>]*>(?P<body>.*?)</table>\s*$", table_html, flags=re.IGNORECASE | re.DOTALL)
+    if table_match is None:
+        return None
+
+    table_body = re.sub(r"<caption\b[^>]*>.*?</caption>", "", table_match.group("body"), flags=re.IGNORECASE | re.DOTALL)
+    items: list[str] = []
+    for row_match in re.finditer(r"<tr\b[^>]*>(?P<body>.*?)</tr>", table_body, flags=re.IGNORECASE | re.DOTALL):
+        row_body = row_match.group("body")
+        header_match = re.search(r"<th\b[^>]*>(?P<body>.*?)</th>", row_body, flags=re.IGNORECASE | re.DOTALL)
+        value_match = re.search(r"<td\b[^>]*>(?P<body>.*?)</td>", row_body, flags=re.IGNORECASE | re.DOTALL)
+        if header_match is None or value_match is None:
+            continue
+
+        label_text = _plain_text(header_match.group("body")).rstrip(":").strip()
+        value_html = _flatten_nested_table_markup(value_match.group("body"))
+        value_text = _plain_text(value_html)
+        if not label_text and not value_text:
+            continue
+        if not label_text:
+            items.append(f"<li>{value_html}</li>")
+            continue
+        if not value_text:
+            items.append(f"<li><strong>{html.escape(label_text, quote=False)}</strong></li>")
+            continue
+        if re.search(r"<(?:div|p|ul|ol|h[1-6]|details|blockquote)\b", value_html, flags=re.IGNORECASE):
+            items.append(
+                f"<li><strong>{html.escape(label_text, quote=False)}</strong><div>{value_html}</div></li>"
+            )
+        else:
+            items.append(f"<li><strong>{html.escape(label_text, quote=False)}</strong>: {value_html}</li>")
+
+    if len(items) < 3:
+        return None
+    return f"<h3>{html.escape(section_heading, quote=False)}</h3>\n<ul>\n" + "\n".join(items) + "\n</ul>"
+
+
+def _normalize_single_syllabus_table(table_html: str) -> tuple[str, int, str]:
+    opening_match = re.match(r"<table\b[^>]*>", table_html, flags=re.IGNORECASE | re.DOTALL)
+    closing_match = re.search(r"</table>\s*$", table_html, flags=re.IGNORECASE | re.DOTALL)
+    if opening_match is None or closing_match is None:
+        return table_html, 0, ""
+
+    opening_tag = opening_match.group(0)
+    inner_html = table_html[opening_match.end() : closing_match.start()]
+    normalized_inner, nested_updates = _normalize_syllabus_tables(inner_html)
+
+    text_snapshot = _plain_text(normalized_inner).lower()
+    summary_text = (_extract_attr_value(opening_tag, "summary") or "").strip()
+    existing_caption_match = re.search(
+        r"<caption\b[^>]*>(?P<body>.*?)</caption>",
+        normalized_inner,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    existing_caption_text = (
+        _plain_text(existing_caption_match.group("body")) if existing_caption_match is not None else ""
+    )
+
+    role = ""
+    if (
+        "topics" in text_snapshot
+        and "assignments" in text_snapshot
+        and "due date" in text_snapshot
+    ) or "16-week" in text_snapshot or "12-week" in text_snapshot:
+        role = "course-outline"
+    elif "date" in text_snapshot and "time" in text_snapshot and "location or zoom link" in text_snapshot:
+        role = "class-meeting-schedule"
+    elif "percent of total grade" in text_snapshot or summary_text.lower() == "grading policy":
+        role = "assignment-weights"
+    elif "grading scale" in text_snapshot or summary_text.lower() == "grading scale":
+        role = "grading-scale"
+    elif "course title:" in text_snapshot and "credit hours:" in text_snapshot:
+        role = "course-materials"
+    elif "instructor:" in text_snapshot and "sinclair email:" in text_snapshot:
+        role = "instructor-information"
+    elif "office hours" in text_snapshot:
+        role = "office-hours"
+
+    caption_text = existing_caption_text
+    if not caption_text:
+        normalized_summary = summary_text.lower()
+        if role == "course-outline":
+            if "16-week" in text_snapshot:
+                caption_text = "Course Outline (16-Week)"
+            elif "12-week" in text_snapshot:
+                caption_text = "Course Outline (12-Week)"
+            else:
+                caption_text = "Course Outline"
+        elif role == "class-meeting-schedule":
+            caption_text = "Class Meeting Schedule"
+        elif role == "assignment-weights":
+            caption_text = "Assignment Weights"
+        elif role == "grading-scale":
+            caption_text = "Grading Scale"
+        elif role == "course-materials":
+            caption_text = "Course Materials and Outcomes"
+        elif role == "instructor-information":
+            caption_text = "Instructor Information"
+        elif role == "office-hours":
+            caption_text = "Office Hours"
+        elif normalized_summary:
+            caption_text = summary_text
+
+    updated_opening_tag = opening_tag
+    changed = False
+    updated_opening_tag, removed_summary = _remove_attr(updated_opening_tag, "summary")
+    changed = changed or removed_summary
+    updated_opening_tag, removed_table_height = _remove_inline_style_keys(updated_opening_tag, {"height"})
+    changed = changed or removed_table_height
+
+    table_styles = {"border-collapse": "collapse"}
+    class_text = (_extract_attr_value(updated_opening_tag, "class") or "").lower()
+    if role in {"course-outline", "class-meeting-schedule"} or "coursetable" in class_text:
+        table_styles["width"] = "100%"
+    updated_opening_tag, merged_table_style = _merge_inline_style(updated_opening_tag, table_styles)
+    changed = changed or merged_table_style
+
+    if role in {"course-outline", "class-meeting-schedule"}:
+        updated_opening_tag, merged_classes = _merge_class_names(
+            updated_opening_tag,
+            ("ic-Table", "ic-Table--hover-row", "ic-Table--striped"),
+        )
+        changed = changed or merged_classes
+        if _extract_attr_value(updated_opening_tag, "border") != "1":
+            updated_opening_tag = _set_or_add_attr(updated_opening_tag, "border", "1")
+            changed = True
+
+    normalized_inner_before_caption = normalized_inner
+    if caption_text:
+        caption_html = (
+            f"<caption><h3>{html.escape(caption_text, quote=False)}</h3></caption>"
+            if role in {"course-outline", "class-meeting-schedule"}
+            else f"<caption>{html.escape(caption_text, quote=False)}</caption>"
+        )
+        if existing_caption_match is not None:
+            normalized_inner = (
+                normalized_inner[: existing_caption_match.start()]
+                + caption_html
+                + normalized_inner[existing_caption_match.end() :]
+            )
+        else:
+            normalized_inner = caption_html + normalized_inner
+        changed = changed or normalized_inner != normalized_inner_before_caption
+
+    if role in {"course-materials", "instructor-information"} and caption_text:
+        list_markup = _convert_syllabus_row_header_table_to_list(
+            updated_opening_tag + normalized_inner + "</table>",
+            caption_text,
+        )
+        if list_markup is not None:
+            return list_markup, nested_updates + 1, caption_text
+
+    row_tag_pattern = re.compile(r"<tr\b[^>]*>", flags=re.IGNORECASE | re.DOTALL)
+    normalized_rows = 0
+
+    def normalize_row_tag(match: re.Match[str]) -> str:
+        nonlocal normalized_rows
+        tag_html = match.group(0)
+        updated_tag, removed = _remove_inline_style_keys(tag_html, {"height"})
+        if removed:
+            normalized_rows += 1
+        return updated_tag
+
+    normalized_inner = row_tag_pattern.sub(normalize_row_tag, normalized_inner)
+
+    cell_tag_pattern = re.compile(r"<(?:th|td)\b[^>]*>", flags=re.IGNORECASE | re.DOTALL)
+    normalized_cells = 0
+
+    def normalize_cell_tag(match: re.Match[str]) -> str:
+        nonlocal normalized_cells
+        tag_html = match.group(0)
+        updated_tag = tag_html
+        changed_local = False
+
+        updated_tag, removed_height = _remove_inline_style_keys(updated_tag, {"height"})
+        changed_local = changed_local or removed_height
+
+        scope_value = (_extract_attr_value(updated_tag, "scope") or "").strip().lower()
+        if scope_value == "column":
+            updated_tag = _set_or_add_attr(updated_tag, "scope", "col")
+            changed_local = True
+            scope_value = "col"
+
+        if scope_value == "col":
+            updated_tag, merged_header_style = _merge_inline_style(
+                updated_tag,
+                {
+                    "background-color": "#000000",
+                    "color": "#ffffff",
+                },
+            )
+            changed_local = changed_local or merged_header_style
+
+        if changed_local:
+            normalized_cells += 1
+        return updated_tag
+
+    normalized_inner = cell_tag_pattern.sub(normalize_cell_tag, normalized_inner)
+
+    normalized_table = updated_opening_tag + normalized_inner + "</table>"
+    return normalized_table, nested_updates + (1 if normalized_table != table_html else 0), ""
+
+
+def _wrap_display_equations(content: str) -> tuple[str, int]:
+    wrapped = 0
+
+    def replace_equation_block(match: re.Match[str]) -> str:
+        nonlocal wrapped
+        attrs = (match.group("attrs") or "").lower()
+        body = match.group("body") or ""
+        if "migration-display-equation" in attrs:
+            return match.group(0)
+        has_equation_image = bool(find_equation_image_tags(body))
+        has_display_mathml = bool(_DISPLAY_MATHML_RE.search(body))
+        if not has_equation_image and not has_display_mathml:
+            return match.group(0)
+        alignment = "center" if "text-align: center" in attrs else "left"
+        wrapped += 1
+        return (
+            '<div class="migration-display-equation" '
+            'style="margin: 16px 0; overflow-x: auto; overflow-y: hidden;">'
+            f'<div class="migration-display-equation__inner" style="text-align: {alignment};">{body}</div>'
+            "</div>"
+        )
+
+    updated = _DISPLAY_EQUATION_BLOCK_RE.sub(replace_equation_block, content)
+    return updated, wrapped
+
+
+def _extract_document_heading_text(content: str) -> str:
+    for pattern in (_TITLE_TEXT_RE, _FIRST_HEADING_RE):
+        match = pattern.search(content)
+        if match is None:
+            continue
+        text = _plain_text(match.group("body"))
+        if text:
+            return text
+    return ""
+
+
+def _extract_accordion_title_text(header_html: str) -> str:
+    heading_match = re.search(
+        r"<h[1-6]\b[^>]*>(?P<title>.*?)</h[1-6]>",
+        header_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    title_source = heading_match.group("title") if heading_match is not None else header_html
+    text = _plain_text(title_source)
+    if text:
+        return text
+
+    for attr_name in ("alt", "title"):
+        attr_match = re.search(
+            rf"\b{attr_name}\s*=\s*([\"'])(?P<value>.*?)\1",
+            header_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if attr_match is None:
+            continue
+        attr_text = _plain_text(attr_match.group("value"))
+        if attr_text:
+            return attr_text
+    return "Section"
+
+
+def _resolve_accordion_mode(*, requested_mode: str, file_path: str = "", content: str = "") -> str:
+    return _resolve_accordion_mode_with_policy(
+        requested_mode=requested_mode,
+        file_path=file_path,
+        content=content,
+    )
+
+
+def _normalize_accordion_hints(values: Iterable[str] | None) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    normalized: list[str] = []
+    for value in values:
+        text = str(value or "").strip().lower()
+        if not text or text in normalized:
+            continue
+        normalized.append(text)
+    return tuple(normalized)
+
+
+def _resolve_accordion_mode_with_policy(
+    *,
+    requested_mode: str,
+    file_path: str = "",
+    content: str = "",
+    flatten_hints: Iterable[str] | None = None,
+    details_hints: Iterable[str] | None = None,
+) -> str:
+    normalized_mode = str(requested_mode).strip().lower()
+    if normalized_mode in {"details", "flatten"}:
+        return normalized_mode
+    if normalized_mode != "smart":
+        return ""
+
+    normalized_path = file_path.replace("\\", "/").lower()
+    document_heading = _extract_document_heading_text(content).lower()
+    context = " ".join(filter(None, (normalized_path, document_heading)))
+    normalized_flatten_hints = _normalize_accordion_hints(flatten_hints)
+    normalized_details_hints = _normalize_accordion_hints(details_hints)
+
+    if any(hint in context for hint in normalized_flatten_hints):
+        return "flatten"
+    if any(hint in context for hint in normalized_details_hints):
+        return "details"
+    if any(hint in context for hint in _SMART_ACCORDION_FLATTEN_HINTS):
+        return "flatten"
+    if any(hint in context for hint in _SMART_ACCORDION_DETAILS_HINTS):
+        return "details"
+    if re.search(r"(?:^|/)(topic|module)\s*\d+", normalized_path):
+        return "details"
+    return "details"
+
+
+def _accordion_summary_alignment(value: str) -> str:
+    return "center" if str(value or "").strip().lower() == "center" else "left"
+
+
+def _accordion_details_style() -> str:
+    return (
+        "margin: 16px 0; border: 1px solid #c8d1db; border-radius: 6px; "
+        "background-color: #ffffff; overflow: hidden;"
+    )
+
+
+def _accordion_summary_style(alignment: str) -> str:
+    return (
+        "cursor: pointer; display: block; padding: 12px 16px; "
+        "font-weight: 700; line-height: 1.4; "
+        f"text-align: {_accordion_summary_alignment(alignment)}; "
+        "background-color: #f4f6f8;"
+    )
+
+
+def _accordion_panel_style() -> str:
+    return "padding: 12px 16px; text-align: left;"
+
+
+def _convert_bootstrap_accordion_cards(content: str, mode: str, *, alignment: str = "left") -> tuple[str, int]:
     normalized_mode = str(mode).strip().lower()
     if normalized_mode not in {"details", "flatten"}:
         return content, 0
@@ -82,21 +739,15 @@ def _convert_bootstrap_accordion_cards(content: str, mode: str) -> tuple[str, in
         nonlocal converted
         header_html = match.group("header").strip()
         body_html = match.group("body").strip()
-        heading_match = re.search(
-            r"<h[1-6]\b[^>]*>(?P<title>.*?)</h[1-6]>",
-            header_html,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        title_html = (heading_match.group("title") if heading_match is not None else header_html).strip()
-        if not title_html:
-            title_html = "Section"
+        title_text = _extract_accordion_title_text(header_html)
+        title_html = html.escape(title_text, quote=False) or "Section"
 
         converted += 1
         if normalized_mode == "details":
             return (
-                f'<details class="migration-accordion">\n'
-                f"  <summary>{title_html}</summary>\n"
-                f"  <div>{body_html}</div>\n"
+                f'<details class="migration-accordion" style="{_accordion_details_style()}">\n'
+                f'  <summary style="{_accordion_summary_style(alignment)}">{title_html}</summary>\n'
+                f'  <div class="migration-accordion__panel" style="{_accordion_panel_style()}">{body_html}</div>\n'
                 f"</details>"
             )
 
@@ -282,6 +933,8 @@ def neutralize_legacy_d2l_hrefs_in_markup(content: str) -> tuple[str, int, int]:
 def apply_canvas_sanitizer(
     content: str,
     policy: CanvasSanitizerPolicy | None = None,
+    *,
+    file_path: str = "",
 ) -> tuple[str, list[AppliedChange]]:
     """
     Apply local HTML cleanup to reduce Canvas import warnings from legacy D2L/Brightspace refs.
@@ -315,28 +968,74 @@ def apply_canvas_sanitizer(
         "line",
     }
 
-    wiris_annotation_pattern = re.compile(
-        r"<annotation\b[^>]*\bencoding\s*=\s*([\"'])wiris\1[^>]*>.*?</annotation>",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    updated, removed_wiris_annotations = wiris_annotation_pattern.subn("", updated)
-    if removed_wiris_annotations:
-        applied.append(
-            AppliedChange(
-                category="sanitizer",
-                description="Removed legacy WIRIS annotation payloads from MathML to improve Canvas equation rendering",
-                count=removed_wiris_annotations,
+    math_handling = normalize_math_handling(applied_policy.math_handling)
+    if math_handling != "audit-only":
+        updated, removed_empty_mathml = strip_empty_mathml_stubs(updated)
+        if removed_empty_mathml:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Removed empty MathML stubs left by legacy equation markup",
+                    count=removed_empty_mathml,
+                )
             )
-        )
 
-    accordion_mode = str(applied_policy.accordion_handling or "").strip().lower()
-    updated, converted_accordion_cards = _convert_bootstrap_accordion_cards(updated, accordion_mode)
+        updated, styled_equation_images = _normalize_equation_image_styles(updated)
+        if styled_equation_images:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Normalized Canvas equation images for responsive sizing",
+                    count=styled_equation_images,
+                )
+            )
+
+        updated, wrapped_display_equations = _wrap_display_equations(updated)
+        if wrapped_display_equations:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Wrapped standalone display equations in responsive overflow containers",
+                    count=wrapped_display_equations,
+                )
+            )
+
+        if math_handling == "canvas-equation-compatible":
+            wiris_annotation_pattern = re.compile(
+                r"<annotation\b[^>]*\bencoding\s*=\s*([\"'])wiris\1[^>]*>.*?</annotation>",
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            updated, removed_wiris_annotations = wiris_annotation_pattern.subn("", updated)
+            if removed_wiris_annotations:
+                applied.append(
+                    AppliedChange(
+                        category="sanitizer",
+                        description="Removed WIRIS annotation payloads for Canvas-equation compatibility mode",
+                        count=removed_wiris_annotations,
+                    )
+                )
+
+    requested_accordion_mode = str(applied_policy.accordion_handling or "").strip().lower()
+    accordion_mode = _resolve_accordion_mode_with_policy(
+        requested_mode=requested_accordion_mode,
+        file_path=file_path,
+        content=updated,
+        flatten_hints=applied_policy.accordion_flatten_hints,
+        details_hints=applied_policy.accordion_details_hints,
+    )
+    updated, converted_accordion_cards = _convert_bootstrap_accordion_cards(
+        updated,
+        accordion_mode,
+        alignment=applied_policy.accordion_summary_alignment,
+    )
     if converted_accordion_cards:
         description = (
             "Converted Bootstrap accordion cards to accessible <details>/<summary> blocks"
             if accordion_mode == "details"
             else "Flattened Bootstrap accordion cards into plain heading/content sections"
         )
+        if requested_accordion_mode == "smart":
+            description += " using page-aware smart accordion handling"
         applied.append(
             AppliedChange(
                 category="sanitizer",
@@ -359,7 +1058,13 @@ def apply_canvas_sanitizer(
                 if not classes_text:
                     return ""
                 original_tokens = [token for token in classes_text.split() if token]
-                kept_tokens = [token for token in original_tokens if not _BOOTSTRAP_GRID_CLASS_RE.match(token)]
+                kept_tokens = [
+                    token
+                    for token in original_tokens
+                    if not _BOOTSTRAP_GRID_CLASS_RE.match(token)
+                    and not _BOOTSTRAP_UTILITY_CLASS_RE.match(token)
+                    and not _LEGACY_TEMPLATE_CLASS_RE.match(token)
+                ]
                 removed = len(original_tokens) - len(kept_tokens)
                 if removed <= 0:
                     return match.group(0)
@@ -373,7 +1078,7 @@ def apply_canvas_sanitizer(
                 applied.append(
                     AppliedChange(
                         category="sanitizer",
-                        description="Removed Bootstrap grid classes that conflict with Canvas layout",
+                        description="Removed Brightspace and Bootstrap layout classes that do not carry Canvas-safe behavior",
                         count=stripped_grid_tokens,
                     )
                 )
@@ -553,6 +1258,49 @@ def apply_canvas_sanitizer(
             )
         )
 
+    print_anchor_pattern = re.compile(
+        r"<a\b[^>]*\bhref\s*=\s*([\"'])javascript:[^\"']*(?:window\.print|printprintables|print)\([^\"']*\)[^\"']*\1[^>]*>.*?</a>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    updated, removed_print_links = print_anchor_pattern.subn("", updated)
+    if removed_print_links:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Removed legacy printer-friendly links that should not appear on Canvas pages",
+                count=removed_print_links,
+            )
+        )
+
+    javascript_anchor_pattern = re.compile(
+        r'(<a\b[^>]*\bhref\s*=\s*)(["\'])(?P<href>javascript:[^"\']+)\2',
+        flags=re.IGNORECASE,
+    )
+    neutralized_javascript_links = 0
+
+    def replace_javascript_anchor_href(match: re.Match[str]) -> str:
+        nonlocal neutralized_javascript_links
+        href = match.group("href").strip()
+        neutralized_javascript_links += 1
+        escaped_href = html.escape(href, quote=True)
+        prefix = match.group(1)
+        return (
+            f'{prefix}"#" '
+            f'data-migration-link-status="needs-review" '
+            f'data-migration-link-reason="javascript-href" '
+            f'data-migration-original-href="{escaped_href}"'
+        )
+
+    updated = javascript_anchor_pattern.sub(replace_javascript_anchor_href, updated)
+    if neutralized_javascript_links:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Neutralized non-Canvas javascript: links for manual review",
+                count=neutralized_javascript_links,
+            )
+        )
+
     # Remove empty spacer paragraphs that create odd vertical gaps after import.
     empty_paragraph_pattern = re.compile(
         r"<p\b[^>]*>\s*(?:&nbsp;|<br\s*/?>|\s|<span\b[^>]*>\s*(?:&nbsp;|<br\s*/?>|\s)*</span>)*</p>",
@@ -599,6 +1347,112 @@ def apply_canvas_sanitizer(
             )
         )
 
+    metadata_tag_pattern = re.compile(r"<[a-z][^>]*>", flags=re.IGNORECASE)
+    removed_editor_artifact_attrs = 0
+
+    def strip_editor_artifact_attrs(match: re.Match[str]) -> str:
+        nonlocal removed_editor_artifact_attrs
+        tag = match.group(0)
+        updated_tag, removed = _EDITOR_ARTIFACT_ATTR_RE.subn("", tag)
+        if removed:
+            removed_editor_artifact_attrs += removed
+        return updated_tag
+
+    updated = metadata_tag_pattern.sub(strip_editor_artifact_attrs, updated)
+    if removed_editor_artifact_attrs:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Removed pasted-editor metadata attributes and Brightspace authoring artifacts",
+                count=removed_editor_artifact_attrs,
+            )
+        )
+
+    removed_d2l_style_tokens = 0
+
+    def strip_d2l_style_tokens(match: re.Match[str]) -> str:
+        nonlocal removed_d2l_style_tokens
+        tag = match.group(0)
+        updated_tag = tag
+        removed = False
+        style_match = re.search(
+            r'(\bstyle\s*=\s*)(["\'])(?P<value>.*?)(\2)',
+            updated_tag,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if style_match is None:
+            return updated_tag
+        style_value = style_match.group("value")
+        if "--d2l-" in style_value.lower():
+            updated_tag, removed = _remove_inline_style_keys(updated_tag, {"box-sizing"})
+            style_match = re.search(
+                r'(\bstyle\s*=\s*)(["\'])(?P<value>.*?)(\2)',
+                updated_tag,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if style_match is None:
+                if removed:
+                    removed_d2l_style_tokens += 1
+                return updated_tag
+            style_value = style_match.group("value")
+        rebuilt_value, d2l_removed = _D2L_STYLE_TOKEN_RE.subn("", style_value)
+        if d2l_removed:
+            rebuilt_value = re.sub(r";\s*;", ";", rebuilt_value)
+            rebuilt_value = re.sub(r"^\s*;\s*", "", rebuilt_value)
+            rebuilt_value = re.sub(r"\s{2,}", " ", rebuilt_value).strip()
+            if rebuilt_value and not rebuilt_value.endswith(";"):
+                rebuilt_value += ";"
+            if rebuilt_value:
+                updated_tag = (
+                    updated_tag[: style_match.start("value")]
+                    + rebuilt_value
+                    + updated_tag[style_match.end("value") :]
+                )
+            else:
+                updated_tag = updated_tag[: style_match.start()] + updated_tag[style_match.end() :]
+                updated_tag = re.sub(r"\s{2,}", " ", updated_tag)
+                updated_tag = updated_tag.replace("< ", "<")
+            removed_d2l_style_tokens += d2l_removed
+        elif removed:
+            removed_d2l_style_tokens += 1
+        return updated_tag
+
+    updated = metadata_tag_pattern.sub(strip_d2l_style_tokens, updated)
+    if removed_d2l_style_tokens:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Removed D2L-specific inline style tokens that do not translate to Canvas",
+                count=removed_d2l_style_tokens,
+            )
+        )
+
+    image_spacing_attr_pattern = re.compile(r"<img\b[^>]*>", flags=re.IGNORECASE)
+    removed_image_spacing_attrs = 0
+
+    def strip_legacy_image_attrs(match: re.Match[str]) -> str:
+        nonlocal removed_image_spacing_attrs
+        tag = match.group(0)
+        updated_tag, removed = re.subn(
+            r"\s(?:align|border|hspace|vspace)\s*=\s*(?:([\"']).*?\1|[^\s>]+)",
+            "",
+            tag,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if removed:
+            removed_image_spacing_attrs += removed
+        return updated_tag
+
+    updated = image_spacing_attr_pattern.sub(strip_legacy_image_attrs, updated)
+    if removed_image_spacing_attrs:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Removed deprecated image spacing attributes that distort Canvas layout",
+                count=removed_image_spacing_attrs,
+            )
+        )
+
     empty_container_pattern = re.compile(
         r"<(?P<tag>div|span|footer)\b[^>]*>\s*</(?P=tag)>",
         flags=re.IGNORECASE,
@@ -618,60 +1472,68 @@ def apply_canvas_sanitizer(
             )
         )
 
-    hr_pattern = re.compile(r"<hr\b[^>]*>", flags=re.IGNORECASE)
-    normalized_hr_count = 0
+    if applied_policy.normalize_divider_styling:
+        hr_pattern = re.compile(r"<hr\b[^>]*>", flags=re.IGNORECASE)
+        normalized_hr_count = 0
 
-    def normalize_hr_tag(match: re.Match[str]) -> str:
-        nonlocal normalized_hr_count
-        tag = match.group(0)
-        style_match = re.search(
-            r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
-            tag,
-            flags=re.IGNORECASE,
-        )
-        if style_match is None:
-            normalized_style = (
-                "border: 0; height: 2px; background-color: #ac1a2f; width: 100%; margin: 16px 0;"
+        def normalize_hr_tag(match: re.Match[str]) -> str:
+            nonlocal normalized_hr_count
+            tag = match.group(0)
+            style_match = re.search(
+                r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
+                tag,
+                flags=re.IGNORECASE,
             )
-            if tag.endswith("/>"):
-                rebuilt = f'{tag[:-2].rstrip()} style="{normalized_style}" />'
-            else:
-                rebuilt = f'{tag[:-1].rstrip()} style="{normalized_style}">'
+            if style_match is None:
+                normalized_style = (
+                    "border: 0; height: 2px; background-color: #ac1a2f; width: 100%; margin: 16px 0;"
+                )
+                if tag.endswith("/>"):
+                    rebuilt = f'{tag[:-2].rstrip()} style="{normalized_style}" />'
+                else:
+                    rebuilt = f'{tag[:-1].rstrip()} style="{normalized_style}">'
+                if rebuilt != tag:
+                    normalized_hr_count += 1
+                return rebuilt
+            style_text = style_match.group("style")
+            color_match = re.search(
+                r"(?:background-color|color|border(?:-top)?(?:-color)?)\s*:\s*(?P<color>#[0-9a-f]{3,8}|[a-z]+)",
+                style_text,
+                flags=re.IGNORECASE,
+            )
+            color_value = color_match.group("color") if color_match is not None else "#ac1a2f"
+            normalized_style = (
+                f"border: 0; height: 2px; background-color: {color_value}; width: 100%; margin: 16px 0;"
+            )
+            rebuilt = (
+                tag[: style_match.start("style")]
+                + normalized_style
+                + tag[style_match.end("style") :]
+            )
             if rebuilt != tag:
                 normalized_hr_count += 1
             return rebuilt
-        style_text = style_match.group("style")
-        lowered = style_text.lower()
-        if "height" not in lowered and "background-color" not in lowered and "color" not in lowered:
-            return tag
 
-        color_match = re.search(
-            r"(?:background-color|color)\s*:\s*(?P<color>#[0-9a-f]{3,8}|[a-z]+)",
-            style_text,
-            flags=re.IGNORECASE,
-        )
-        color_value = color_match.group("color") if color_match is not None else "#ac1a2f"
-        normalized_style = (
-            f"border: 0; height: 2px; background-color: {color_value}; width: 100%; margin: 16px 0;"
-        )
-        rebuilt = (
-            tag[: style_match.start("style")]
-            + normalized_style
-            + tag[style_match.end("style") :]
-        )
-        if rebuilt != tag:
-            normalized_hr_count += 1
-        return rebuilt
-
-    updated = hr_pattern.sub(normalize_hr_tag, updated)
-    if normalized_hr_count:
-        applied.append(
-            AppliedChange(
-                category="sanitizer",
-                description="Normalized horizontal divider styling for Canvas consistency",
-                count=normalized_hr_count,
+        updated = hr_pattern.sub(normalize_hr_tag, updated)
+        if normalized_hr_count:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Normalized horizontal divider styling for Canvas consistency",
+                    count=normalized_hr_count,
+                )
             )
-        )
+
+    if _is_syllabus_like_page(file_path=file_path, document_title_text=document_title_text, content=updated):
+        updated, normalized_syllabus_tables = _normalize_syllabus_tables(updated)
+        if normalized_syllabus_tables:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Normalized syllabus tables to match current template caption and header styling",
+                    count=normalized_syllabus_tables,
+                )
+            )
 
     def normalize_display_text(value: str) -> str:
         lowered = value.lower()
@@ -1017,7 +1879,7 @@ def apply_best_practice_enforcer(
     updated = content
     applied: list[AppliedChange] = []
     normalized_file = file_path.lower()
-    lowered = updated.lower()
+    lowered = html.unescape(updated).lower()
 
     if applied_policy.enforce_module_checklist_closer:
         is_intro_or_checklist = (
@@ -1027,13 +1889,33 @@ def apply_best_practice_enforcer(
         )
         required_closer_plain = "contact your instructor with any questions or post in the course q&a."
         required_closer_html = "Contact your instructor with any questions or post in the Course Q&amp;A."
-        if is_intro_or_checklist and required_closer_plain not in lowered:
+        local_contact_plain = "contact your instructor with any course questions."
+        local_contact_html = "Contact your instructor with any course questions."
+        local_contact_activity_html = (
+            "Contact your instructor with any course questions or use the Activity Feed on the Home Page."
+        )
+        has_local_contact_guidance = local_contact_plain in lowered
+        has_activity_feed_guidance = "activity feed on the home page" in lowered
+        checklist_support_present = required_closer_plain in lowered or has_local_contact_guidance
+        if is_intro_or_checklist:
+            updated = re.sub(
+                r'<p\b[^>]*class\s*=\s*(["\'])migration-checklist-closer\1[^>]*>.*?</p>',
+                "",
+                updated,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            lowered = html.unescape(updated).lower()
+            has_local_contact_guidance = local_contact_plain in lowered
+            has_activity_feed_guidance = "activity feed on the home page" in lowered
+            checklist_support_present = required_closer_plain in lowered or has_local_contact_guidance
+        if is_intro_or_checklist and not checklist_support_present:
             closer_added = False
 
             heading_match = re.search(
-                r"<h[1-6][^>]*>\s*module checklist\s*</h[1-6]>",
+                r"<h[1-6][^>]*>.*?module checklist.*?</h[1-6]>",
                 updated,
                 flags=re.IGNORECASE,
+                # Headings can include template icons/strong tags after visual normalization.
             )
             if heading_match:
                 remainder = updated[heading_match.end() :]
@@ -1047,10 +1929,11 @@ def apply_best_practice_enforcer(
                         closer_added = True
 
             if not closer_added:
+                fallback_closer_html = local_contact_activity_html if has_activity_feed_guidance else local_contact_html
                 fallback_block = (
                     "<p class=\"migration-checklist-closer\">"
                     "<strong>Module Checklist Reminder:</strong> "
-                    f"{required_closer_html}"
+                    f"{fallback_closer_html}"
                     "</p>"
                 )
                 body_close_match = re.search(r"</body>", updated, flags=re.IGNORECASE)
@@ -1069,6 +1952,66 @@ def apply_best_practice_enforcer(
                         count=1,
                     )
                 )
+
+        # Some courses already include local support guidance and end up with a stale
+        # template-only "Course Q&A" reminder duplicated at the end of the checklist.
+        redundant_support_guidance = (
+            has_local_contact_guidance
+            and has_activity_feed_guidance
+            and required_closer_plain in lowered
+        )
+        if is_intro_or_checklist and redundant_support_guidance:
+            stale_qna_pattern = re.compile(
+                r"\s*<li\b[^>]*>(?:(?!</li>).)*?contact\s+your\s+instructor(?:(?!</li>).)*?course\s+q(?:\s|&nbsp;|<[^>]+>|&amp;|&)*a(?:(?!</li>).)*?</li>\s*",
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            updated, removed_count = stale_qna_pattern.subn("\n", updated)
+            if removed_count:
+                lowered = html.unescape(updated).lower()
+                applied.append(
+                    AppliedChange(
+                        category="best_practice",
+                        description="Removed redundant template Course Q&A checklist reminder when course-specific support guidance was already present",
+                        count=removed_count,
+                    )
+                )
+
+    heading_pattern = re.compile(
+        r"<h(?P<level>[1-6])(?P<attrs>\b[^>]*)>(?P<body>.*?)</h(?P=level)>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    heading_repairs = 0
+    previous_level: int | None = None
+    rebuilt_parts: list[str] = []
+    cursor = 0
+
+    for match in heading_pattern.finditer(updated):
+        original_level = int(match.group("level"))
+        normalized_level = original_level
+        if previous_level is not None and original_level - previous_level > 1:
+            normalized_level = previous_level + 1
+
+        rebuilt_parts.append(updated[cursor : match.start()])
+        if normalized_level != original_level:
+            heading_repairs += 1
+        rebuilt_parts.append(
+            f"<h{normalized_level}{match.group('attrs')}>{match.group('body')}</h{normalized_level}>"
+        )
+        cursor = match.end()
+        previous_level = normalized_level
+
+    if rebuilt_parts:
+        rebuilt_parts.append(updated[cursor:])
+        updated = "".join(rebuilt_parts)
+
+    if heading_repairs:
+        applied.append(
+            AppliedChange(
+                category="best_practice",
+                description="Promoted heading levels to remove accessibility-breaking heading jumps",
+                count=heading_repairs,
+            )
+        )
 
     if applied_policy.ensure_external_links_new_tab:
         anchor_tag_pattern = re.compile(r"<a\b[^>]*>", flags=re.IGNORECASE)
@@ -1153,7 +2096,7 @@ def check_template_heuristics(
     """Detect likely template-compliance issues derived from local reference docs."""
     applied_policy = policy or TemplateCheckPolicy()
     issues: list[ManualReviewIssue] = []
-    lowered = content.lower()
+    lowered = html.unescape(content).lower()
     normalized_file = file_path.lower()
 
     # Instructor note placeholders should be resolved before release.
@@ -1202,7 +2145,13 @@ def check_template_heuristics(
         or "introduction-and-checklist" in normalized_file
     )
     required_mc_closer = "contact your instructor with any questions or post in the course q&a"
-    if applied_policy.require_mc_closing_bullet and is_intro_checklist_page and required_mc_closer not in lowered:
+    acceptable_local_closer = "contact your instructor with any course questions."
+    if (
+        applied_policy.require_mc_closing_bullet
+        and is_intro_checklist_page
+        and required_mc_closer not in lowered
+        and acceptable_local_closer not in lowered
+    ):
         issues.append(
             ManualReviewIssue(
                 reason="Module Checklist closing reminder appears to be missing",
@@ -1219,6 +2168,10 @@ def check_accessibility_heuristics(content: str) -> list[ManualReviewIssue]:
     for match in re.finditer(r"<img\b[^>]*>", content, flags=re.IGNORECASE):
         img_tag = match.group(0)
         alt_match = re.search(r"\balt\s*=\s*([\"'])(.*?)\1", img_tag, flags=re.IGNORECASE | re.DOTALL)
+        is_presentational = bool(
+            re.search(r'\brole\s*=\s*(["\'])presentation\1', img_tag, flags=re.IGNORECASE)
+            or re.search(r'\baria-hidden\s*=\s*(["\'])true\1', img_tag, flags=re.IGNORECASE)
+        )
         if alt_match is None:
             issues.append(
                 ManualReviewIssue(
@@ -1226,7 +2179,7 @@ def check_accessibility_heuristics(content: str) -> list[ManualReviewIssue]:
                     evidence=img_tag[:120],
                 )
             )
-        elif not alt_match.group(2).strip():
+        elif not alt_match.group(2).strip() and not is_presentational:
             issues.append(
                 ManualReviewIssue(
                     reason="Image alt attribute is empty",
@@ -1249,7 +2202,8 @@ def check_accessibility_heuristics(content: str) -> list[ManualReviewIssue]:
 
     for table_match in re.finditer(r"<table\b.*?</table>", content, flags=re.IGNORECASE | re.DOTALL):
         table_html = table_match.group(0)
-        if re.search(r"<caption\b", table_html, flags=re.IGNORECASE) is None:
+        caption_match = re.search(r"<caption\b[^>]*>(?P<body>.*?)</caption>", table_html, flags=re.IGNORECASE | re.DOTALL)
+        if caption_match is None or not _plain_text(caption_match.group("body")):
             issues.append(
                 ManualReviewIssue(
                     reason="Table missing caption",

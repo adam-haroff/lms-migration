@@ -3,14 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from zipfile import ZipFile
 
-
-DOCX_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+from .reference_docs import read_reference_text
 
 
 @dataclass(frozen=True)
@@ -97,6 +94,41 @@ BEST_PRACTICE_SIGNALS = (
         label="Restore deleted content via /undelete",
         keywords=("undelete", "restore deleted items"),
     ),
+    CoverageSignal(
+        id="title_delimiter_policy",
+        label="New title delimiter policy prefers colon over vertical bar",
+        keywords=("no longer using the bar", "naming pattern is now module 1:"),
+    ),
+    CoverageSignal(
+        id="accessible_accordion_code",
+        label="Accessible accordion code can be used instead of legacy accordions/tabs",
+        keywords=("accessible accordion code", "recreate content in a simplified manner"),
+    ),
+    CoverageSignal(
+        id="question_library_rebuild",
+        label="Question-library quizzes need item-bank / question-pool rebuild workflow",
+        keywords=("question libraries", "item banks", "question pools"),
+    ),
+    CoverageSignal(
+        id="item_bank_sharing",
+        label="Item banks should be shared with the course so coordinators can edit them",
+        keywords=("item banks need shared with the course", "cannot edit them", "find the question banks under item banks"),
+    ),
+    CoverageSignal(
+        id="rubric_use_for_grading",
+        label="Rubrics must be cleaned up and set to Use this rubric for grading",
+        keywords=("cleaning up rubrics", "use for grading", "verify point logic"),
+    ),
+    CoverageSignal(
+        id="studio_video_workflow",
+        label="D2L media-library videos should be moved into Canvas Studio or approved course-owned hosting",
+        keywords=("media library", "canvas studio", "studio video", "embed code"),
+    ),
+    CoverageSignal(
+        id="mobile_view_review",
+        label="Review content and assessments in mobile view before release",
+        keywords=("mobile view", "toggle device toolbar", "view and navigate all course content in mobile view"),
+    ),
 )
 
 
@@ -107,26 +139,8 @@ def _normalize(text: str) -> str:
     return lowered
 
 
-def _read_docx_text(path: Path) -> str:
-    with ZipFile(path, "r") as zf:
-        with zf.open("word/document.xml", "r") as fh:
-            xml_data = fh.read()
-    root = ET.fromstring(xml_data)
-    paragraphs: list[str] = []
-    for p in root.findall(".//w:p", DOCX_NS):
-        runs = []
-        for t in p.findall(".//w:t", DOCX_NS):
-            runs.append(t.text or "")
-        paragraph = "".join(runs).strip()
-        if paragraph:
-            paragraphs.append(paragraph)
-    return "\n".join(paragraphs)
-
-
 def _read_text(path: Path) -> str:
-    if path.suffix.lower() == ".docx":
-        return _read_docx_text(path)
-    return path.read_text(encoding="utf-8", errors="ignore")
+    return read_reference_text(path)
 
 
 def _line_map(text: str) -> dict[str, str]:
@@ -190,12 +204,15 @@ def _coverage(text: str, keywords: tuple[str, ...]) -> bool:
 
 def _best_practice_coverage_analysis(
     best_practices_text: str,
+    setup_checklist_text: str,
     rules_text: str,
     findings_text: str,
 ) -> dict:
+    reference_text = "\n".join(part for part in (best_practices_text, setup_checklist_text) if part)
     rows = []
     for signal in BEST_PRACTICE_SIGNALS:
         in_best_practices = _coverage(best_practices_text, signal.keywords)
+        in_setup_checklist = _coverage(setup_checklist_text, signal.keywords)
         in_rules = _coverage(rules_text, signal.keywords)
         in_findings = _coverage(findings_text, signal.keywords)
         rows.append(
@@ -203,9 +220,10 @@ def _best_practice_coverage_analysis(
                 "id": signal.id,
                 "label": signal.label,
                 "covered_in_best_practices_docx": in_best_practices,
+                "covered_in_setup_checklist_docx": in_setup_checklist,
                 "covered_in_rules": in_rules,
                 "covered_in_existing_findings": in_findings,
-                "action_needed": bool(in_best_practices and (not in_rules and not in_findings)),
+                "action_needed": bool(_coverage(reference_text, signal.keywords) and (not in_rules and not in_findings)),
             }
         )
     return {
@@ -256,6 +274,7 @@ def _render_markdown(report: dict) -> str:
         f"- Instructions docx: `{report['inputs']['instructions_docx']}`",
         f"- Existing draft markdown: `{report['inputs']['draft_markdown']}`",
         f"- Best practices docx: `{report['inputs']['best_practices_docx']}`",
+        f"- Set-up checklist docx: `{report['inputs']['setup_checklist_docx']}`",
         f"- Page templates docx: `{report['inputs']['page_templates_docx']}`",
         f"- Syllabus template docx: `{report['inputs']['syllabus_template_docx']}`",
         f"- Rules JSON: `{report['inputs']['rules_json']}`",
@@ -295,7 +314,8 @@ def _render_markdown(report: dict) -> str:
 
     for row in coverage["coverage_rows"]:
         lines.append(
-            f"- `{row['id']}` | docx:{row['covered_in_best_practices_docx']} "
+            f"- `{row['id']}` | best_practices:{row['covered_in_best_practices_docx']} "
+            f"| setup_checklist:{row.get('covered_in_setup_checklist_docx', False)} "
             f"| rules:{row['covered_in_rules']} | findings:{row['covered_in_existing_findings']} "
             f"| action_needed:{row['action_needed']} | {row['label']}"
         )
@@ -315,14 +335,14 @@ def _render_markdown(report: dict) -> str:
 
     lines.extend(
         [
-            "## Recommended App/Process Improvements",
-            "",
-            "- Add template QA checks for unresolved placeholders and missing required checklist closer.",
-            "- Add instruction-profile support (abbreviations, module gating prompts, syllabus migration guidance) as an optional, non-default mode.",
-            "- Expand best-practice audit to include process caveats not currently encoded in rules (for example Detect Multiple Sessions and /undelete runbook).",
-            "- Keep these as explicit reports/checks first; do not auto-rewrite policy-sensitive content.",
-            "",
-        ]
+        "## Recommended App/Process Improvements",
+        "",
+        "- Add template QA checks for unresolved placeholders and missing required checklist closer.",
+        "- Add instruction-profile support (abbreviations, module gating prompts, syllabus migration guidance) as an optional, non-default mode.",
+        "- Expand best-practice audit to include process caveats not currently encoded in rules (for example item-bank sharing, Studio video workflow, rubric grading settings, Detect Multiple Sessions, and /undelete runbook).",
+        "- Keep these as explicit reports/checks first; do not auto-rewrite policy-sensitive content.",
+        "",
+    ]
     )
 
     return "\n".join(lines)
@@ -332,6 +352,7 @@ def run_reference_audit(
     instructions_docx: Path,
     draft_markdown: Path,
     best_practices_docx: Path,
+    setup_checklist_docx: Path | None,
     page_templates_docx: Path,
     syllabus_template_docx: Path,
     rules_json: Path,
@@ -341,6 +362,7 @@ def run_reference_audit(
     instructions_text = _read_text(instructions_docx)
     draft_text = _read_text(draft_markdown)
     best_practices_text = _read_text(best_practices_docx)
+    setup_checklist_text = _read_text(setup_checklist_docx) if setup_checklist_docx is not None else ""
     page_templates_text = _read_text(page_templates_docx)
     syllabus_template_text = _read_text(syllabus_template_docx)
     rules_text = _read_text(rules_json)
@@ -352,6 +374,7 @@ def run_reference_audit(
             "instructions_docx": str(instructions_docx),
             "draft_markdown": str(draft_markdown),
             "best_practices_docx": str(best_practices_docx),
+            "setup_checklist_docx": str(setup_checklist_docx) if setup_checklist_docx is not None else "",
             "page_templates_docx": str(page_templates_docx),
             "syllabus_template_docx": str(syllabus_template_docx),
             "rules_json": str(rules_json),
@@ -360,6 +383,7 @@ def run_reference_audit(
         "instruction_comparison": _instruction_gap_analysis(instructions_text, draft_text),
         "best_practices_coverage": _best_practice_coverage_analysis(
             best_practices_text=best_practices_text,
+            setup_checklist_text=setup_checklist_text,
             rules_text=rules_text,
             findings_text=findings_text,
         ),
@@ -384,6 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--instructions-docx", type=Path, required=True)
     parser.add_argument("--best-practices-docx", type=Path, required=True)
+    parser.add_argument("--setup-checklist-docx", type=Path, default=None)
     parser.add_argument("--page-templates-docx", type=Path, required=True)
     parser.add_argument("--syllabus-template-docx", type=Path, required=True)
     parser.add_argument(
@@ -430,6 +455,7 @@ def main() -> None:
         instructions_docx=args.instructions_docx,
         draft_markdown=args.draft_markdown,
         best_practices_docx=args.best_practices_docx,
+        setup_checklist_docx=args.setup_checklist_docx,
         page_templates_docx=args.page_templates_docx,
         syllabus_template_docx=args.syllabus_template_docx,
         rules_json=args.rules_json,

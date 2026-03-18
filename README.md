@@ -227,11 +227,11 @@ Outputs:
 ```bash
 lms-canvas-auto-relink \
   --base-url "https://sinclair.instructure.com" \
-  --course-id 12714 \
+  --course-id <canvas-course-id> \
   --token "$CANVAS_TOKEN" \
-  --issues-json output/edu-1105/canvas-migration-issues.json \
+  --issues-json output/<course-code>/canvas-migration-issues.json \
   --alias-map-json rules/template_asset_aliases.json \
-  --output-json output/edu-1105/canvas-auto-relink-report.json
+  --output-json output/<course-code>/canvas-auto-relink-report.json
 ```
 
 Outputs:
@@ -248,10 +248,10 @@ Notes:
 ```bash
 lms-canvas-live-audit \
   --base-url "https://sinclair.instructure.com" \
-  --course-id 12714 \
+  --course-id <canvas-course-id> \
   --token "$CANVAS_TOKEN" \
   --alias-map-json rules/template_asset_aliases.json \
-  --output-json output/edu-1105/canvas-live-link-audit.json
+  --output-json output/<course-code>/canvas-live-link-audit.json
 ```
 
 Optional safe-fix mode (updates page HTML only):
@@ -259,11 +259,11 @@ Optional safe-fix mode (updates page HTML only):
 ```bash
 lms-canvas-live-audit \
   --base-url "https://sinclair.instructure.com" \
-  --course-id 12714 \
+  --course-id <canvas-course-id> \
   --token "$CANVAS_TOKEN" \
   --alias-map-json rules/template_asset_aliases.json \
   --apply-safe-fixes \
-  --output-json output/edu-1105/canvas-live-link-audit.json
+  --output-json output/<course-code>/canvas-live-link-audit.json
 ```
 
 Outputs:
@@ -277,9 +277,9 @@ Outputs:
 ```bash
 lms-canvas-snapshot \
   --base-url "https://sinclair.instructure.com" \
-  --course-id 12721 \
+  --course-id <canvas-course-id> \
   --token "$CANVAS_TOKEN" \
-  --output-dir output/edu-1105
+  --output-dir output/<course-code>
 ```
 
 Outputs:

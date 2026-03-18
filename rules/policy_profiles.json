@@ -15,7 +15,10 @@
         "Review all manual-review CSV findings before publishing.",
         "Run Canvas link validator after import and resolve broken links.",
         "Verify quiz scoring, attempts, and item-bank behavior for migrated assessments.",
+        "If quizzes use item banks, confirm the banks are course-shared so the course coordinator can edit them.",
         "Confirm rubric connection and ensure 'Use this rubric for grading' is enabled where required.",
+        "If videos came from the D2L media library, rehost them in course-owned Canvas Studio or another approved course-owned location and replace the embeds.",
+        "Check key content and assessments in mobile view before release.",
         "Run Canvas accessibility checker on all edited pages."
       ]
     },
@@ -36,7 +39,10 @@
         "Verify each IC page checklist includes the required Course Q&A closing bullet.",
         "Run Canvas link validator after import and resolve broken links.",
         "Verify quiz scoring, attempts, item-bank draw logic, and avoid Detect Multiple Sessions warning behavior.",
+        "If quizzes use item banks, confirm the banks are course-shared so the course coordinator can edit them.",
         "Confirm rubric connection and ensure 'Use this rubric for grading' is enabled where required.",
+        "If videos came from the D2L media library, rehost them in course-owned Canvas Studio or another approved course-owned location and replace the embeds.",
+        "Check key content and assessments in mobile view before release.",
         "Complete syllabus finalization and confirm CAD link alignment before release.",
         "Run Canvas accessibility checker on all edited pages."
       ]

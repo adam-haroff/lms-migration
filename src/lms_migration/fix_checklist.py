@@ -137,7 +137,12 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
     if "legacy d2l links were neutralized" in lowered:
         return ("P1", "relink_neutralized_d2l_links", "ID", "Replace neutralized D2L links with valid Canvas links.")
     if "question bank migration requires manual verification" in lowered:
-        return ("P1", "question_bank_logic_review", "Faculty/ID", "Verify randomization, draw counts, and alignment for migrated item banks.")
+        return (
+            "P1",
+            "question_bank_logic_review",
+            "Faculty/ID",
+            "Rebuild question-pool logic in Canvas, verify draw counts/randomization, and share any required item banks with the course so coordinators can edit them.",
+        )
     if "youtube embeds may violate ad-free requirement" in lowered:
         return ("P2", "youtube_hosting_review", "Faculty/ID", "Confirm hosting approach (for example Canvas Studio or approved platform).")
     if "announcement migration behavior is non-standard" in lowered:
@@ -160,6 +165,41 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             return ("P2", "a11y_link_text", "Faculty/ID", "Replace vague link text with descriptive labels.")
 
     return ("P2", "manual_review_item", "ID", "Review and resolve this migration finding.")
+
+
+def _map_reference_best_practice_gap(row_id: str, label: str) -> tuple[str, str, str]:
+    normalized = row_id.strip().lower()
+    if normalized == "item_bank_sharing":
+        return (
+            "P1",
+            "ID/Faculty",
+            "After rebuilding or copying quiz banks, open Item Banks, share each required bank with the course, and verify the course coordinator can edit the questions.",
+        )
+    if normalized == "question_library_rebuild":
+        return (
+            "P1",
+            "ID/Faculty",
+            "For quizzes that used D2L question libraries, rebuild question pools from Canvas item banks and verify scoring, settings, and random draw behavior.",
+        )
+    if normalized == "rubric_use_for_grading":
+        return (
+            "P1",
+            "Faculty/ID",
+            "Open each migrated rubric, fix formatting/points/outcomes as needed, reconnect it to the assessment, and enable Use this rubric for grading where required.",
+        )
+    if normalized == "studio_video_workflow":
+        return (
+            "P1",
+            "ID",
+            "If a course used D2L media-library videos, move them into course-owned Canvas Studio or another approved course-owned location, replace embeds, and verify student playback.",
+        )
+    if normalized == "mobile_view_review":
+        return (
+            "P2",
+            "Faculty/ID",
+            "Use browser device emulation or Canvas mobile tooling to verify the final course pages and assessments in a mobile-sized view before release.",
+        )
+    return ("P2", "ID Lead", "Add explicit rule, trigger, or preflight check to cover this best-practice topic.")
 
 
 def _load_canvas_items(path: Path) -> list[ChecklistItem]:
@@ -243,14 +283,15 @@ def _load_reference_items(path: Path | None) -> list[ChecklistItem]:
         label = str(row.get("label", "")).strip()
         if not label:
             continue
+        priority, owner, action = _map_reference_best_practice_gap(str(row.get("id", "")), label)
         items.append(
             ChecklistItem(
-                priority="P2",
+                priority=priority,
                 source="reference_audit",
                 category=f"reference_best_practice_gap:{row.get('id', 'coverage')}",
-                owner="ID Lead",
+                owner=owner,
                 description=label,
-                action="Add explicit rule, trigger, or preflight check to cover this best-practice topic.",
+                action=action,
                 reference=path.name,
             )
         )
