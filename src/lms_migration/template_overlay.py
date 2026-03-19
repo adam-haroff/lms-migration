@@ -67,7 +67,9 @@ _DEFAULT_ICON_LABELS = {
     "exclamation.png": "Important",
     "info.png": "Information",
 }
-_TEMPLATE_HEADING_ICON_STYLE = "width: 45px; height: auto; vertical-align: middle; margin-right: 8px;"
+_TEMPLATE_HEADING_ICON_STYLE = (
+    "width: 45px; height: auto; vertical-align: middle; margin-right: 8px;"
+)
 _PAGE_TITLE_HEADING_STYLE = (
     "color: #ac1a2f",
     "border-bottom: 10px solid #AC1A2F",
@@ -143,7 +145,9 @@ def _extract_template_basename(url: str) -> str:
     return _normalize_basename(path_text)
 
 
-def _load_template_assets_by_basename(template_package: Path) -> tuple[dict[str, list[str]], dict[str, int]]:
+def _load_template_assets_by_basename(
+    template_package: Path,
+) -> tuple[dict[str, list[str]], dict[str, int]]:
     if not template_package.exists():
         raise ValueError(f"Template package does not exist: {template_package}")
 
@@ -161,20 +165,32 @@ def _load_template_assets_by_basename(template_package: Path) -> tuple[dict[str,
                 continue
             by_basename[basename].append(clean)
 
-    collisions = {key: len(values) for key, values in by_basename.items() if len(values) > 1}
+    collisions = {
+        key: len(values) for key, values in by_basename.items() if len(values) > 1
+    }
     return dict(by_basename), collisions
 
 
-def _load_alias_map(alias_map_json_path: Path | None) -> tuple[dict[str, tuple[str, ...]], str]:
+def _load_alias_map(
+    alias_map_json_path: Path | None,
+) -> tuple[dict[str, tuple[str, ...]], str]:
     if alias_map_json_path is None:
         return {}, ""
     if not alias_map_json_path.exists():
-        raise ValueError(f"Template alias map JSON does not exist: {alias_map_json_path}")
+        raise ValueError(
+            f"Template alias map JSON does not exist: {alias_map_json_path}"
+        )
 
     payload = json.loads(alias_map_json_path.read_text(encoding="utf-8"))
-    raw_mapping = payload.get("aliases") if isinstance(payload, dict) and isinstance(payload.get("aliases"), dict) else payload
+    raw_mapping = (
+        payload.get("aliases")
+        if isinstance(payload, dict) and isinstance(payload.get("aliases"), dict)
+        else payload
+    )
     if not isinstance(raw_mapping, dict):
-        raise ValueError("Template alias map JSON must be an object or include an object at key 'aliases'.")
+        raise ValueError(
+            "Template alias map JSON must be an object or include an object at key 'aliases'."
+        )
 
     normalized: dict[str, tuple[str, ...]] = {}
     for source_name, target_names in raw_mapping.items():
@@ -241,9 +257,18 @@ def _canonical_heading_label(raw_label: str, *, icon_basename: str = "") -> str:
         return "Syllabus" if key == "syllabus" else "Title"
     if key in {"objectives", "learning objectives", "module objectives"}:
         return "Module Objectives"
-    if key in {"course materials and outcomes", "course material and outcomes", "course material"}:
+    if key in {
+        "course materials and outcomes",
+        "course material and outcomes",
+        "course material",
+    }:
         return "Course Materials and Outcomes"
-    if basename in {"checkmark.png", "checklist.png"} or key in {"checklist", "module checklist"}:
+    # Template distinguishes these two icons:
+    #   checklist.png  = generic checklist / policies list
+    #   checkmark.png  = Module Checklist (what to do each module)
+    if basename == "checklist.png" or key == "checklist":
+        return "Checklist"
+    if basename == "checkmark.png" or key == "module checklist":
         return "Module Checklist"
     if basename == "star.png" or key == "introduction":
         return "Introduction"
@@ -263,17 +288,34 @@ def _canonical_heading_label(raw_label: str, *, icon_basename: str = "") -> str:
         "flashcards",
     }:
         return "Practice"
-    if basename == "exclamation.png" or key in {"important", "important note", "important information"}:
+    if basename == "exclamation.png" or key in {
+        "important",
+        "important note",
+        "important information",
+    }:
         return "Important"
     if basename == "info.png" or key in {"information", "info"}:
         return "Information"
     if basename == "calendar.png" or key in {"calendar", "due date", "due dates"}:
         return "Due Dates"
-    if basename == "educator.png" or key in {"instructor information", "about the instructor", "contact information"}:
+    if basename == "educator.png" or key in {
+        "instructor information",
+        "about the instructor",
+        "contact information",
+    }:
         return "Instructor Information"
-    if basename == "gear.png" or key in {"technical support", "support", "canvas support"}:
+    if basename == "gear.png" or key in {
+        "technical support",
+        "support",
+        "canvas support",
+    }:
         return "Technical Support"
-    if basename == "flag.png" or key in {"main point", "guidelines", "guideline", "student support"}:
+    if basename == "flag.png" or key in {
+        "main point",
+        "guidelines",
+        "guideline",
+        "student support",
+    }:
         if key == "main point":
             return "Main Point"
         if key == "student support":
@@ -285,11 +327,23 @@ def _canonical_heading_label(raw_label: str, *, icon_basename: str = "") -> str:
         return "Help Links"
     if basename == "megaphone.png" or key in {"announcement", "announcements"}:
         return "Announcement"
+    if basename == "reminder.png" or key in {"reminder", "reminders"}:
+        return "Reminder"
+    if basename == "book.png" or key in {"read", "read this"}:
+        return "Read"
+    if basename == "headphones.png" or key in {"listen", "hear this", "listen to this"}:
+        return "Listen"
+    if basename == "download.png" or key in {"download", "download this"}:
+        return "Download"
     if basename == "paper.png" or key in {"do this"}:
         return "Do This"
     if basename == "pencil.png" or key in {"assignment", "instructions"}:
         return "Instructions"
-    if basename == "ai-brain.png" or key in {"ai usage allowed", "ai usage", "artificial intelligence"}:
+    if basename == "ai-brain.png" or key in {
+        "ai usage allowed",
+        "ai usage",
+        "artificial intelligence",
+    }:
         return "AI Usage Allowed"
     return label
 
@@ -355,24 +409,43 @@ def _resolve_semantic_icon_basename(
     ):
         return "rocket.png"
 
-    if _contains_heading_phrase(combined, ("read", "reading", "article", "chapter", "textbook")):
+    if _contains_heading_phrase(
+        combined, ("read", "reading", "article", "chapter", "textbook")
+    ):
         return "book.png"
 
     if _contains_heading_phrase(
         combined,
-        ("technical support", "canvas support", "help desk", "helpdesk", "tech support"),
+        (
+            "technical support",
+            "canvas support",
+            "help desk",
+            "helpdesk",
+            "tech support",
+        ),
     ):
         return "gear.png"
 
     if _contains_heading_phrase(
         combined,
-        ("instructor information", "about the instructor", "contact information", "office hours"),
+        (
+            "instructor information",
+            "about the instructor",
+            "contact information",
+            "office hours",
+        ),
     ):
         return "educator.png"
 
     if _contains_heading_phrase(
         combined,
-        ("communication", "communicate", "course q and a", "course q a", "question board"),
+        (
+            "communication",
+            "communicate",
+            "course q and a",
+            "course q a",
+            "question board",
+        ),
     ):
         return "mail.png"
 
@@ -382,13 +455,17 @@ def _resolve_semantic_icon_basename(
     ):
         return "flag.png"
 
-    if _contains_heading_phrase(combined, ("calendar", "due date", "due dates", "course summary")):
+    if _contains_heading_phrase(
+        combined, ("calendar", "due date", "due dates", "course summary")
+    ):
         return "calendar.png"
 
     if _contains_heading_phrase(combined, ("announcement", "announcements")):
         return "megaphone.png"
 
-    if _contains_heading_phrase(combined, ("instructions", "assignment directions", "assignment instructions")):
+    if _contains_heading_phrase(
+        combined, ("instructions", "assignment directions", "assignment instructions")
+    ):
         return "pencil.png"
 
     if _contains_heading_phrase(combined, ("ai usage", "artificial intelligence")):
@@ -399,11 +476,26 @@ def _resolve_semantic_icon_basename(
     # adds an actual video-specific signal.
     if _contains_heading_phrase(
         combined,
-        ("watch", "video", "lecture", "clip", "recording", "youtube", "vimeo", "ted talk"),
+        (
+            "watch",
+            "video",
+            "lecture",
+            "clip",
+            "recording",
+            "youtube",
+            "vimeo",
+            "ted talk",
+        ),
     ):
         return "video.png"
-    if current_basename in {"bookmark.png", "video.png", "view.png"} or normalized_label in {"view", "watch"}:
-        if normalized_combined in {"view", "watch"} or normalized_combined.startswith("view "):
+    if current_basename in {
+        "bookmark.png",
+        "video.png",
+        "view.png",
+    } or normalized_label in {"view", "watch"}:
+        if normalized_combined in {"view", "watch"} or normalized_combined.startswith(
+            "view "
+        ):
             return "bookmark.png"
         return "bookmark.png"
 
@@ -424,9 +516,7 @@ def _render_icon_heading_block(
 ) -> str:
     normalized_canonical = _normalize_heading_key(canonical_label)
     normalized_original = _normalize_heading_key(original_title)
-    heading_html = (
-        f'<h{level}{attrs}>{img_tag} <strong>{html.escape(canonical_label)}</strong></h{level}>'
-    )
+    heading_html = f"<h{level}{attrs}>{img_tag} <strong>{html.escape(canonical_label)}</strong></h{level}>"
     if (
         original_title
         and normalized_original
@@ -450,7 +540,9 @@ def _merge_style_attr(
         working_attrs,
         flags=re.IGNORECASE,
     )
-    removed_keys = {key.strip().lower() for key in (remove_style_keys or set()) if key.strip()}
+    removed_keys = {
+        key.strip().lower() for key in (remove_style_keys or set()) if key.strip()
+    }
     style_tokens: list[str] = []
     seen_keys: set[str] = set()
 
@@ -469,7 +561,11 @@ def _merge_style_attr(
 
     for token in required_styles:
         key = token.split(":", 1)[0].strip().lower()
-        style_tokens = [item for item in style_tokens if item.split(":", 1)[0].strip().lower() != key]
+        style_tokens = [
+            item
+            for item in style_tokens
+            if item.split(":", 1)[0].strip().lower() != key
+        ]
         style_tokens.append(token)
         seen_keys.add(key)
 
@@ -558,6 +654,12 @@ def _preferred_float_image_width(tag_html: str) -> int:
 
 def _load_icon_label_map(template_package: Path) -> dict[str, str]:
     icon_labels: dict[str, str] = {}
+    # Compiled once for the whole function.
+    _h_re = re.compile(r"<h[1-6]\b[^>]*>(.*?)</h[1-6]>", re.IGNORECASE | re.DOTALL)
+    _icon_re = re.compile(
+        r"<img\b[^>]*/icons/(?P<basename>[^/\"'>\s]+\.(?:png|jpg|jpeg|svg|gif|webp))[^>]*>",
+        re.IGNORECASE,
+    )
     try:
         with ZipFile(template_package, "r") as zf:
             candidate_pages = [
@@ -568,14 +670,22 @@ def _load_icon_label_map(template_package: Path) -> dict[str, str]:
             ]
             for page in candidate_pages:
                 html_text = zf.read(page).decode("utf-8", errors="ignore")
-                for match in re.finditer(
-                    r'<img\b[^>]*src\s*=\s*(["\'])[^"\']*/icons/(?P<basename>[^/"\']+\.(?:png|jpg|jpeg|svg|gif|webp))\1[^>]*>\s*(?P<label>[^<]+)',
-                    html_text,
-                    flags=re.IGNORECASE,
-                ):
-                    basename = _normalize_basename(match.group("basename"))
-                    canonical = _canonical_icon_label(match.group("label"))
-                    if basename and canonical and basename not in icon_labels:
+                # Search within complete headings so icon + label in sibling
+                # elements (e.g. question.png structure) are captured correctly.
+                for h_match in _h_re.finditer(html_text):
+                    heading_body = h_match.group(1)
+                    img_m = _icon_re.search(heading_body)
+                    if not img_m:
+                        continue
+                    basename = _normalize_basename(img_m.group("basename"))
+                    if not basename or basename in icon_labels:
+                        continue
+                    # Strip all img tags then use plain text as the label.
+                    label_html = re.sub(
+                        r"<img\b[^>]*>", "", heading_body, flags=re.IGNORECASE
+                    )
+                    canonical = _canonical_icon_label(_plain_text(label_html))
+                    if canonical:
                         icon_labels[basename] = canonical
     except Exception:
         icon_labels = {}
@@ -609,8 +719,12 @@ class TemplateOverlayContext:
     image_layout_mode: str
 
 
-def build_template_overlay_context(config: TemplateOverlayConfig) -> TemplateOverlayContext:
-    assets_by_basename, collisions = _load_template_assets_by_basename(config.template_package)
+def build_template_overlay_context(
+    config: TemplateOverlayConfig,
+) -> TemplateOverlayContext:
+    assets_by_basename, collisions = _load_template_assets_by_basename(
+        config.template_package
+    )
     alias_map, alias_source = _load_alias_map(config.alias_map_json_path)
     icon_label_map = _load_icon_label_map(config.template_package)
     # Backfill labels for legacy icon basenames when alias rules map them to
@@ -742,14 +856,24 @@ def apply_template_overlay(
         nonlocal ignored_unresolved
 
         original_url = str(match.group("url")).strip()
-        if not _is_brightspace_template_url(original_url):
+        is_brightspace = _is_brightspace_template_url(original_url)
+        is_standard_images = (
+            not is_brightspace and "standardimages/" in original_url.lower()
+        )
+        if not is_brightspace and not is_standard_images:
             return match.group(0)
 
         source_basename = _extract_template_basename(original_url)
         if not source_basename:
-            unresolved += 1
-            unresolved_refs.append(original_url)
-            unresolved_basenames.append("")
+            if is_brightspace:
+                unresolved += 1
+                unresolved_refs.append(original_url)
+                unresolved_basenames.append("")
+            return match.group(0)
+
+        # standardImages icons are only remapped when they have an alias entry;
+        # un-aliased standardImages files (photos, decorative images) are left as-is.
+        if is_standard_images and source_basename not in context.alias_map:
             return match.group(0)
 
         target_basename, mode = _resolve_target_basename(
@@ -761,9 +885,10 @@ def apply_template_overlay(
                 ignored_unresolved += 1
                 ignored_basenames.append(source_basename)
                 return match.group(0)
-            unresolved += 1
-            unresolved_refs.append(original_url)
-            unresolved_basenames.append(source_basename)
+            if is_brightspace:
+                unresolved += 1
+                unresolved_refs.append(original_url)
+                unresolved_basenames.append(source_basename)
             return match.group(0)
 
         parsed = urlparse(original_url)
@@ -863,8 +988,16 @@ def apply_template_overlay(
                     if float_match is not None:
                         float_direction = float_match.group(1).strip().lower()
                 has_large_width = bool(
-                    re.search(r'\bwidth\s*=\s*(["\'])\s*(?:[2-9]\d{2,}|\d{4,})\s*\1', updated_tag, flags=re.IGNORECASE)
-                    or re.search(r'width\s*:\s*(?:[2-9]\d{2,}|\d{4,})px', updated_tag, flags=re.IGNORECASE)
+                    re.search(
+                        r'\bwidth\s*=\s*(["\'])\s*(?:[2-9]\d{2,}|\d{4,})\s*\1',
+                        updated_tag,
+                        flags=re.IGNORECASE,
+                    )
+                    or re.search(
+                        r"width\s*:\s*(?:[2-9]\d{2,}|\d{4,})px",
+                        updated_tag,
+                        flags=re.IGNORECASE,
+                    )
                 )
                 if not has_large_width and float_direction not in {"left", "right"}:
                     return tag
@@ -914,7 +1047,10 @@ def apply_template_overlay(
                         seen_keys.add(key)
                         style_tokens.append(cleaned)
 
-                if float_direction in {"left", "right"} and context.image_layout_mode == "preserve-wrap":
+                if (
+                    float_direction in {"left", "right"}
+                    and context.image_layout_mode == "preserve-wrap"
+                ):
                     preferred_width = _preferred_float_image_width(tag)
                     style_tokens.extend(
                         [
@@ -924,9 +1060,11 @@ def apply_template_overlay(
                             f"float: {float_direction}",
                             "display: block",
                             "clear: none",
-                            "margin: 4px 0 20px 24px"
-                            if float_direction == "right"
-                            else "margin: 4px 24px 20px 0",
+                            (
+                                "margin: 4px 0 20px 24px"
+                                if float_direction == "right"
+                                else "margin: 4px 24px 20px 0"
+                            ),
                         ]
                     )
                 elif float_direction in {"left", "right"}:
@@ -938,9 +1076,11 @@ def apply_template_overlay(
                             "height: auto",
                             "display: block",
                             "clear: both",
-                            "margin: 20px 0 20px auto"
-                            if float_direction == "right"
-                            else "margin: 20px auto 20px 0",
+                            (
+                                "margin: 20px 0 20px auto"
+                                if float_direction == "right"
+                                else "margin: 20px auto 20px 0"
+                            ),
                         ]
                     )
                 else:
@@ -963,7 +1103,9 @@ def apply_template_overlay(
                         + updated_tag[style_match.end("style") :]
                     )
                 elif rebuilt_style:
-                    updated_tag = append_attribute(updated_tag, f'style="{rebuilt_style}"')
+                    updated_tag = append_attribute(
+                        updated_tag, f'style="{rebuilt_style}"'
+                    )
 
                 if updated_tag != tag:
                     responsive_image_updates += 1
@@ -990,11 +1132,19 @@ def apply_template_overlay(
                         if not cleaned:
                             continue
                         lowered = cleaned.lower().replace(" ", "")
-                        if lowered.startswith(("max-width:", "min-width:", "width:", "height:", "display:")):
+                        if lowered.startswith(
+                            (
+                                "max-width:",
+                                "min-width:",
+                                "width:",
+                                "height:",
+                                "display:",
+                            )
+                        ):
                             continue
                         style_tokens.append(cleaned)
 
-                style_tokens.extend(["width: 100%", "min-width: 100%", "height: auto", "display: block"])
+                style_tokens.extend(["width: 100%", "height: auto", "display: block"])
                 rebuilt_style = "; ".join(style_tokens).strip()
                 if rebuilt_style and not rebuilt_style.endswith(";"):
                     rebuilt_style += ";"
@@ -1006,7 +1156,9 @@ def apply_template_overlay(
                         + updated_tag[style_match.end("style") :]
                     )
                 elif rebuilt_style:
-                    updated_tag = append_attribute(updated_tag, f'style="{rebuilt_style}"')
+                    updated_tag = append_attribute(
+                        updated_tag, f'style="{rebuilt_style}"'
+                    )
 
                 updated_tag = re.sub(
                     r'\s+alt\s*=\s*(["\']).*?\1',
@@ -1065,7 +1217,11 @@ def apply_template_overlay(
                 lowered = token.lower().replace(" ", "")
                 if key == "max-width" and not has_float_style:
                     continue
-                if key == "height" and lowered.startswith("height:auto") and not has_float_style:
+                if (
+                    key == "height"
+                    and lowered.startswith("height:auto")
+                    and not has_float_style
+                ):
                     continue
                 if key in seen_style_keys:
                     continue
@@ -1129,7 +1285,10 @@ def apply_template_overlay(
                 flags=re.IGNORECASE,
             )
             if title_match is not None:
-                updated_tag = updated_tag[: title_match.start()] + updated_tag[title_match.end() :]
+                updated_tag = (
+                    updated_tag[: title_match.start()]
+                    + updated_tag[title_match.end() :]
+                )
                 icon_title_updates += 1
 
             role_match = re.search(
@@ -1137,7 +1296,11 @@ def apply_template_overlay(
                 updated_tag,
                 flags=re.IGNORECASE,
             )
-            role_value = role_match.group("role").strip().lower() if role_match is not None else ""
+            role_value = (
+                role_match.group("role").strip().lower()
+                if role_match is not None
+                else ""
+            )
             if role_match is not None:
                 if role_value != "presentation":
                     updated_tag = (
@@ -1167,7 +1330,9 @@ def apply_template_overlay(
             )
             if not label:
                 return full_heading
-            heading_attrs = _template_heading_attrs(match.group("attrs"), context=context)
+            heading_attrs = _template_heading_attrs(
+                match.group("attrs"), context=context
+            )
             replacement = _render_icon_heading_block(
                 level=template_section_level(int(match.group("level"))),
                 attrs=heading_attrs,
@@ -1185,6 +1350,39 @@ def apply_template_overlay(
             flags=re.IGNORECASE | re.DOTALL,
         )
 
+        def normalize_icon_only_paragraph(match: re.Match[str]) -> str:
+            """Convert a <p> containing only a TemplateAssets icon into a proper
+            icon+label heading, matching the template icon placement guidelines."""
+            nonlocal icon_label_heading_updates
+            img_tag = match.group("img")
+            src_basename = _extract_img_basename(img_tag)
+            if not src_basename:
+                return match.group(0)
+            label = _canonical_heading_label(
+                context.icon_label_by_basename.get(src_basename, ""),
+                icon_basename=src_basename,
+            )
+            if not label:
+                return match.group(0)
+            attrs = ' style="color: #ac1a2f;"' if context.apply_color_standards else ""
+            replacement = _render_icon_heading_block(
+                level=template_section_level(3),
+                attrs=attrs,
+                img_tag=_build_heading_icon_tag(basename=src_basename),
+                canonical_label=label,
+            )
+            icon_label_heading_updates += 1
+            return replacement
+
+        # Match <p> or <div> that contains ONLY a TemplateAssets icon (already
+        # remapped from standardImages), with no surrounding text content.
+        updated = re.sub(
+            r"<(?P<wrapper>p|div)\b[^>]*>\s*(?P<img><img\b[^>]*templateassets/[^>]+>)\s*</(?P=wrapper)>",
+            normalize_icon_only_paragraph,
+            updated,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
         def merge_icon_with_label_block(match: re.Match[str]) -> str:
             nonlocal icon_block_heading_merges
             img_tag = match.group("img")
@@ -1192,7 +1390,11 @@ def apply_template_overlay(
             label_body = match.group("body").strip()
             if not label_body:
                 return match.group(0)
-            if re.search(r"<(?:a|iframe|ul|ol|table|h[1-6]|details)\b", label_body, flags=re.IGNORECASE):
+            if re.search(
+                r"<(?:a|iframe|ul|ol|table|h[1-6]|details)\b",
+                label_body,
+                flags=re.IGNORECASE,
+            ):
                 return match.group(0)
             label_text, label_media = _extract_heading_title_and_media(label_body)
             if not label_text or len(label_text) > 100 or len(label_text.split()) > 12:
@@ -1208,7 +1410,9 @@ def apply_template_overlay(
             )
             replacement = _render_icon_heading_block(
                 level=template_section_level(3),
-                attrs=' style="color: #ac1a2f;"' if context.apply_color_standards else "",
+                attrs=(
+                    ' style="color: #ac1a2f;"' if context.apply_color_standards else ""
+                ),
                 img_tag=_build_heading_icon_tag(basename=icon_basename),
                 canonical_label=canonical_label,
                 original_title=label_text,
@@ -1233,8 +1437,12 @@ def apply_template_overlay(
             heading_body = match.group("body").strip()
             if not heading_body:
                 return match.group(0)
-            heading_attrs = _template_heading_attrs(match.group("hattrs"), context=context)
-            original_title, heading_media = _extract_heading_title_and_media(heading_body)
+            heading_attrs = _template_heading_attrs(
+                match.group("hattrs"), context=context
+            )
+            original_title, heading_media = _extract_heading_title_and_media(
+                heading_body
+            )
             if not original_title:
                 return match.group(0)
             resolved_icon_basename = _resolve_semantic_icon_basename(
@@ -1243,7 +1451,8 @@ def apply_template_overlay(
                 original_title=original_title,
             )
             canonical_label = _canonical_heading_label(
-                context.icon_label_by_basename.get(resolved_icon_basename, "") or original_title,
+                context.icon_label_by_basename.get(resolved_icon_basename, "")
+                or original_title,
                 icon_basename=resolved_icon_basename,
             )
             replacement = _render_icon_heading_block(
@@ -1287,7 +1496,7 @@ def apply_template_overlay(
         def remove_leading_divider(payload: str, *, icon_basename: str) -> str:
             nonlocal leading_divider_removals
             updated_payload, removed = re.subn(
-                rf'(<body[^>]*>\s*(?:<div\b[^>]*>\s*){{0,4}}(?:<p\b[^>]*>\s*(?:<span\b[^>]*>\s*)?(?:&nbsp;|\s)*(?:</span>\s*)?</p>\s*)?)<hr\b[^>]*>\s*(?:</div>\s*){{0,4}}(?=(?:\s*<div\b[^>]*>\s*){{0,4}}<h2\b[^>]*>.*?(?:\.\./)?TemplateAssets/{re.escape(icon_basename)})',
+                rf"(<body[^>]*>\s*(?:<div\b[^>]*>\s*){{0,4}}(?:<p\b[^>]*>\s*(?:<span\b[^>]*>\s*)?(?:&nbsp;|\s)*(?:</span>\s*)?</p>\s*)?)<hr\b[^>]*>\s*(?:</div>\s*){{0,4}}(?=(?:\s*<div\b[^>]*>\s*){{0,4}}<h2\b[^>]*>.*?(?:\.\./)?TemplateAssets/{re.escape(icon_basename)})",
                 r"\1",
                 payload,
                 count=1,
@@ -1309,7 +1518,9 @@ def apply_template_overlay(
                 seen_intro_heading_keys.add(heading_key)
                 attrs = _merge_style_attr(
                     match.group("attrs"),
-                    required_styles=_filter_required_styles(tuple(spec["styles"]), context=context),
+                    required_styles=_filter_required_styles(
+                        tuple(spec["styles"]), context=context
+                    ),
                     remove_style_keys=_template_remove_style_keys(context=context),
                 )
                 heading_text = html.escape(str(spec["label"]))
@@ -1342,7 +1553,9 @@ def apply_template_overlay(
                 page_title_done = True
                 attrs = _merge_style_attr(
                     match.group("attrs"),
-                    required_styles=_filter_required_styles(_PAGE_TITLE_HEADING_STYLE, context=context),
+                    required_styles=_filter_required_styles(
+                        _PAGE_TITLE_HEADING_STYLE, context=context
+                    ),
                     remove_style_keys=_template_remove_style_keys(context=context),
                 )
                 replacement = (
@@ -1461,7 +1674,11 @@ def apply_template_overlay(
 
     manual_issues: list[ManualReviewIssue] = []
     if unresolved:
-        evidence = unresolved_refs[0][:120] if unresolved_refs else "unresolved template references"
+        evidence = (
+            unresolved_refs[0][:120]
+            if unresolved_refs
+            else "unresolved template references"
+        )
         manual_issues.append(
             ManualReviewIssue(
                 reason="Template asset reference not mapped to Canvas template package",
@@ -1476,7 +1693,9 @@ def apply_template_overlay(
         "unresolved": unresolved,
         "ignored_unresolved": ignored_unresolved,
         "alias_pairs_used": sorted(matched_alias_pairs),
-        "unresolved_basenames": sorted({name for name in unresolved_basenames if name})[:50],
+        "unresolved_basenames": sorted({name for name in unresolved_basenames if name})[
+            :50
+        ],
         "ignored_basenames": sorted({name for name in ignored_basenames if name})[:50],
         "unresolved_refs_sample": unresolved_refs[:20],
     }

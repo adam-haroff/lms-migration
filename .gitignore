@@ -5,6 +5,16 @@ output/
 .lms-migrate-ui-state.json
 *.egg-info/
 
+# Scratch / debug scripts (never commit)
+_check_*.py
+_debug_*.py
+_scratch_*.py
+
+# Credential files — NEVER commit these
+.env
+.env.*
+!.env.example
+
 # Local/sensitive course content and exports
 resources/
 *.zip

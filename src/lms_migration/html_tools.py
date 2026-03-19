@@ -9,6 +9,11 @@ from difflib import SequenceMatcher
 from typing import Iterable
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
+from .css_parser import (
+    degrade_breaking_layout_css,
+    find_layout_breaking_elements,
+    wrap_floated_blocks,
+)
 from .math_tools import (
     find_equation_image_tags,
     normalize_math_handling,
@@ -51,6 +56,8 @@ class CanvasSanitizerPolicy:
     accordion_summary_alignment: str = "left"
     accordion_flatten_hints: tuple[str, ...] = ()
     accordion_details_hints: tuple[str, ...] = ()
+    degrade_breaking_layout_css: bool = True
+    wrap_floated_content_blocks: bool = True
 
 
 @dataclass(frozen=True)
@@ -60,7 +67,9 @@ class BestPracticeEnforcerPolicy:
     ensure_external_links_new_tab: bool = False
 
 
-_BSP_TEMPLATE_RE = re.compile(r"^/?shared/brightspace_html_template/", flags=re.IGNORECASE)
+_BSP_TEMPLATE_RE = re.compile(
+    r"^/?shared/brightspace_html_template/", flags=re.IGNORECASE
+)
 _BSP_FONT_RE = re.compile(r"^https?://s\.brightspace\.com/", flags=re.IGNORECASE)
 _LEGACY_D2L_RE = re.compile(r"^/?d2l/", flags=re.IGNORECASE)
 _LEGACY_ENFORCED_RE = re.compile(r"^/?content/enforced/", flags=re.IGNORECASE)
@@ -93,8 +102,12 @@ _ACCORDION_CARD_PATTERN = re.compile(
     r"<div\b[^>]*class\s*=\s*[\"'][^\"']*\bcard-body\b[^\"']*[\"'][^>]*>\s*(?P<body>.*?)\s*</div>\s*</div>\s*</div>",
     flags=re.IGNORECASE | re.DOTALL,
 )
-_TITLE_TEXT_RE = re.compile(r"<title\b[^>]*>(?P<body>.*?)</title>", flags=re.IGNORECASE | re.DOTALL)
-_FIRST_HEADING_RE = re.compile(r"<h[1-6]\b[^>]*>(?P<body>.*?)</h[1-6]>", flags=re.IGNORECASE | re.DOTALL)
+_TITLE_TEXT_RE = re.compile(
+    r"<title\b[^>]*>(?P<body>.*?)</title>", flags=re.IGNORECASE | re.DOTALL
+)
+_FIRST_HEADING_RE = re.compile(
+    r"<h[1-6]\b[^>]*>(?P<body>.*?)</h[1-6]>", flags=re.IGNORECASE | re.DOTALL
+)
 _STRIP_TAGS_RE = re.compile(r"<[^>]+>")
 _SMART_ACCORDION_FLATTEN_HINTS = (
     "syllabus",
@@ -128,13 +141,13 @@ _D2L_STYLE_TOKEN_RE = re.compile(
 # intent (float, alignment, background, spacing).  Applied as inline styles before
 # the class tokens are stripped so their visual effect is preserved in Canvas.
 _BOOTSTRAP_UTILITY_CSS_MAP: dict[str, dict[str, str]] = {
-    "float-left":  {"float": "left",  "margin-right": "12px", "margin-bottom": "8px"},
-    "float-right": {"float": "right", "margin-left":  "12px", "margin-bottom": "8px"},
+    "float-left": {"float": "left", "margin-right": "12px", "margin-bottom": "8px"},
+    "float-right": {"float": "right", "margin-left": "12px", "margin-bottom": "8px"},
     "text-center": {"text-align": "center"},
-    "text-right":  {"text-align": "right"},
-    "bg-light":    {"background-color": "#f8f9fa", "padding": "0.75rem"},
-    "bg-white":    {"background-color": "#ffffff"},
-    "w-100":       {"width": "100%"},
+    "text-right": {"text-align": "right"},
+    "bg-light": {"background-color": "#f8f9fa", "padding": "0.75rem"},
+    "bg-white": {"background-color": "#ffffff"},
+    "w-100": {"width": "100%"},
     "p-0": {"padding": "0"},
     "p-1": {"padding": "0.25rem"},
     "p-2": {"padding": "0.5rem"},
@@ -147,19 +160,28 @@ _BOOTSTRAP_UTILITY_CSS_MAP: dict[str, dict[str, str]] = {
     "mb-1": {"margin-bottom": "0.25rem"},
     "mb-2": {"margin-bottom": "0.5rem"},
     "mb-3": {"margin-bottom": "1rem"},
-    "py-1": {"padding-top": "0.25rem",  "padding-bottom": "0.25rem"},
-    "py-2": {"padding-top": "0.5rem",   "padding-bottom": "0.5rem"},
-    "py-3": {"padding-top": "1rem",     "padding-bottom": "1rem"},
+    "py-1": {"padding-top": "0.25rem", "padding-bottom": "0.25rem"},
+    "py-2": {"padding-top": "0.5rem", "padding-bottom": "0.5rem"},
+    "py-3": {"padding-top": "1rem", "padding-bottom": "1rem"},
     "px-1": {"padding-left": "0.25rem", "padding-right": "0.25rem"},
-    "px-2": {"padding-left": "0.5rem",  "padding-right": "0.5rem"},
-    "px-3": {"padding-left": "1rem",    "padding-right": "1rem"},
+    "px-2": {"padding-left": "0.5rem", "padding-right": "0.5rem"},
+    "px-3": {"padding-left": "1rem", "padding-right": "1rem"},
 }
 # Accordion card-header text values that are generic D2L template placeholders
 # rather than meaningful section titles.  In flatten mode these are silently
 # suppressed so no spurious headings appear in the converted document.
-_ACCORDION_PLACEHOLDER_TITLES: frozenset[str] = frozenset({
-    "section", "item", "content", "note", "card", "panel", "block", "unit",
-})
+_ACCORDION_PLACEHOLDER_TITLES: frozenset[str] = frozenset(
+    {
+        "section",
+        "item",
+        "content",
+        "note",
+        "card",
+        "panel",
+        "block",
+        "unit",
+    }
+)
 _DISPLAY_EQUATION_BLOCK_RE = re.compile(
     r"<(?P<tag>p|div)\b(?P<attrs>[^>]*)>\s*"
     r"(?P<body>(?:<span\b[^>]*>\s*)?(?:<img\b[^>]*>|<math\b[^>]*>.*?</math>)(?:\s*</span>)?)\s*"
@@ -195,7 +217,11 @@ def _set_or_add_attr(tag_html: str, attr_name: str, value: str) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
     if pattern.search(tag_html):
-        return pattern.sub(lambda m: f'{m.group(1)}"{html.escape(value, quote=True)}"', tag_html, count=1)
+        return pattern.sub(
+            lambda m: f'{m.group(1)}"{html.escape(value, quote=True)}"',
+            tag_html,
+            count=1,
+        )
     if tag_html.endswith("/>"):
         return f'{tag_html[:-2].rstrip()} {attr_name}="{html.escape(value, quote=True)}" />'
     return f'{tag_html[:-1].rstrip()} {attr_name}="{html.escape(value, quote=True)}">'
@@ -248,9 +274,7 @@ def _merge_inline_style(tag_html: str, additions: dict[str, str]) -> tuple[str, 
     if match is None:
         return _set_or_add_attr(tag_html, "style", merged_style), True
     rebuilt = (
-        tag_html[: match.start("value")]
-        + merged_style
-        + tag_html[match.end("value") :]
+        tag_html[: match.start("value")] + merged_style + tag_html[match.end("value") :]
     )
     return rebuilt, changed
 
@@ -288,9 +312,7 @@ def _remove_inline_style_keys(tag_html: str, keys: set[str]) -> tuple[str, bool]
 
     merged_style = "; ".join(kept).strip() + ";"
     rebuilt = (
-        tag_html[: match.start("value")]
-        + merged_style
-        + tag_html[match.end("value") :]
+        tag_html[: match.start("value")] + merged_style + tag_html[match.end("value") :]
     )
     return rebuilt, True
 
@@ -346,14 +368,20 @@ def _normalize_equation_image_styles(content: str) -> tuple[str, int]:
 
     updated = re.sub(
         r"<img\b[^>]*>",
-        lambda match: replace_tag(match) if "equation_image" in match.group(0).lower() else match.group(0),
+        lambda match: (
+            replace_tag(match)
+            if "equation_image" in match.group(0).lower()
+            else match.group(0)
+        ),
         content,
         flags=re.IGNORECASE | re.DOTALL,
     )
     return updated, styled
 
 
-def _is_syllabus_like_page(*, file_path: str, document_title_text: str, content: str) -> bool:
+def _is_syllabus_like_page(
+    *, file_path: str, document_title_text: str, content: str
+) -> bool:
     context = " ".join(
         filter(
             None,
@@ -396,7 +424,9 @@ def _normalize_syllabus_tables(fragment: str) -> tuple[str, int]:
     total_updates = 0
     for start, end in spans:
         pieces.append(fragment[last_index:start])
-        normalized_table, table_updates, section_heading = _normalize_single_syllabus_table(fragment[start:end])
+        normalized_table, table_updates, section_heading = (
+            _normalize_single_syllabus_table(fragment[start:end])
+        )
         if section_heading and pieces:
             pieces[-1] = re.sub(
                 r"(?is)<h3>\s*Section\s*</h3>\s*<div>\s*$",
@@ -415,24 +445,53 @@ def _flatten_nested_table_markup(value_html: str) -> str:
     if "<table" not in value_html.lower():
         return value_html.strip()
     updated = value_html
-    updated = re.sub(r"</(?:td|th)>\s*<(?:td|th)\b[^>]*>", "<br>", updated, flags=re.IGNORECASE | re.DOTALL)
-    updated = re.sub(r"</tr>\s*<tr\b[^>]*>", "<br>", updated, flags=re.IGNORECASE | re.DOTALL)
-    updated = re.sub(r"</?(?:table|tbody|thead|tfoot|tr|td|th)\b[^>]*>", "", updated, flags=re.IGNORECASE | re.DOTALL)
+    updated = re.sub(
+        r"</(?:td|th)>\s*<(?:td|th)\b[^>]*>",
+        "<br>",
+        updated,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    updated = re.sub(
+        r"</tr>\s*<tr\b[^>]*>", "<br>", updated, flags=re.IGNORECASE | re.DOTALL
+    )
+    updated = re.sub(
+        r"</?(?:table|tbody|thead|tfoot|tr|td|th)\b[^>]*>",
+        "",
+        updated,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     updated = re.sub(r"(?:<br\s*/?>\s*){3,}", "<br><br>", updated, flags=re.IGNORECASE)
     return updated.strip()
 
 
-def _convert_syllabus_row_header_table_to_list(table_html: str, section_heading: str) -> str | None:
-    table_match = re.match(r"<table\b[^>]*>(?P<body>.*?)</table>\s*$", table_html, flags=re.IGNORECASE | re.DOTALL)
+def _convert_syllabus_row_header_table_to_list(
+    table_html: str, section_heading: str
+) -> str | None:
+    table_match = re.match(
+        r"<table\b[^>]*>(?P<body>.*?)</table>\s*$",
+        table_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     if table_match is None:
         return None
 
-    table_body = re.sub(r"<caption\b[^>]*>.*?</caption>", "", table_match.group("body"), flags=re.IGNORECASE | re.DOTALL)
+    table_body = re.sub(
+        r"<caption\b[^>]*>.*?</caption>",
+        "",
+        table_match.group("body"),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     items: list[str] = []
-    for row_match in re.finditer(r"<tr\b[^>]*>(?P<body>.*?)</tr>", table_body, flags=re.IGNORECASE | re.DOTALL):
+    for row_match in re.finditer(
+        r"<tr\b[^>]*>(?P<body>.*?)</tr>", table_body, flags=re.IGNORECASE | re.DOTALL
+    ):
         row_body = row_match.group("body")
-        header_match = re.search(r"<th\b[^>]*>(?P<body>.*?)</th>", row_body, flags=re.IGNORECASE | re.DOTALL)
-        value_match = re.search(r"<td\b[^>]*>(?P<body>.*?)</td>", row_body, flags=re.IGNORECASE | re.DOTALL)
+        header_match = re.search(
+            r"<th\b[^>]*>(?P<body>.*?)</th>", row_body, flags=re.IGNORECASE | re.DOTALL
+        )
+        value_match = re.search(
+            r"<td\b[^>]*>(?P<body>.*?)</td>", row_body, flags=re.IGNORECASE | re.DOTALL
+        )
         if header_match is None or value_match is None:
             continue
 
@@ -445,23 +504,39 @@ def _convert_syllabus_row_header_table_to_list(table_html: str, section_heading:
             items.append(f"<li>{value_html}</li>")
             continue
         if not value_text:
-            items.append(f"<li><strong>{html.escape(label_text, quote=False)}</strong></li>")
+            items.append(
+                f"<li><strong>{html.escape(label_text, quote=False)}</strong></li>"
+            )
             continue
-        if re.search(r"<(?:div|p|ul|ol|h[1-6]|details|blockquote)\b", value_html, flags=re.IGNORECASE):
+        if re.search(
+            r"<(?:div|p|ul|ol|h[1-6]|details|blockquote)\b",
+            value_html,
+            flags=re.IGNORECASE,
+        ):
             items.append(
                 f"<li><strong>{html.escape(label_text, quote=False)}</strong><div>{value_html}</div></li>"
             )
         else:
-            items.append(f"<li><strong>{html.escape(label_text, quote=False)}</strong>: {value_html}</li>")
+            items.append(
+                f"<li><strong>{html.escape(label_text, quote=False)}</strong>: {value_html}</li>"
+            )
 
     if len(items) < 3:
         return None
-    return f"<h3>{html.escape(section_heading, quote=False)}</h3>\n<ul>\n" + "\n".join(items) + "\n</ul>"
+    return (
+        f"<h3>{html.escape(section_heading, quote=False)}</h3>\n<ul>\n"
+        + "\n".join(items)
+        + "\n</ul>"
+    )
 
 
 def _normalize_single_syllabus_table(table_html: str) -> tuple[str, int, str]:
-    opening_match = re.match(r"<table\b[^>]*>", table_html, flags=re.IGNORECASE | re.DOTALL)
-    closing_match = re.search(r"</table>\s*$", table_html, flags=re.IGNORECASE | re.DOTALL)
+    opening_match = re.match(
+        r"<table\b[^>]*>", table_html, flags=re.IGNORECASE | re.DOTALL
+    )
+    closing_match = re.search(
+        r"</table>\s*$", table_html, flags=re.IGNORECASE | re.DOTALL
+    )
     if opening_match is None or closing_match is None:
         return table_html, 0, ""
 
@@ -477,19 +552,32 @@ def _normalize_single_syllabus_table(table_html: str) -> tuple[str, int, str]:
         flags=re.IGNORECASE | re.DOTALL,
     )
     existing_caption_text = (
-        _plain_text(existing_caption_match.group("body")) if existing_caption_match is not None else ""
+        _plain_text(existing_caption_match.group("body"))
+        if existing_caption_match is not None
+        else ""
     )
 
     role = ""
     if (
-        "topics" in text_snapshot
-        and "assignments" in text_snapshot
-        and "due date" in text_snapshot
-    ) or "16-week" in text_snapshot or "12-week" in text_snapshot:
+        (
+            "topics" in text_snapshot
+            and "assignments" in text_snapshot
+            and "due date" in text_snapshot
+        )
+        or "16-week" in text_snapshot
+        or "12-week" in text_snapshot
+    ):
         role = "course-outline"
-    elif "date" in text_snapshot and "time" in text_snapshot and "location or zoom link" in text_snapshot:
+    elif (
+        "date" in text_snapshot
+        and "time" in text_snapshot
+        and "location or zoom link" in text_snapshot
+    ):
         role = "class-meeting-schedule"
-    elif "percent of total grade" in text_snapshot or summary_text.lower() == "grading policy":
+    elif (
+        "percent of total grade" in text_snapshot
+        or summary_text.lower() == "grading policy"
+    ):
         role = "assignment-weights"
     elif "grading scale" in text_snapshot or summary_text.lower() == "grading scale":
         role = "grading-scale"
@@ -529,14 +617,21 @@ def _normalize_single_syllabus_table(table_html: str) -> tuple[str, int, str]:
     changed = False
     updated_opening_tag, removed_summary = _remove_attr(updated_opening_tag, "summary")
     changed = changed or removed_summary
-    updated_opening_tag, removed_table_height = _remove_inline_style_keys(updated_opening_tag, {"height"})
+    updated_opening_tag, removed_table_height = _remove_inline_style_keys(
+        updated_opening_tag, {"height"}
+    )
     changed = changed or removed_table_height
 
     table_styles = {"border-collapse": "collapse"}
     class_text = (_extract_attr_value(updated_opening_tag, "class") or "").lower()
-    if role in {"course-outline", "class-meeting-schedule"} or "coursetable" in class_text:
+    if (
+        role in {"course-outline", "class-meeting-schedule"}
+        or "coursetable" in class_text
+    ):
         table_styles["width"] = "100%"
-    updated_opening_tag, merged_table_style = _merge_inline_style(updated_opening_tag, table_styles)
+    updated_opening_tag, merged_table_style = _merge_inline_style(
+        updated_opening_tag, table_styles
+    )
     changed = changed or merged_table_style
 
     if role in {"course-outline", "class-meeting-schedule"}:
@@ -587,7 +682,9 @@ def _normalize_single_syllabus_table(table_html: str) -> tuple[str, int, str]:
 
     normalized_inner = row_tag_pattern.sub(normalize_row_tag, normalized_inner)
 
-    cell_tag_pattern = re.compile(r"<(?:th|td)\b[^>]*>", flags=re.IGNORECASE | re.DOTALL)
+    cell_tag_pattern = re.compile(
+        r"<(?:th|td)\b[^>]*>", flags=re.IGNORECASE | re.DOTALL
+    )
     normalized_cells = 0
 
     def normalize_cell_tag(match: re.Match[str]) -> str:
@@ -622,7 +719,11 @@ def _normalize_single_syllabus_table(table_html: str) -> tuple[str, int, str]:
     normalized_inner = cell_tag_pattern.sub(normalize_cell_tag, normalized_inner)
 
     normalized_table = updated_opening_tag + normalized_inner + "</table>"
-    return normalized_table, nested_updates + (1 if normalized_table != table_html else 0), ""
+    return (
+        normalized_table,
+        nested_updates + (1 if normalized_table != table_html else 0),
+        "",
+    )
 
 
 def _wrap_display_equations(content: str) -> tuple[str, int]:
@@ -668,7 +769,9 @@ def _extract_accordion_title_text(header_html: str) -> str:
         header_html,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    title_source = heading_match.group("title") if heading_match is not None else header_html
+    title_source = (
+        heading_match.group("title") if heading_match is not None else header_html
+    )
     text = _plain_text(title_source)
     if text:
         return text
@@ -687,7 +790,9 @@ def _extract_accordion_title_text(header_html: str) -> str:
     return "Section"
 
 
-def _resolve_accordion_mode(*, requested_mode: str, file_path: str = "", content: str = "") -> str:
+def _resolve_accordion_mode(
+    *, requested_mode: str, file_path: str = "", content: str = ""
+) -> str:
     return _resolve_accordion_mode_with_policy(
         requested_mode=requested_mode,
         file_path=file_path,
@@ -764,7 +869,9 @@ def _accordion_panel_style() -> str:
     return "padding: 12px 16px; text-align: left;"
 
 
-def _convert_bootstrap_accordion_cards(content: str, mode: str, *, alignment: str = "left") -> tuple[str, int]:
+def _convert_bootstrap_accordion_cards(
+    content: str, mode: str, *, alignment: str = "left"
+) -> tuple[str, int]:
     normalized_mode = str(mode).strip().lower()
     if normalized_mode not in {"details", "flatten"}:
         return content, 0
@@ -812,7 +919,9 @@ def _re_flags(flag_string: str) -> int:
     return flags
 
 
-def apply_replacements(content: str, replacements: Iterable[RegexReplacement]) -> tuple[str, list[AppliedChange]]:
+def apply_replacements(
+    content: str, replacements: Iterable[RegexReplacement]
+) -> tuple[str, list[AppliedChange]]:
     updated = content
     applied: list[AppliedChange] = []
 
@@ -821,13 +930,19 @@ def apply_replacements(content: str, replacements: Iterable[RegexReplacement]) -
         updated, count = pattern.subn(replacement.replacement, updated)
         if count:
             applied.append(
-                AppliedChange(category="replacement", description=replacement.description, count=count)
+                AppliedChange(
+                    category="replacement",
+                    description=replacement.description,
+                    count=count,
+                )
             )
 
     return updated, applied
 
 
-def apply_link_rewrites(content: str, rewrites: Iterable[LinkRewrite]) -> tuple[str, list[AppliedChange]]:
+def apply_link_rewrites(
+    content: str, rewrites: Iterable[LinkRewrite]
+) -> tuple[str, list[AppliedChange]]:
     updated = content
     applied: list[AppliedChange] = []
 
@@ -836,13 +951,19 @@ def apply_link_rewrites(content: str, rewrites: Iterable[LinkRewrite]) -> tuple[
         if count:
             updated = updated.replace(rewrite.source, rewrite.target)
             applied.append(
-                AppliedChange(category="link_rewrite", description=rewrite.description, count=count)
+                AppliedChange(
+                    category="link_rewrite",
+                    description=rewrite.description,
+                    count=count,
+                )
             )
 
     return updated, applied
 
 
-def apply_banner_rule(content: str, banner_rule: BannerRule) -> tuple[str, list[AppliedChange]]:
+def apply_banner_rule(
+    content: str, banner_rule: BannerRule
+) -> tuple[str, list[AppliedChange]]:
     if not banner_rule.enabled or not banner_rule.html.strip():
         return content, []
 
@@ -867,7 +988,11 @@ def apply_banner_rule(content: str, banner_rule: BannerRule) -> tuple[str, list[
     else:
         updated = banner_rule.html + "\n" + content
 
-    return updated, [AppliedChange(category="template", description="Injected course template banner", count=1)]
+    return updated, [
+        AppliedChange(
+            category="template", description="Injected course template banner", count=1
+        )
+    ]
 
 
 def _is_brightspace_template_ref(url: str) -> bool:
@@ -940,7 +1065,7 @@ def neutralize_legacy_d2l_hrefs_in_markup(content: str) -> tuple[str, int, int]:
     do not see those anchors.
     """
     href_pattern = re.compile(
-        r'(?P<prefix>\bhref\s*=\s*)(?P<quote>[\"\'])(?P<href>[^\"\']+)(?P=quote)',
+        r"(?P<prefix>\bhref\s*=\s*)(?P<quote>[\"\'])(?P<href>[^\"\']+)(?P=quote)",
         flags=re.IGNORECASE,
     )
     neutralized = 0
@@ -955,7 +1080,7 @@ def neutralize_legacy_d2l_hrefs_in_markup(content: str) -> tuple[str, int, int]:
             rewritten_quicklinks += 1
             return (
                 f'{match.group("prefix")}{match.group("quote")}'
-                f'{html.escape(rewritten, quote=True)}'
+                f"{html.escape(rewritten, quote=True)}"
                 f'{match.group("quote")}'
             )
         if not _is_legacy_d2l_link(html.unescape(raw_href)):
@@ -985,11 +1110,15 @@ def apply_canvas_sanitizer(
     applied_policy = policy or CanvasSanitizerPolicy()
     updated = content
     applied: list[AppliedChange] = []
-    title_tag_pattern = re.compile(r"<title\b[^>]*>(?P<title>.*?)</title>", flags=re.IGNORECASE | re.DOTALL)
+    title_tag_pattern = re.compile(
+        r"<title\b[^>]*>(?P<title>.*?)</title>", flags=re.IGNORECASE | re.DOTALL
+    )
     document_title_text = ""
     title_match_initial = title_tag_pattern.search(updated)
     if title_match_initial is not None:
-        document_title_text = html.unescape(re.sub(r"<[^>]+>", " ", title_match_initial.group("title"))).strip()
+        document_title_text = html.unescape(
+            re.sub(r"<[^>]+>", " ", title_match_initial.group("title"))
+        ).strip()
         updated, removed_title_tags = title_tag_pattern.subn("", updated)
         if removed_title_tags:
             applied.append(
@@ -1048,7 +1177,9 @@ def apply_canvas_sanitizer(
                 r"<annotation\b[^>]*\bencoding\s*=\s*([\"'])wiris\1[^>]*>.*?</annotation>",
                 flags=re.IGNORECASE | re.DOTALL,
             )
-            updated, removed_wiris_annotations = wiris_annotation_pattern.subn("", updated)
+            updated, removed_wiris_annotations = wiris_annotation_pattern.subn(
+                "", updated
+            )
             if removed_wiris_annotations:
                 applied.append(
                     AppliedChange(
@@ -1058,7 +1189,9 @@ def apply_canvas_sanitizer(
                     )
                 )
 
-    requested_accordion_mode = str(applied_policy.accordion_handling or "").strip().lower()
+    requested_accordion_mode = (
+        str(applied_policy.accordion_handling or "").strip().lower()
+    )
     accordion_mode = _resolve_accordion_mode_with_policy(
         requested_mode=requested_accordion_mode,
         file_path=file_path,
@@ -1271,7 +1404,9 @@ def apply_canvas_sanitizer(
             removed_decorative_template_assets += 1
             return ""
 
-        updated = decorative_template_assets_pattern.sub(replace_decorative_template_asset, updated)
+        updated = decorative_template_assets_pattern.sub(
+            replace_decorative_template_asset, updated
+        )
         if removed_decorative_template_assets:
             applied.append(
                 AppliedChange(
@@ -1284,7 +1419,7 @@ def apply_canvas_sanitizer(
         # Brightspace template anchors often point to /shared/Brightspace_HTML_Template/*
         # and trigger Canvas missing-link warnings during import.
         anchor_template_pattern = re.compile(
-            r'(<a\b[^>]*\bhref\s*=\s*)([\"\'])(?P<href>[^\"\']+)\2',
+            r"(<a\b[^>]*\bhref\s*=\s*)([\"\'])(?P<href>[^\"\']+)\2",
             flags=re.IGNORECASE,
         )
         neutralized_template_links = 0
@@ -1315,7 +1450,52 @@ def apply_canvas_sanitizer(
                 )
             )
 
-    h1_pattern = re.compile(r"<h1(?P<attrs>\b[^>]*)>(?P<body>.*?)</h1>", flags=re.IGNORECASE | re.DOTALL)
+    if applied_policy.degrade_breaking_layout_css:
+        (
+            updated,
+            degraded_absolute,
+            degraded_flex_grid,
+            degraded_multicolumn,
+        ) = degrade_breaking_layout_css(updated)
+        if degraded_absolute:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Removed position: absolute/fixed declarations to make content in-flow in Canvas",
+                    count=degraded_absolute,
+                )
+            )
+        if degraded_flex_grid:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Degraded display: flex/grid to display: block for Canvas compatibility",
+                    count=degraded_flex_grid,
+                )
+            )
+        if degraded_multicolumn:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Removed multi-column CSS layout properties not supported in Canvas",
+                    count=degraded_multicolumn,
+                )
+            )
+
+    if applied_policy.wrap_floated_content_blocks:
+        updated, wrapped_float_count = wrap_floated_blocks(updated)
+        if wrapped_float_count:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Wrapped floated content blocks in clearfix containers to prevent layout collapse in Canvas",
+                    count=wrapped_float_count,
+                )
+            )
+
+    h1_pattern = re.compile(
+        r"<h1(?P<attrs>\b[^>]*)>(?P<body>.*?)</h1>", flags=re.IGNORECASE | re.DOTALL
+    )
     h1_demoted = 0
 
     def demote_h1(match: re.Match[str]) -> str:
@@ -1476,7 +1656,9 @@ def apply_canvas_sanitizer(
             return updated_tag
         style_value = style_match.group("value")
         if "--d2l-" in style_value.lower():
-            updated_tag, removed = _remove_inline_style_keys(updated_tag, {"box-sizing"})
+            updated_tag, removed = _remove_inline_style_keys(
+                updated_tag, {"box-sizing"}
+            )
             style_match = re.search(
                 r'(\bstyle\s*=\s*)(["\'])(?P<value>.*?)(\2)',
                 updated_tag,
@@ -1501,7 +1683,10 @@ def apply_canvas_sanitizer(
                     + updated_tag[style_match.end("value") :]
                 )
             else:
-                updated_tag = updated_tag[: style_match.start()] + updated_tag[style_match.end() :]
+                updated_tag = (
+                    updated_tag[: style_match.start()]
+                    + updated_tag[style_match.end() :]
+                )
                 updated_tag = re.sub(r"\s{2,}", " ", updated_tag)
                 updated_tag = updated_tag.replace("< ", "<")
             removed_d2l_style_tokens += d2l_removed
@@ -1548,12 +1733,12 @@ def apply_canvas_sanitizer(
 
         hspace_raw = (_extract_attr_value(updated_tag, "hspace") or "").strip()
         if hspace_raw.isdigit() and int(hspace_raw) > 0:
-            css_additions.setdefault("margin-left",  f"{hspace_raw}px")
+            css_additions.setdefault("margin-left", f"{hspace_raw}px")
             css_additions.setdefault("margin-right", f"{hspace_raw}px")
 
         vspace_raw = (_extract_attr_value(updated_tag, "vspace") or "").strip()
         if vspace_raw.isdigit() and int(vspace_raw) > 0:
-            css_additions.setdefault("margin-top",    f"{vspace_raw}px")
+            css_additions.setdefault("margin-top", f"{vspace_raw}px")
             css_additions.setdefault("margin-bottom", f"{vspace_raw}px")
 
         if css_additions:
@@ -1605,7 +1790,9 @@ def apply_canvas_sanitizer(
         src_lower = (_extract_attr_value(tag, "src") or "").lower()
         if "templateassets/" in src_lower:
             return tag
-        updated_tag, changed = _merge_inline_style(tag, {"max-width": "100%", "height": "auto"})
+        updated_tag, changed = _merge_inline_style(
+            tag, {"max-width": "100%", "height": "auto"}
+        )
         if changed:
             images_made_responsive += 1
         return updated_tag
@@ -1629,7 +1816,9 @@ def apply_canvas_sanitizer(
         nonlocal tables_made_responsive
         tag = m.group(0)
         style = _extract_attr_value(tag, "style") or ""
-        width_m = re.search(r"(?:^|;)\s*width\s*:\s*(\d+)px", style, flags=re.IGNORECASE)
+        width_m = re.search(
+            r"(?:^|;)\s*width\s*:\s*(\d+)px", style, flags=re.IGNORECASE
+        )
         if not width_m:
             return tag
         px_value = int(width_m.group(1))
@@ -1685,9 +1874,7 @@ def apply_canvas_sanitizer(
                 flags=re.IGNORECASE,
             )
             if style_match is None:
-                normalized_style = (
-                    "border: 0; height: 2px; background-color: #ac1a2f; width: 100%; margin: 16px 0;"
-                )
+                normalized_style = "border: 0; height: 2px; background-color: #ac1a2f; width: 100%; margin: 16px 0;"
                 if tag.endswith("/>"):
                     rebuilt = f'{tag[:-2].rstrip()} style="{normalized_style}" />'
                 else:
@@ -1701,10 +1888,10 @@ def apply_canvas_sanitizer(
                 style_text,
                 flags=re.IGNORECASE,
             )
-            color_value = color_match.group("color") if color_match is not None else "#ac1a2f"
-            normalized_style = (
-                f"border: 0; height: 2px; background-color: {color_value}; width: 100%; margin: 16px 0;"
+            color_value = (
+                color_match.group("color") if color_match is not None else "#ac1a2f"
             )
+            normalized_style = f"border: 0; height: 2px; background-color: {color_value}; width: 100%; margin: 16px 0;"
             rebuilt = (
                 tag[: style_match.start("style")]
                 + normalized_style
@@ -1724,7 +1911,9 @@ def apply_canvas_sanitizer(
                 )
             )
 
-    if _is_syllabus_like_page(file_path=file_path, document_title_text=document_title_text, content=updated):
+    if _is_syllabus_like_page(
+        file_path=file_path, document_title_text=document_title_text, content=updated
+    ):
         updated, normalized_syllabus_tables = _normalize_syllabus_tables(updated)
         if normalized_syllabus_tables:
             applied.append(
@@ -1744,7 +1933,11 @@ def apply_canvas_sanitizer(
         return lowered
 
     def tokenized(value: str) -> list[str]:
-        return [token for token in value.split(" ") if token and token not in {"the", "a", "an"}]
+        return [
+            token
+            for token in value.split(" ")
+            if token and token not in {"the", "a", "an"}
+        ]
 
     def is_duplicate_title_block(block_text: str, title_text: str) -> bool:
         normalized_block = normalize_display_text(block_text)
@@ -1796,7 +1989,7 @@ def apply_canvas_sanitizer(
 
     if applied_policy.neutralize_legacy_d2l_links:
         anchor_href_pattern = re.compile(
-            r'(<a\b[^>]*\bhref\s*=\s*)([\"\'])(?P<href>[^\"\']+)\2',
+            r"(<a\b[^>]*\bhref\s*=\s*)([\"\'])(?P<href>[^\"\']+)\2",
             flags=re.IGNORECASE,
         )
         rewritten_quicklinks = 0
@@ -1854,7 +2047,9 @@ def repair_missing_local_references(
     """
     Repair or neutralize local references that don't map to files in the package.
     """
-    available_set = {str(path).strip().replace("\\", "/").lstrip("/") for path in available_paths}
+    available_set = {
+        str(path).strip().replace("\\", "/").lstrip("/") for path in available_paths
+    }
     if not available_set:
         return content, []
 
@@ -1941,7 +2136,9 @@ def repair_missing_local_references(
 
     def rebuild_url(raw_url: str, target_path: str) -> str:
         parsed = urlparse(raw_url)
-        current_dir = posixpath.dirname(file_path).strip().replace("\\", "/").lstrip("./")
+        current_dir = (
+            posixpath.dirname(file_path).strip().replace("\\", "/").lstrip("./")
+        )
         if current_dir:
             rebuilt_path = posixpath.relpath(target_path, start=current_dir)
         else:
@@ -1961,9 +2158,15 @@ def repair_missing_local_references(
             rf'(\b{attr_name}\s*=\s*)(["\'])([^"\']*)(\2)',
             flags=re.IGNORECASE,
         )
-        return pattern.sub(lambda m: f'{m.group(1)}"{html.escape(value, quote=True)}"', tag_html, count=1)
+        return pattern.sub(
+            lambda m: f'{m.group(1)}"{html.escape(value, quote=True)}"',
+            tag_html,
+            count=1,
+        )
 
-    anchor_pattern = re.compile(r"<a\b[^>]*\bhref\s*=\s*([\"'])(?P<href>[^\"']+)\1[^>]*>", flags=re.IGNORECASE)
+    anchor_pattern = re.compile(
+        r"<a\b[^>]*\bhref\s*=\s*([\"'])(?P<href>[^\"']+)\1[^>]*>", flags=re.IGNORECASE
+    )
 
     def replace_anchor(match: re.Match[str]) -> str:
         nonlocal rewired_local_refs
@@ -1992,7 +2195,9 @@ def repair_missing_local_references(
 
     updated = anchor_pattern.sub(replace_anchor, content)
 
-    image_pattern = re.compile(r"<img\b[^>]*\bsrc\s*=\s*([\"'])(?P<src>[^\"']+)\1[^>]*>", flags=re.IGNORECASE)
+    image_pattern = re.compile(
+        r"<img\b[^>]*\bsrc\s*=\s*([\"'])(?P<src>[^\"']+)\1[^>]*>", flags=re.IGNORECASE
+    )
 
     def replace_image(match: re.Match[str]) -> str:
         nonlocal rewired_local_refs
@@ -2019,7 +2224,12 @@ def repair_missing_local_references(
             flags=re.IGNORECASE | re.DOTALL,
         )
         alt_text = alt_match.group("alt").strip() if alt_match else ""
-        if not alt_text or alt_text.lower() in {"banner", "logo", "image", "decorative"}:
+        if not alt_text or alt_text.lower() in {
+            "banner",
+            "logo",
+            "image",
+            "decorative",
+        }:
             return ""
         replaced_missing_images_with_alt += 1
         return f'<span class="migration-missing-image-text">{html.escape(alt_text, quote=False)}</span>'
@@ -2087,16 +2297,20 @@ def apply_best_practice_enforcer(
             or "introduction and checklist" in normalized_file
             or "module checklist" in lowered
         )
-        required_closer_plain = "contact your instructor with any questions or post in the course q&a."
-        required_closer_html = "Contact your instructor with any questions or post in the Course Q&amp;A."
+        required_closer_plain = (
+            "contact your instructor with any questions or post in the course q&a."
+        )
+        required_closer_html = (
+            "Contact your instructor with any questions or post in the Course Q&amp;A."
+        )
         local_contact_plain = "contact your instructor with any course questions."
         local_contact_html = "Contact your instructor with any course questions."
-        local_contact_activity_html = (
-            "Contact your instructor with any course questions or use the Activity Feed on the Home Page."
-        )
+        local_contact_activity_html = "Contact your instructor with any course questions or use the Activity Feed on the Home Page."
         has_local_contact_guidance = local_contact_plain in lowered
         has_activity_feed_guidance = "activity feed on the home page" in lowered
-        checklist_support_present = required_closer_plain in lowered or has_local_contact_guidance
+        checklist_support_present = (
+            required_closer_plain in lowered or has_local_contact_guidance
+        )
         if is_intro_or_checklist:
             updated = re.sub(
                 r'<p\b[^>]*class\s*=\s*(["\'])migration-checklist-closer\1[^>]*>.*?</p>',
@@ -2107,7 +2321,9 @@ def apply_best_practice_enforcer(
             lowered = html.unescape(updated).lower()
             has_local_contact_guidance = local_contact_plain in lowered
             has_activity_feed_guidance = "activity feed on the home page" in lowered
-            checklist_support_present = required_closer_plain in lowered or has_local_contact_guidance
+            checklist_support_present = (
+                required_closer_plain in lowered or has_local_contact_guidance
+            )
         if is_intro_or_checklist and not checklist_support_present:
             closer_added = False
 
@@ -2119,26 +2335,45 @@ def apply_best_practice_enforcer(
             )
             if heading_match:
                 remainder = updated[heading_match.end() :]
-                ul_open_match = re.search(r"<ul\b[^>]*>", remainder, flags=re.IGNORECASE)
+                ul_open_match = re.search(
+                    r"<ul\b[^>]*>", remainder, flags=re.IGNORECASE
+                )
                 if ul_open_match:
                     after_ul = remainder[ul_open_match.end() :]
                     ul_close_match = re.search(r"</ul>", after_ul, flags=re.IGNORECASE)
                     if ul_close_match:
-                        insert_at = heading_match.end() + ul_open_match.end() + ul_close_match.start()
-                        updated = updated[:insert_at] + f"\n  <li>{required_closer_html}</li>" + updated[insert_at:]
+                        insert_at = (
+                            heading_match.end()
+                            + ul_open_match.end()
+                            + ul_close_match.start()
+                        )
+                        updated = (
+                            updated[:insert_at]
+                            + f"\n  <li>{required_closer_html}</li>"
+                            + updated[insert_at:]
+                        )
                         closer_added = True
 
             if not closer_added:
-                fallback_closer_html = local_contact_activity_html if has_activity_feed_guidance else local_contact_html
+                fallback_closer_html = (
+                    local_contact_activity_html
+                    if has_activity_feed_guidance
+                    else local_contact_html
+                )
                 fallback_block = (
-                    "<p class=\"migration-checklist-closer\">"
+                    '<p class="migration-checklist-closer">'
                     "<strong>Module Checklist Reminder:</strong> "
                     f"{fallback_closer_html}"
                     "</p>"
                 )
                 body_close_match = re.search(r"</body>", updated, flags=re.IGNORECASE)
                 if body_close_match:
-                    updated = updated[: body_close_match.start()] + fallback_block + "\n" + updated[body_close_match.start() :]
+                    updated = (
+                        updated[: body_close_match.start()]
+                        + fallback_block
+                        + "\n"
+                        + updated[body_close_match.start() :]
+                    )
                 else:
                     updated = updated + "\n" + fallback_block
                 closer_added = True
@@ -2245,7 +2480,9 @@ def apply_best_practice_enforcer(
                 if rel_match is None:
                     tag = tag[:-1] + ' rel="noopener noreferrer">'
                 else:
-                    rel_tokens = [token for token in rel_match.group("rel").split() if token]
+                    rel_tokens = [
+                        token for token in rel_match.group("rel").split() if token
+                    ]
                     rel_lower = {token.lower() for token in rel_tokens}
                     updated_tokens = list(rel_tokens)
                     if "noopener" not in rel_lower:
@@ -2276,7 +2513,9 @@ def apply_best_practice_enforcer(
     return updated, applied
 
 
-def detect_manual_review_issues(content: str, triggers: Iterable[ManualTrigger]) -> list[ManualReviewIssue]:
+def detect_manual_review_issues(
+    content: str, triggers: Iterable[ManualTrigger]
+) -> list[ManualReviewIssue]:
     issues: list[ManualReviewIssue] = []
     for trigger in triggers:
         pattern = re.compile(trigger.pattern, flags=_re_flags(trigger.flags))
@@ -2300,7 +2539,9 @@ def check_template_heuristics(
     normalized_file = file_path.lower()
 
     # Instructor note placeholders should be resolved before release.
-    if applied_policy.check_instructor_notes and re.search(r"\[\s*instructor note\s*:", content, flags=re.IGNORECASE):
+    if applied_policy.check_instructor_notes and re.search(
+        r"\[\s*instructor note\s*:", content, flags=re.IGNORECASE
+    ):
         issues.append(
             ManualReviewIssue(
                 reason="Instructor Note placeholder remains in content",
@@ -2344,7 +2585,9 @@ def check_template_heuristics(
         "introduction and checklist" in lowered
         or "introduction-and-checklist" in normalized_file
     )
-    required_mc_closer = "contact your instructor with any questions or post in the course q&a"
+    required_mc_closer = (
+        "contact your instructor with any questions or post in the course q&a"
+    )
     acceptable_local_closer = "contact your instructor with any course questions."
     if (
         applied_policy.require_mc_closing_bullet
@@ -2367,10 +2610,16 @@ def check_accessibility_heuristics(content: str) -> list[ManualReviewIssue]:
 
     for match in re.finditer(r"<img\b[^>]*>", content, flags=re.IGNORECASE):
         img_tag = match.group(0)
-        alt_match = re.search(r"\balt\s*=\s*([\"'])(.*?)\1", img_tag, flags=re.IGNORECASE | re.DOTALL)
+        alt_match = re.search(
+            r"\balt\s*=\s*([\"'])(.*?)\1", img_tag, flags=re.IGNORECASE | re.DOTALL
+        )
         is_presentational = bool(
-            re.search(r'\brole\s*=\s*(["\'])presentation\1', img_tag, flags=re.IGNORECASE)
-            or re.search(r'\baria-hidden\s*=\s*(["\'])true\1', img_tag, flags=re.IGNORECASE)
+            re.search(
+                r'\brole\s*=\s*(["\'])presentation\1', img_tag, flags=re.IGNORECASE
+            )
+            or re.search(
+                r'\baria-hidden\s*=\s*(["\'])true\1', img_tag, flags=re.IGNORECASE
+            )
         )
         if alt_match is None:
             issues.append(
@@ -2400,9 +2649,15 @@ def check_accessibility_heuristics(content: str) -> list[ManualReviewIssue]:
                 )
             )
 
-    for table_match in re.finditer(r"<table\b.*?</table>", content, flags=re.IGNORECASE | re.DOTALL):
+    for table_match in re.finditer(
+        r"<table\b.*?</table>", content, flags=re.IGNORECASE | re.DOTALL
+    ):
         table_html = table_match.group(0)
-        caption_match = re.search(r"<caption\b[^>]*>(?P<body>.*?)</caption>", table_html, flags=re.IGNORECASE | re.DOTALL)
+        caption_match = re.search(
+            r"<caption\b[^>]*>(?P<body>.*?)</caption>",
+            table_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         if caption_match is None or not _plain_text(caption_match.group("body")):
             issues.append(
                 ManualReviewIssue(
@@ -2411,7 +2666,9 @@ def check_accessibility_heuristics(content: str) -> list[ManualReviewIssue]:
                 )
             )
 
-    for link_match in re.finditer(r"<a\b[^>]*>(.*?)</a>", content, flags=re.IGNORECASE | re.DOTALL):
+    for link_match in re.finditer(
+        r"<a\b[^>]*>(.*?)</a>", content, flags=re.IGNORECASE | re.DOTALL
+    ):
         visible_text = re.sub(r"<[^>]+>", "", link_match.group(1))
         if visible_text.strip().lower() in {"click here", "here", "learn more", "more"}:
             issues.append(
@@ -2420,5 +2677,98 @@ def check_accessibility_heuristics(content: str) -> list[ManualReviewIssue]:
                     evidence=visible_text.strip()[:120],
                 )
             )
+
+    return issues
+
+
+def detect_layout_breaking_issues(content: str) -> list[ManualReviewIssue]:
+    """Detect inline CSS layout patterns that Canvas may strip or break.
+
+    Wraps :func:`css_parser.find_layout_breaking_elements` and converts each
+    :class:`~css_parser.LayoutIssue` to a :class:`ManualReviewIssue` so the
+    results flow naturally into the existing pipeline reporting infrastructure.
+
+    Only elements whose layout intent is *notable* (i.e. LayoutIntent.is_notable()
+    returns True) are returned.  Patterns already handled deterministically by
+    the sanitiser (image align/hspace/vspace, Bootstrap utility classes) are
+    excluded to prevent double-reporting.
+
+    Args:
+        content: Full HTML document string (post-sanitisation).
+
+    Returns:
+        List of :class:`ManualReviewIssue` objects.
+    """
+    issues: list[ManualReviewIssue] = []
+    for layout_issue in find_layout_breaking_elements(content):
+        reason = (
+            "Layout-breaking CSS detected"
+            if layout_issue.intent.is_breaking()
+            else "Layout CSS may render differently in Canvas"
+        )
+        issues.append(
+            ManualReviewIssue(
+                reason=reason,
+                evidence=f"{layout_issue.description} — {layout_issue.tag_html[:120]}",
+            )
+        )
+    return issues
+
+
+# Known LTI tool domains whose embed URLs require reconfiguration after migration.
+_LTI_TOOL_DOMAIN_MAP: dict[str, str] = {
+    "panopto.com": "Panopto",
+    "instructuremedia.com": "Canvas Studio",
+    "studio.canvas.com": "Canvas Studio",
+    "kaltura.com": "Kaltura",
+    "yuja.com": "YuJa",
+}
+
+
+def detect_lti_embed_issues(content: str) -> list[ManualReviewIssue]:
+    """Detect embedded LTI tool references that require post-migration reconfiguration.
+
+    Canvas LTI integrations (Panopto, Studio, Kaltura, etc.) use institution-specific
+    launch URLs.  When importing from D2L these src URLs will not resolve in Canvas.
+    Flagging them gives instructors a guided checklist item for each affected page.
+
+    One issue is reported per unique tool type per page to avoid noise when multiple
+    embeds of the same tool appear on a single page.
+
+    Args:
+        content: Full HTML document string.
+
+    Returns:
+        List of :class:`ManualReviewIssue` objects, one per distinct LTI tool found.
+    """
+    issues: list[ManualReviewIssue] = []
+    seen_tools: set[str] = set()
+
+    for iframe_match in re.finditer(
+        r"<iframe\b[^>]*>", content, flags=re.IGNORECASE | re.DOTALL
+    ):
+        tag = iframe_match.group(0)
+        # Prefer src, fall back to data-mce-src (Brightspace rich-text editor artifact).
+        src_match = re.search(
+            r'\bsrc\s*=\s*["\']([^"\']*)["\']', tag, flags=re.IGNORECASE
+        ) or re.search(
+            r'\bdata-mce-src\s*=\s*["\']([^"\']*)["\']', tag, flags=re.IGNORECASE
+        )
+        if not src_match:
+            continue
+
+        src = src_match.group(1).lower()
+        for domain, tool_name in _LTI_TOOL_DOMAIN_MAP.items():
+            if domain in src and tool_name not in seen_tools:
+                seen_tools.add(tool_name)
+                issues.append(
+                    ManualReviewIssue(
+                        reason=(
+                            f"LTI tool embed ({tool_name}) — verify launch URL after migration"
+                        ),
+                        evidence=tag[:240],
+                    )
+                )
+                break
 
     return issues

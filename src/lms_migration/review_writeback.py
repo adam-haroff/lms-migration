@@ -15,13 +15,16 @@ from .html_tools import (
     apply_best_practice_enforcer,
     apply_canvas_sanitizer,
     check_accessibility_heuristics,
+    detect_lti_embed_issues,
     detect_manual_review_issues,
 )
 from .policy_profiles import get_policy_profile
 from .rules import load_rules
 
 
-_BODY_RE = re.compile(r"(<body\b[^>]*>)(?P<body>.*?)(</body>)", flags=re.IGNORECASE | re.DOTALL)
+_BODY_RE = re.compile(
+    r"(<body\b[^>]*>)(?P<body>.*?)(</body>)", flags=re.IGNORECASE | re.DOTALL
+)
 
 
 @dataclass(frozen=True)
@@ -66,7 +69,9 @@ def _replace_body_html(document_html: str, body_html: str) -> str:
 def _default_output_zip_path(converted_zip: Path) -> Path:
     name = converted_zip.name
     if name.endswith(".canvas-ready.zip"):
-        return converted_zip.with_name(name.replace(".canvas-ready.zip", ".canvas-reviewed.zip"))
+        return converted_zip.with_name(
+            name.replace(".canvas-ready.zip", ".canvas-reviewed.zip")
+        )
     if name.endswith(".zip"):
         return converted_zip.with_name(name[:-4] + ".reviewed.zip")
     return converted_zip.with_name(name + ".reviewed.zip")
@@ -193,13 +198,18 @@ def apply_review_draft(
                     ),
                 )
                 applied_changes.extend(best_practice_changes)
-                best_practice_change_total += sum(change.count for change in best_practice_changes)
+                best_practice_change_total += sum(
+                    change.count for change in best_practice_changes
+                )
 
             manual_issues = (
-                detect_manual_review_issues(updated_document, rules.manual_review_triggers)
+                detect_manual_review_issues(
+                    updated_document, rules.manual_review_triggers
+                )
                 if rules is not None
                 else []
             )
+            manual_issues.extend(detect_lti_embed_issues(updated_document))
             accessibility_issues = check_accessibility_heuristics(updated_document)
 
             manual_issue_total += len(manual_issues)
@@ -214,7 +224,8 @@ def apply_review_draft(
                 {
                     "path": relative_path,
                     "status": "updated" if document_changed else "unchanged",
-                    "edited_body_changed": edited_body_html.strip() != original_body_html.strip(),
+                    "edited_body_changed": edited_body_html.strip()
+                    != original_body_html.strip(),
                     "manual_review_issues": [
                         {"reason": issue.reason, "evidence": issue.evidence}
                         for issue in manual_issues
@@ -301,9 +312,21 @@ def main() -> None:
         prog="lms-review-writeback",
         description="Apply a deterministic review draft back into a converted Canvas package.",
     )
-    parser.add_argument("--draft-json", type=Path, required=True, help="Review draft JSON exported from the workbench")
-    parser.add_argument("--converted-zip", type=Path, required=True, help="Converted canvas-ready zip")
-    parser.add_argument("--rules", type=Path, default=None, help="Optional rules JSON used for manual-review triggers")
+    parser.add_argument(
+        "--draft-json",
+        type=Path,
+        required=True,
+        help="Review draft JSON exported from the workbench",
+    )
+    parser.add_argument(
+        "--converted-zip", type=Path, required=True, help="Converted canvas-ready zip"
+    )
+    parser.add_argument(
+        "--rules",
+        type=Path,
+        default=None,
+        help="Optional rules JSON used for manual-review triggers",
+    )
     parser.add_argument(
         "--policy-profile",
         default="strict",
@@ -353,9 +376,24 @@ def main() -> None:
         action="store_true",
         help="Skip the best-practice enforcer during write-back",
     )
-    parser.add_argument("--output-zip", type=Path, default=None, help="Optional reviewed zip output path")
-    parser.add_argument("--output-json", type=Path, default=None, help="Optional write-back report JSON path")
-    parser.add_argument("--output-markdown", type=Path, default=None, help="Optional write-back report Markdown path")
+    parser.add_argument(
+        "--output-zip",
+        type=Path,
+        default=None,
+        help="Optional reviewed zip output path",
+    )
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        default=None,
+        help="Optional write-back report JSON path",
+    )
+    parser.add_argument(
+        "--output-markdown",
+        type=Path,
+        default=None,
+        help="Optional write-back report Markdown path",
+    )
     args = parser.parse_args()
 
     result = apply_review_draft(
@@ -368,10 +406,14 @@ def main() -> None:
         accordion_handling=args.accordion_handling,
         accordion_alignment=args.accordion_align,
         accordion_flatten_hints=tuple(
-            token.strip().lower() for token in args.accordion_flatten_hints.split(",") if token.strip()
+            token.strip().lower()
+            for token in args.accordion_flatten_hints.split(",")
+            if token.strip()
         ),
         accordion_details_hints=tuple(
-            token.strip().lower() for token in args.accordion_details_hints.split(",") if token.strip()
+            token.strip().lower()
+            for token in args.accordion_details_hints.split(",")
+            if token.strip()
         ),
         apply_template_divider_standards=not args.disable_template_divider_standards,
         best_practice_enforcer=not args.disable_best_practice_enforcer,

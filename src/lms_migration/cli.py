@@ -123,6 +123,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="safe-block",
         help="How to handle large floated content images. safe-block avoids text overlap; preserve-wrap keeps optional wrapped-text layouts within safer width limits.",
     )
+    parser.add_argument(
+        "--template-merge",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply Phase 3 template shell merger: wrap module intro pages with the "
+            "standard template structure (star/bullseye/checkmark icons), merge the "
+            "D2L Welcome from Instructor page into the About the Instructor template, "
+            "and add standalone template pages (home, policies, resources). "
+            "Requires --template-package."
+        ),
+    )
     return parser
 
 
@@ -139,11 +151,18 @@ def main() -> None:
     if not args.policy_profiles.exists():
         parser.error(f"Policy profiles file does not exist: {args.policy_profiles}")
     if args.reference_audit_json is not None and not args.reference_audit_json.exists():
-        parser.error(f"Reference audit file does not exist: {args.reference_audit_json}")
+        parser.error(
+            f"Reference audit file does not exist: {args.reference_audit_json}"
+        )
     if args.template_package is not None and not args.template_package.exists():
         parser.error(f"Template package does not exist: {args.template_package}")
-    if args.template_alias_map_json is not None and not args.template_alias_map_json.exists():
-        parser.error(f"Template alias map JSON does not exist: {args.template_alias_map_json}")
+    if (
+        args.template_alias_map_json is not None
+        and not args.template_alias_map_json.exists()
+    ):
+        parser.error(
+            f"Template alias map JSON does not exist: {args.template_alias_map_json}"
+        )
 
     try:
         result = run_migration(
@@ -160,16 +179,23 @@ def main() -> None:
             accordion_handling=args.accordion_handling,
             accordion_alignment=args.accordion_align,
             accordion_flatten_hints=tuple(
-                token.strip().lower() for token in args.accordion_flatten_hints.split(",") if token.strip()
+                token.strip().lower()
+                for token in args.accordion_flatten_hints.split(",")
+                if token.strip()
             ),
             accordion_details_hints=tuple(
-                token.strip().lower() for token in args.accordion_details_hints.split(",") if token.strip()
+                token.strip().lower()
+                for token in args.accordion_details_hints.split(",")
+                if token.strip()
             ),
             apply_template_module_structure=not bool(args.no_template_module_structure),
             apply_template_visual_standards=not bool(args.no_template_visual_standards),
             apply_template_color_standards=not bool(args.no_template_color_standards),
-            apply_template_divider_standards=not bool(args.no_template_divider_standards),
+            apply_template_divider_standards=not bool(
+                args.no_template_divider_standards
+            ),
             image_layout_mode=args.image_layout_mode,
+            template_merge=bool(args.template_merge),
         )
     except ValueError as exc:
         parser.error(str(exc))

@@ -25,12 +25,15 @@ from .html_tools import (
     apply_replacements,
     check_accessibility_heuristics,
     check_template_heuristics,
+    detect_layout_breaking_issues,
+    detect_lti_embed_issues,
     detect_manual_review_issues,
     neutralize_legacy_d2l_hrefs_in_markup,
     repair_missing_local_references,
 )
 from .policy_profiles import PolicyProfile, get_policy_profile
 from .rules import load_rules
+from .template_merger import run_template_merge
 from .template_overlay import (
     TemplateOverlayConfig,
     apply_template_overlay,
@@ -105,13 +108,19 @@ def _normalize_compare_text(value: str) -> str:
     return lowered
 
 
-def _remove_leading_duplicate_title_block(fragment: str, title_text: str) -> tuple[str, int]:
+def _remove_leading_duplicate_title_block(
+    fragment: str, title_text: str
+) -> tuple[str, int]:
     normalized_title = _normalize_compare_text(title_text)
     if not normalized_title:
         return fragment, 0
 
     def _tokenize(value: str) -> list[str]:
-        return [token for token in value.split(" ") if token and token not in {"the", "a", "an"}]
+        return [
+            token
+            for token in value.split(" ")
+            if token and token not in {"the", "a", "an"}
+        ]
 
     def _is_duplicate(block_text: str, expected_title: str) -> bool:
         normalized_block = _normalize_compare_text(block_text)
@@ -173,12 +182,12 @@ def _resource_href_map(manifest_root: ET.Element) -> dict[str, str]:
 
 
 def _append_html_fragment(existing_html: str, fragment: str) -> str:
-    separator = (
-        '\n<hr style="border: 0; height: 2px; background-color: #ac1a2f; width: 100%; margin: 16px 0;">\n'
-    )
+    separator = '\n<hr style="border: 0; height: 2px; background-color: #ac1a2f; width: 100%; margin: 16px 0;">\n'
     payload = f"{separator}{fragment.strip()}\n"
     if re.search(r"</body>", existing_html, flags=re.IGNORECASE):
-        return re.sub(r"</body>", payload + "</body>", existing_html, count=1, flags=re.IGNORECASE)
+        return re.sub(
+            r"</body>", payload + "</body>", existing_html, count=1, flags=re.IGNORECASE
+        )
     return existing_html.rstrip() + "\n" + payload
 
 
@@ -216,10 +225,14 @@ def _normalize_module_checklist_wording(fragment: str) -> str:
 
 def _is_intro_objectives_page(file_path: str) -> bool:
     normalized = file_path.replace("\\", "/").lower()
-    return bool(re.search(r"topic\s*\d+/introduction and objectives\.html$", normalized))
+    return bool(
+        re.search(r"topic\s*\d+/introduction and objectives\.html$", normalized)
+    )
 
 
-_MODULE_NUMBERED_TITLE_RE = re.compile(r"^\s*Module\s*0*(?P<number>\d+)\s*:\s*(?P<label>.+?)\s*$", flags=re.IGNORECASE)
+_MODULE_NUMBERED_TITLE_RE = re.compile(
+    r"^\s*Module\s*0*(?P<number>\d+)\s*:\s*(?P<label>.+?)\s*$", flags=re.IGNORECASE
+)
 _START_HERE_TITLE = "Start Here"
 _INSTRUCTOR_MODULE_TITLE = "Instructor Module (Do Not Publish)"
 _START_HERE_CARRYOVER_TITLE = "D2L Start Here Carryover (Manual Placement)"
@@ -302,7 +315,10 @@ def _classify_numbered_module_child(title_text: str) -> str:
         return "subheader_activities"
     if normalized == "review":
         return "subheader_review"
-    if "introduction and objectives" in normalized or "introduction and checklist" in normalized:
+    if (
+        "introduction and objectives" in normalized
+        or "introduction and checklist" in normalized
+    ):
         return "overview_intro"
     if normalized.startswith("introduction"):
         return "overview_intro"
@@ -312,7 +328,10 @@ def _classify_numbered_module_child(title_text: str) -> str:
         return "overview_lesson"
     if normalized == "module review" or normalized.endswith(" review"):
         return "review_page"
-    if any(token in normalized for token in ("discussion", "assignment", "quiz", "test", "survey", "exam")):
+    if any(
+        token in normalized
+        for token in ("discussion", "assignment", "quiz", "test", "survey", "exam")
+    ):
         return "activity"
     return "activity"
 
@@ -333,11 +352,15 @@ def _normalize_canvas_title_delimiters(value: str) -> tuple[str, bool]:
         return normalized_value, False
 
     prefix = parts[0]
-    label_number_match = re.match(r"^(?P<label>[A-Za-z ]+):\s*(?P<number>\d+)\s*$", prefix)
+    label_number_match = re.match(
+        r"^(?P<label>[A-Za-z ]+):\s*(?P<number>\d+)\s*$", prefix
+    )
     if label_number_match is not None:
         prefix = f"{label_number_match.group('label').strip()} {label_number_match.group('number').strip()}".strip()
     normalized_prefix = _normalize_compare_text(prefix)
-    if not any(normalized_prefix.startswith(hint) for hint in _TITLE_DELIMITER_PREFIX_HINTS):
+    if not any(
+        normalized_prefix.startswith(hint) for hint in _TITLE_DELIMITER_PREFIX_HINTS
+    ):
         return normalized_value, False
 
     suffix = " ".join(parts[1:]).strip()
@@ -380,13 +403,17 @@ def _normalize_manifest_item_title_delimiters(root: ET.Element) -> int:
     return renamed
 
 
-def _template_module_child_title(*, module_number: int, original_title: str, kind: str) -> str:
+def _template_module_child_title(
+    *, module_number: int, original_title: str, kind: str
+) -> str:
     if kind == "overview_intro":
         return f"Module {module_number}: Introduction and Checklist"
     if kind == "overview_learning":
         return f"Module {module_number}: Learning Activities"
     if kind == "overview_lesson":
-        tail = _strip_title_prefix(original_title, r"^\s*lesson(?:\s*page)?\s*(?:\||:|-)?\s*")
+        tail = _strip_title_prefix(
+            original_title, r"^\s*lesson(?:\s*page)?\s*(?:\||:|-)?\s*"
+        )
         if not tail:
             tail = "[Title]"
         return f"Module {module_number}: Lesson {tail}"
@@ -405,7 +432,9 @@ def _template_module_child_title(*, module_number: int, original_title: str, kin
             tail = "[Title Here]"
         return f"Module {module_number}: Assignment {tail}"
     if any(token in normalized for token in ("quiz", "test", "survey", "exam")):
-        tail = _strip_title_prefix(original_title, r"^\s*(?:quiz|test|survey|exam)\s*(?:\||:|-)?\s*")
+        tail = _strip_title_prefix(
+            original_title, r"^\s*(?:quiz|test|survey|exam)\s*(?:\||:|-)?\s*"
+        )
         if not tail:
             tail = "[Title Here]"
         return f"Quiz: {tail}"
@@ -424,7 +453,9 @@ def _apply_template_module_structure_to_organization(
     reordered_modules = 0
     inserted_subheaders = 0
 
-    for top_item in [child for child in list(organization) if _local_name(child.tag) == "item"]:
+    for top_item in [
+        child for child in list(organization) if _local_name(child.tag) == "item"
+    ]:
         top_title_element, top_title = _extract_item_title(top_item)
         if top_title_element is None:
             continue
@@ -441,10 +472,9 @@ def _apply_template_module_structure_to_organization(
                 if preserve_template_shell_modules
                 else _INSTRUCTOR_MODULE_TITLE
             )
-        elif (
-            top_normalized.startswith("course overview")
-            or top_normalized == _normalize_compare_text(_START_HERE_TITLE)
-        ):
+        elif top_normalized.startswith(
+            "course overview"
+        ) or top_normalized == _normalize_compare_text(_START_HERE_TITLE):
             desired_top_title = (
                 _START_HERE_CARRYOVER_TITLE
                 if preserve_template_shell_modules
@@ -458,8 +488,12 @@ def _apply_template_module_structure_to_organization(
         delimiter_title_renames += _normalize_child_item_title_delimiters(top_item)
         module_number = _module_number_from_title(top_title)
         if module_number is None:
-            top_child_items = [child for child in list(top_item) if _local_name(child.tag) == "item"]
-            top_child_titles = [_extract_item_title(child)[1] for child in top_child_items]
+            top_child_items = [
+                child for child in list(top_item) if _local_name(child.tag) == "item"
+            ]
+            top_child_titles = [
+                _extract_item_title(child)[1] for child in top_child_items
+            ]
             normalized_top_title = _normalize_compare_text(top_title)
 
             if preserve_template_shell_modules and normalized_top_title in {
@@ -470,7 +504,8 @@ def _apply_template_module_structure_to_organization(
 
             if normalized_top_title == _normalize_compare_text(_START_HERE_TITLE):
                 has_support_subheader = any(
-                    _normalize_compare_text(child_title) == _normalize_compare_text("Canvas Support Resources")
+                    _normalize_compare_text(child_title)
+                    == _normalize_compare_text("Canvas Support Resources")
                     for child_title in top_child_titles
                 )
                 if not has_support_subheader and top_child_items:
@@ -499,9 +534,12 @@ def _apply_template_module_structure_to_organization(
                         reordered_modules += 1
                         inserted_subheaders += 1
 
-            if normalized_top_title == _normalize_compare_text(_INSTRUCTOR_MODULE_TITLE):
+            if normalized_top_title == _normalize_compare_text(
+                _INSTRUCTOR_MODULE_TITLE
+            ):
                 has_about_subheader = any(
-                    _normalize_compare_text(child_title) == _normalize_compare_text("About This Template")
+                    _normalize_compare_text(child_title)
+                    == _normalize_compare_text("About This Template")
                     for child_title in top_child_titles
                 )
                 if not has_about_subheader and top_child_items:
@@ -520,7 +558,9 @@ def _apply_template_module_structure_to_organization(
                     inserted_subheaders += 1
             continue
 
-        child_items = [child for child in list(top_item) if _local_name(child.tag) == "item"]
+        child_items = [
+            child for child in list(top_item) if _local_name(child.tag) == "item"
+        ]
         if not child_items:
             continue
 
@@ -653,7 +693,11 @@ def _build_issue_summary(file_results: list[FileResult]) -> dict:
             )
 
     file_issue_rows.sort(
-        key=lambda row: (-int(row["total_issues"]), -int(row["manual_review_issues"]), str(row["path"]))
+        key=lambda row: (
+            -int(row["total_issues"]),
+            -int(row["manual_review_issues"]),
+            str(row["path"]),
+        )
     )
 
     return {
@@ -710,7 +754,9 @@ def _build_report(
     total_files = len(file_results)
     changed_files = sum(1 for result in file_results if result.changed)
 
-    change_count = sum(change.count for result in file_results for change in result.applied_changes)
+    change_count = sum(
+        change.count for result in file_results for change in result.applied_changes
+    )
     manual_issue_count = sum(len(result.manual_issues) for result in file_results)
     a11y_issue_count = sum(len(result.a11y_issues) for result in file_results)
     issue_summary = _build_issue_summary(file_results)
@@ -801,10 +847,16 @@ def _load_reference_alignment(reference_audit_json: Path | None) -> dict | None:
     return {
         "source_file": str(reference_audit_json),
         "critical_gap_count": len(critical_gaps),
-        "critical_gap_ids": [str(gap.get("id", "")).strip() for gap in critical_gaps if isinstance(gap, dict)],
+        "critical_gap_ids": [
+            str(gap.get("id", "")).strip()
+            for gap in critical_gaps
+            if isinstance(gap, dict)
+        ],
         "best_practice_action_needed_count": len(action_needed),
         "best_practice_action_needed_ids": [
-            str(row.get("id", "")).strip() for row in action_needed if isinstance(row, dict)
+            str(row.get("id", "")).strip()
+            for row in action_needed
+            if isinstance(row, dict)
         ],
         "template_placeholder_patterns_detected": [str(item) for item in placeholders],
         "module_checklist_required_closer_present": bool(
@@ -891,14 +943,16 @@ def _write_markdown_report(report: dict, output_path: Path) -> None:
 
     lines.extend(
         [
-        "## Files With Issues",
-        "",
+            "## Files With Issues",
+            "",
         ]
     )
 
     issue_file_count = 0
     for file_entry in report["files"]:
-        has_issues = file_entry["manual_review_issues"] or file_entry["accessibility_issues"]
+        has_issues = (
+            file_entry["manual_review_issues"] or file_entry["accessibility_issues"]
+        )
         if not has_issues:
             continue
         issue_file_count += 1
@@ -922,10 +976,16 @@ def _write_markdown_report(report: dict, output_path: Path) -> None:
                 f"{reference_alignment.get('module_checklist_required_closer_present', True)}",
             ]
         )
-        critical_ids = [item for item in reference_alignment.get("critical_gap_ids", []) if item]
+        critical_ids = [
+            item for item in reference_alignment.get("critical_gap_ids", []) if item
+        ]
         if critical_ids:
             lines.append(f"- Critical gap IDs: {', '.join(critical_ids)}")
-        coverage_ids = [item for item in reference_alignment.get("best_practice_action_needed_ids", []) if item]
+        coverage_ids = [
+            item
+            for item in reference_alignment.get("best_practice_action_needed_ids", [])
+            if item
+        ]
         if coverage_ids:
             lines.append(f"- Coverage action IDs: {', '.join(coverage_ids)}")
 
@@ -962,7 +1022,9 @@ def _write_manual_review_csv(file_results: list[FileResult], output_path: Path) 
                 )
 
 
-def _write_preflight_checklist(report: dict, profile: PolicyProfile, output_path: Path) -> None:
+def _write_preflight_checklist(
+    report: dict, profile: PolicyProfile, output_path: Path
+) -> None:
     summary = report["summary"]
     manual_counts = Counter()
     a11y_counts = Counter()
@@ -999,7 +1061,9 @@ def _write_preflight_checklist(report: dict, profile: PolicyProfile, output_path
         for item in profile.preflight_items:
             lines.append(f"- [ ] {item}")
     else:
-        lines.append("- [ ] Review manual findings and accessibility findings before release.")
+        lines.append(
+            "- [ ] Review manual findings and accessibility findings before release."
+        )
 
     lines.extend(["", "## Findings-Based Follow-Up", ""])
     if manual_counts:
@@ -1023,15 +1087,29 @@ def _write_preflight_checklist(report: dict, profile: PolicyProfile, output_path
         lines.extend(["## Reference Alignment Follow-Up", ""])
         critical_gaps = int(reference_alignment.get("critical_gap_count", 0))
         if critical_gaps > 0:
-            lines.append(f"- [ ] Resolve `{critical_gaps}` critical instruction gap(s) identified in reference audit.")
-        action_needed = int(reference_alignment.get("best_practice_action_needed_count", 0))
+            lines.append(
+                f"- [ ] Resolve `{critical_gaps}` critical instruction gap(s) identified in reference audit."
+            )
+        action_needed = int(
+            reference_alignment.get("best_practice_action_needed_count", 0)
+        )
         if action_needed > 0:
-            lines.append(f"- [ ] Add migration rule/check coverage for `{action_needed}` best-practice topic(s).")
-        if not bool(reference_alignment.get("module_checklist_required_closer_present", True)):
-            lines.append("- [ ] Update template/rules to enforce Module Checklist closing reminder.")
-        placeholders = reference_alignment.get("template_placeholder_patterns_detected", [])
+            lines.append(
+                f"- [ ] Add migration rule/check coverage for `{action_needed}` best-practice topic(s)."
+            )
+        if not bool(
+            reference_alignment.get("module_checklist_required_closer_present", True)
+        ):
+            lines.append(
+                "- [ ] Update template/rules to enforce Module Checklist closing reminder."
+            )
+        placeholders = reference_alignment.get(
+            "template_placeholder_patterns_detected", []
+        )
         if isinstance(placeholders, list) and placeholders:
-            lines.append("- [ ] Verify unresolved template placeholders are cleaned up before release.")
+            lines.append(
+                "- [ ] Verify unresolved template placeholders are cleaned up before release."
+            )
         if critical_gaps == 0 and action_needed == 0:
             lines.append("- [ ] Reference audit shows no unresolved governance gaps.")
         lines.append("")
@@ -1059,6 +1137,7 @@ def run_migration(
     apply_template_color_standards: bool = True,
     apply_template_divider_standards: bool = True,
     image_layout_mode: str = "safe-block",
+    template_merge: bool = False,
 ) -> MigrationOutput:
     rules = load_rules(rules_path)
     policy_profile = get_policy_profile(policy_profile_id, policy_profiles_path)
@@ -1079,8 +1158,10 @@ def run_migration(
                 template_package=template_package,
                 alias_map_json_path=template_alias_map_json,
                 apply_visual_standards=apply_template_visual_standards,
-                apply_color_standards=apply_template_visual_standards and apply_template_color_standards,
-                apply_divider_standards=apply_template_visual_standards and apply_template_divider_standards,
+                apply_color_standards=apply_template_visual_standards
+                and apply_template_color_standards,
+                apply_divider_standards=apply_template_visual_standards
+                and apply_template_divider_standards,
                 image_layout_mode=image_layout_mode,
             )
         )
@@ -1102,7 +1183,9 @@ def run_migration(
         manifest_found = any(unpack_dir.rglob("imsmanifest.xml"))
 
         html_files = [
-            path for path in unpack_dir.rglob("*") if path.suffix.lower() in {".html", ".htm"}
+            path
+            for path in unpack_dir.rglob("*")
+            if path.suffix.lower() in {".html", ".htm"}
         ]
         available_paths = {
             str(path.relative_to(unpack_dir).as_posix())
@@ -1130,7 +1213,9 @@ def run_migration(
             applied_changes: list[AppliedChange] = []
             relative_html_path = str(html_file.relative_to(unpack_dir).as_posix())
 
-            updated, replacement_changes = apply_replacements(updated, rules.replacements)
+            updated, replacement_changes = apply_replacements(
+                updated, rules.replacements
+            )
             applied_changes.extend(replacement_changes)
 
             updated, rewrite_changes = apply_link_rewrites(updated, rules.link_rewrites)
@@ -1138,10 +1223,12 @@ def run_migration(
 
             overlay_issues: list[ManualReviewIssue] = []
             if template_overlay_context is not None:
-                updated, overlay_changes, overlay_issues, overlay_file_summary = apply_template_overlay(
-                    updated,
-                    file_path=relative_html_path,
-                    context=template_overlay_context,
+                updated, overlay_changes, overlay_issues, overlay_file_summary = (
+                    apply_template_overlay(
+                        updated,
+                        file_path=relative_html_path,
+                        context=template_overlay_context,
+                    )
                 )
                 applied_changes.extend(overlay_changes)
                 template_overlay_file_summaries.append(overlay_file_summary)
@@ -1179,7 +1266,9 @@ def run_migration(
 
             if _is_intro_objectives_page(relative_html_path):
                 topic_phrase_hits = len(re.findall(r"(?i)\bthis topic\b", updated))
-                topic_ref_hits = len(re.findall(r"(?i)\btopic\s*0*\d+\s*(?:\||-|:)\s*", updated))
+                topic_ref_hits = len(
+                    re.findall(r"(?i)\btopic\s*0*\d+\s*(?:\||-|:)\s*", updated)
+                )
                 topic_phrase_hits += len(re.findall(r"(?i)\bthe topic\b", updated))
                 normalized_intro = _normalize_module_checklist_wording(updated)
                 if normalized_intro != updated:
@@ -1192,7 +1281,9 @@ def run_migration(
                         )
                     )
 
-            manual_issues = detect_manual_review_issues(updated, rules.manual_review_triggers)
+            manual_issues = detect_manual_review_issues(
+                updated, rules.manual_review_triggers
+            )
             manual_issues.extend(overlay_issues)
             if policy_profile.template_checks_enabled:
                 manual_issues.extend(
@@ -1207,6 +1298,8 @@ def run_migration(
                         ),
                     )
                 )
+            manual_issues.extend(detect_layout_breaking_issues(updated))
+            manual_issues.extend(detect_lti_embed_issues(updated))
             a11y_issues = check_accessibility_heuristics(updated)
 
             changed = updated != original
@@ -1224,9 +1317,7 @@ def run_migration(
             )
 
         d2l_xml_files = [
-            path
-            for path in unpack_dir.rglob("*_d2l.xml")
-            if path.is_file()
+            path for path in unpack_dir.rglob("*_d2l.xml") if path.is_file()
         ]
         for d2l_xml_file in d2l_xml_files:
             original_xml = _read_text(d2l_xml_file)
@@ -1271,12 +1362,16 @@ def run_migration(
                     )
                 )
 
-        manifest_paths = [path for path in unpack_dir.rglob("imsmanifest.xml") if path.is_file()]
+        manifest_paths = [
+            path for path in unpack_dir.rglob("imsmanifest.xml") if path.is_file()
+        ]
         for manifest_path in manifest_paths:
             tree = ET.parse(manifest_path)
             root = tree.getroot()
             manifest_changed = False
-            relative_manifest_path = str(manifest_path.relative_to(unpack_dir).as_posix())
+            relative_manifest_path = str(
+                manifest_path.relative_to(unpack_dir).as_posix()
+            )
 
             for item in root.iter():
                 if _local_name(item.tag) != "item":
@@ -1295,7 +1390,9 @@ def run_migration(
                 updated = original
                 applied_changes: list[AppliedChange] = []
 
-                updated, duplicate_title_count = _remove_leading_duplicate_title_block(updated, title_text)
+                updated, duplicate_title_count = _remove_leading_duplicate_title_block(
+                    updated, title_text
+                )
                 if duplicate_title_count:
                     applied_changes.append(
                         AppliedChange(
@@ -1305,18 +1402,24 @@ def run_migration(
                         )
                     )
 
-                updated, replacement_changes = apply_replacements(updated, rules.replacements)
+                updated, replacement_changes = apply_replacements(
+                    updated, rules.replacements
+                )
                 applied_changes.extend(replacement_changes)
 
-                updated, rewrite_changes = apply_link_rewrites(updated, rules.link_rewrites)
+                updated, rewrite_changes = apply_link_rewrites(
+                    updated, rules.link_rewrites
+                )
                 applied_changes.extend(rewrite_changes)
 
                 overlay_issues: list[ManualReviewIssue] = []
                 if template_overlay_context is not None:
-                    updated, overlay_changes, overlay_issues, overlay_file_summary = apply_template_overlay(
-                        updated,
-                        file_path=f"{relative_manifest_path}::item[{title_text or item.attrib.get('identifier', '')}]",
-                        context=template_overlay_context,
+                    updated, overlay_changes, overlay_issues, overlay_file_summary = (
+                        apply_template_overlay(
+                            updated,
+                            file_path=f"{relative_manifest_path}::item[{title_text or item.attrib.get('identifier', '')}]",
+                            context=template_overlay_context,
+                        )
                     )
                     applied_changes.extend(overlay_changes)
                     template_overlay_file_summaries.append(overlay_file_summary)
@@ -1349,7 +1452,9 @@ def run_migration(
                     )
                     applied_changes.extend(best_practice_changes)
 
-                manual_issues = detect_manual_review_issues(updated, rules.manual_review_triggers)
+                manual_issues = detect_manual_review_issues(
+                    updated, rules.manual_review_triggers
+                )
                 manual_issues.extend(overlay_issues)
                 if policy_profile.template_checks_enabled:
                     manual_issues.extend(
@@ -1364,6 +1469,8 @@ def run_migration(
                             ),
                         )
                     )
+                manual_issues.extend(detect_layout_breaking_issues(updated))
+                manual_issues.extend(detect_lti_embed_issues(updated))
                 a11y_issues = check_accessibility_heuristics(updated)
 
                 changed = updated != original
@@ -1390,8 +1497,16 @@ def run_migration(
                 "introduction & objectives",
                 "intro and objectives",
             }
-            for organization in [element for element in root.iter() if _local_name(element.tag) == "organization"]:
-                top_level_items = [child for child in list(organization) if _local_name(child.tag) == "item"]
+            for organization in [
+                element
+                for element in root.iter()
+                if _local_name(element.tag) == "organization"
+            ]:
+                top_level_items = [
+                    child
+                    for child in list(organization)
+                    if _local_name(child.tag) == "item"
+                ]
                 for module_item in top_level_items:
                     title_element, module_title = _extract_item_title(module_item)
                     if title_element is None or not module_title:
@@ -1408,13 +1523,21 @@ def run_migration(
                         manifest_changed = True
                         topic_title_renamed += 1
 
-                    module_description = (module_item.attrib.get("description") or "").strip()
+                    module_description = (
+                        module_item.attrib.get("description") or ""
+                    ).strip()
                     if not module_description or "<" not in module_description:
                         continue
-                    module_description = _normalize_module_checklist_wording(module_description)
+                    module_description = _normalize_module_checklist_wording(
+                        module_description
+                    )
 
                     intro_item: ET.Element | None = None
-                    for child_item in [child for child in list(module_item) if _local_name(child.tag) == "item"]:
+                    for child_item in [
+                        child
+                        for child in list(module_item)
+                        if _local_name(child.tag) == "item"
+                    ]:
                         _, child_title = _extract_item_title(child_item)
                         normalized_child_title = _normalize_compare_text(child_title)
                         if normalized_child_title in intro_title_candidates:
@@ -1423,12 +1546,16 @@ def run_migration(
                     if intro_item is None:
                         continue
 
-                    intro_identifier = (intro_item.attrib.get("identifierref") or "").strip()
+                    intro_identifier = (
+                        intro_item.attrib.get("identifierref") or ""
+                    ).strip()
                     intro_href = resource_hrefs.get(intro_identifier, "")
                     if not intro_href:
                         continue
 
-                    intro_html_path = manifest_path.parent / Path(intro_href.replace("\\", "/"))
+                    intro_html_path = manifest_path.parent / Path(
+                        intro_href.replace("\\", "/")
+                    )
                     if not intro_html_path.exists() or not intro_html_path.is_file():
                         continue
 
@@ -1441,7 +1568,9 @@ def run_migration(
                         topic_description_merged += 1
                         continue
 
-                    intro_updated = _append_html_fragment(intro_original, module_description)
+                    intro_updated = _append_html_fragment(
+                        intro_original, module_description
+                    )
                     intro_applied_changes: list[AppliedChange] = [
                         AppliedChange(
                             category="structure",
@@ -1450,7 +1579,9 @@ def run_migration(
                         )
                     ]
                     intro_overlay_issues: list[ManualReviewIssue] = []
-                    intro_relative_path = str(intro_html_path.relative_to(unpack_dir).as_posix())
+                    intro_relative_path = str(
+                        intro_html_path.relative_to(unpack_dir).as_posix()
+                    )
 
                     if template_overlay_context is not None:
                         (
@@ -1464,7 +1595,9 @@ def run_migration(
                             context=template_overlay_context,
                         )
                         intro_applied_changes.extend(intro_overlay_changes)
-                        template_overlay_file_summaries.append(intro_overlay_file_summary)
+                        template_overlay_file_summaries.append(
+                            intro_overlay_file_summary
+                        )
 
                     intro_updated, intro_sanitizer_changes = apply_canvas_sanitizer(
                         intro_updated,
@@ -1474,23 +1607,27 @@ def run_migration(
                     intro_applied_changes.extend(intro_sanitizer_changes)
 
                     if sanitizer_policy.repair_missing_local_references:
-                        intro_updated, intro_repaired_ref_changes = repair_missing_local_references(
-                            intro_updated,
-                            file_path=intro_relative_path,
-                            available_paths=available_paths,
-                            keep_alt_text_for_missing_images=sanitizer_policy.use_alt_text_for_removed_template_images,
+                        intro_updated, intro_repaired_ref_changes = (
+                            repair_missing_local_references(
+                                intro_updated,
+                                file_path=intro_relative_path,
+                                available_paths=available_paths,
+                                keep_alt_text_for_missing_images=sanitizer_policy.use_alt_text_for_removed_template_images,
+                            )
                         )
                         intro_applied_changes.extend(intro_repaired_ref_changes)
 
                     if best_practice_enforcer:
-                        intro_updated, intro_best_practice_changes = apply_best_practice_enforcer(
-                            intro_updated,
-                            file_path=intro_relative_path,
-                            policy=BestPracticeEnforcerPolicy(
-                                enabled=True,
-                                enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
-                                ensure_external_links_new_tab=True,
-                            ),
+                        intro_updated, intro_best_practice_changes = (
+                            apply_best_practice_enforcer(
+                                intro_updated,
+                                file_path=intro_relative_path,
+                                policy=BestPracticeEnforcerPolicy(
+                                    enabled=True,
+                                    enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
+                                    ensure_external_links_new_tab=True,
+                                ),
+                            )
                         )
                         intro_applied_changes.extend(intro_best_practice_changes)
 
@@ -1517,6 +1654,10 @@ def run_migration(
                                 ),
                             )
                         )
+                    intro_manual_issues.extend(
+                        detect_layout_breaking_issues(intro_updated)
+                    )
+                    intro_manual_issues.extend(detect_lti_embed_issues(intro_updated))
                     intro_a11y_issues = check_accessibility_heuristics(intro_updated)
 
                     _upsert_file_result(
@@ -1569,14 +1710,19 @@ def run_migration(
                 manifest_item_identifiers = {
                     (element.attrib.get("identifier") or "").strip()
                     for element in root.iter()
-                    if _local_name(element.tag) == "item" and (element.attrib.get("identifier") or "").strip()
+                    if _local_name(element.tag) == "item"
+                    and (element.attrib.get("identifier") or "").strip()
                 }
                 top_level_renames = 0
                 child_title_renames = 0
                 delimiter_title_renames = 0
                 reordered_modules = 0
                 inserted_subheaders = 0
-                for organization in [element for element in root.iter() if _local_name(element.tag) == "organization"]:
+                for organization in [
+                    element
+                    for element in root.iter()
+                    if _local_name(element.tag) == "organization"
+                ]:
                     (
                         org_top_level_renames,
                         org_child_title_renames,
@@ -1593,7 +1739,9 @@ def run_migration(
                     delimiter_title_renames += org_delimiter_title_renames
                     reordered_modules += org_reordered_modules
                     inserted_subheaders += org_inserted_subheaders
-                delimiter_title_renames += _normalize_manifest_item_title_delimiters(root)
+                delimiter_title_renames += _normalize_manifest_item_title_delimiters(
+                    root
+                )
 
                 if top_level_renames:
                     manifest_changed = True
@@ -1605,7 +1753,7 @@ def run_migration(
                                 AppliedChange(
                                     category="structure",
                                     description=(
-                                        'Staged D2L overview/instructor modules for manual placement so template shell modules stay intact'
+                                        "Staged D2L overview/instructor modules for manual placement so template shell modules stay intact"
                                         if template_package is not None
                                         else 'Aligned top-level module names to template conventions (e.g., "Start Here", "Instructor Module")'
                                     ),
@@ -1712,6 +1860,8 @@ def run_migration(
                             ),
                         )
                     )
+                final_manual_issues.extend(detect_layout_breaking_issues(updated))
+                final_manual_issues.extend(detect_lti_embed_issues(updated))
                 final_a11y_issues = check_accessibility_heuristics(updated)
                 _upsert_file_result(
                     file_results,
@@ -1726,12 +1876,20 @@ def run_migration(
                 )
 
         if template_overlay_context is not None:
-            template_overlay_report_json = output_dir / f"{input_zip.stem}.template-overlay-report.json"
+            template_overlay_report_json = (
+                output_dir / f"{input_zip.stem}.template-overlay-report.json"
+            )
             template_overlay_report_payload = build_template_overlay_report(
                 context=template_overlay_context,
                 file_summaries=template_overlay_file_summaries,
                 output_json_path=template_overlay_report_json,
                 materialization=template_materialization_summary,
+            )
+
+        if template_merge and template_package is not None:
+            run_template_merge(
+                unpack_dir=unpack_dir,
+                template_package=template_package,
             )
 
         _zip_directory(unpack_dir, output_zip)
@@ -1753,7 +1911,11 @@ def run_migration(
             "inputs": (
                 {
                     "template_package": str(template_package),
-                    "alias_map_json": str(template_alias_map_json) if template_alias_map_json is not None else "",
+                    "alias_map_json": (
+                        str(template_alias_map_json)
+                        if template_alias_map_json is not None
+                        else ""
+                    ),
                     "apply_visual_standards": bool(apply_template_visual_standards),
                     "apply_color_standards": bool(apply_template_color_standards),
                     "apply_divider_standards": bool(apply_template_divider_standards),
@@ -1779,7 +1941,11 @@ def run_migration(
                 if isinstance(template_overlay_report_payload, dict)
                 else {}
             ),
-            "report_json": str(template_overlay_report_json) if template_overlay_report_json is not None else "",
+            "report_json": (
+                str(template_overlay_report_json)
+                if template_overlay_report_json is not None
+                else ""
+            ),
         },
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from urllib import error, parse, request
 
@@ -10,12 +11,21 @@ class CanvasAPIError(RuntimeError):
 
 
 def normalize_base_url(base_url: str) -> str:
+    from urllib.parse import urlparse, urlunparse
+
     value = base_url.strip().rstrip("/")
     if not value:
         raise CanvasAPIError("Canvas base URL is required.")
     if not value.startswith(("http://", "https://")):
         value = f"https://{value}"
-    return value
+    if value.startswith("http://"):
+        raise CanvasAPIError(
+            "Canvas base URL must use HTTPS. Plain HTTP is rejected to "
+            "prevent API tokens from being transmitted in cleartext."
+        )
+    # Strip any path component (e.g. /courses/15610) — only scheme + host is needed.
+    parsed = urlparse(value)
+    return urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
 
 
 def fetch_content_migrations(
@@ -184,6 +194,59 @@ def update_course_page_body(
     return payload
 
 
+def create_or_update_course_page(
+    *,
+    base_url: str,
+    course_id: str,
+    title: str,
+    body_html: str,
+    token: str,
+    published: bool = False,
+) -> dict[str, Any]:
+    """Create a new wiki page, or update it if a page with that title already exists.
+
+    Args:
+        base_url: Canvas instance root URL.
+        course_id: Numeric Canvas course ID.
+        title: Human-readable page title (also determines the URL slug).
+        body_html: Full ``<body>`` inner HTML for the page.
+        token: Canvas API bearer token.
+        published: Whether to publish the page immediately (default False).
+
+    Returns:
+        The Canvas page object returned by the API.
+    """
+    base = normalize_base_url(base_url)
+    # Derive the slug Canvas will assign: lowercase, spaces→dashes (approximate)
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    form_data: dict[str, Any] = {
+        "wiki_page[title]": title,
+        "wiki_page[body]": body_html,
+        "wiki_page[published]": "true" if published else "false",
+    }
+
+    # Try PUT first (update if exists, 404 if not)
+    put_url = f"{base}/api/v1/courses/{course_id}/pages/{parse.quote(slug, safe='')}"
+    try:
+        payload, _ = _request_json(
+            url=put_url, token=token, method="PUT", form_data=form_data
+        )
+        if isinstance(payload, dict):
+            return payload
+    except CanvasAPIError as exc:
+        if "404" not in str(exc):
+            raise
+
+    # Page doesn't exist – create via POST
+    post_url = f"{base}/api/v1/courses/{course_id}/pages"
+    payload, _ = _request_json(
+        url=post_url, token=token, method="POST", form_data=form_data
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas page creation response format.")
+    return payload
+
+
 def _fetch_paginated_list(*, first_url: str, token: str) -> list[dict[str, Any]]:
     if not token.strip():
         raise CanvasAPIError("Canvas API token is required.")
@@ -199,7 +262,9 @@ def _fetch_paginated_list(*, first_url: str, token: str) -> list[dict[str, Any]]
                 raise CanvasAPIError("Unauthenticated. Check token and permissions.")
             if payload.get("errors"):
                 raise CanvasAPIError(f"Canvas API returned errors: {payload['errors']}")
-            raise CanvasAPIError("Unexpected Canvas API response format (expected list).")
+            raise CanvasAPIError(
+                "Unexpected Canvas API response format (expected list)."
+            )
 
         if not isinstance(payload, list):
             raise CanvasAPIError("Unexpected Canvas API response type.")

@@ -10,9 +10,14 @@ from zipfile import ZipFile
 _DOC_PAGE_KEYS = {
     "image_customizations": "template-image-customizations",
     "introduction_instructions": "template-introduction-and-instructions",
+    "ic_template": "module-introduction-and-checklist",
     "learning_activities_template": "module-learning-activities-template",
     "lesson_template": "module-lesson-title-template",
+    "review_template": "module-1-review",
     "home_page": "wiki_content/home-page.html",
+    "home_page_bps": "wiki_content/home-page-bps.html",
+    "home_page_lcs": "wiki_content/home-page-lcs.html",
+    "home_page_stem": "wiki_content/home-page-stem.html",
     "syllabus_online": "wiki_content/syllabus-2.html",
     "syllabus_f2f": "wiki_content/syllabus-f2f.html",
     "about_instructor": "wiki_content/about-the-instructor.html",
@@ -86,20 +91,32 @@ def _manifest_children_by_top_level(template_package: Path) -> dict[str, list[st
         root = ET.fromstring(zf.read("imsmanifest.xml"))
 
     children_by_top_level: dict[str, list[str]] = {}
-    for organization in [node for node in root.iter() if _local_name(node.tag) == "organization"]:
-        top_level_items = [child for child in list(organization) if _local_name(child.tag) == "item"]
+    for organization in [
+        node for node in root.iter() if _local_name(node.tag) == "organization"
+    ]:
+        top_level_items = [
+            child for child in list(organization) if _local_name(child.tag) == "item"
+        ]
         if (
             len(top_level_items) == 1
             and not _extract_item_title(top_level_items[0])
-            and any(_local_name(child.tag) == "item" for child in list(top_level_items[0]))
+            and any(
+                _local_name(child.tag) == "item" for child in list(top_level_items[0])
+            )
         ):
-            top_level_items = [child for child in list(top_level_items[0]) if _local_name(child.tag) == "item"]
+            top_level_items = [
+                child
+                for child in list(top_level_items[0])
+                if _local_name(child.tag) == "item"
+            ]
         for item in top_level_items:
             title = _extract_item_title(item)
             if not title:
                 continue
             children = []
-            for child_item in [child for child in list(item) if _local_name(child.tag) == "item"]:
+            for child_item in [
+                child for child in list(item) if _local_name(child.tag) == "item"
+            ]:
                 child_title = _extract_item_title(child_item)
                 if child_title:
                     children.append(child_title)
@@ -120,9 +137,16 @@ def extract_template_standards(template_package: Path | None) -> dict:
     pages = _load_template_pages(template_package)
     image_page = _find_page_by_key(pages, _DOC_PAGE_KEYS["image_customizations"])
     intro_page = _find_page_by_key(pages, _DOC_PAGE_KEYS["introduction_instructions"])
-    learning_page = _find_page_by_key(pages, _DOC_PAGE_KEYS["learning_activities_template"])
+    ic_page = _find_page_by_key(pages, _DOC_PAGE_KEYS["ic_template"])
+    learning_page = _find_page_by_key(
+        pages, _DOC_PAGE_KEYS["learning_activities_template"]
+    )
     lesson_page = _find_page_by_key(pages, _DOC_PAGE_KEYS["lesson_template"])
+    review_page = _find_page_by_key(pages, _DOC_PAGE_KEYS["review_template"])
     home_page = _find_page_by_key(pages, _DOC_PAGE_KEYS["home_page"])
+    home_page_bps = _find_page_by_key(pages, _DOC_PAGE_KEYS["home_page_bps"])
+    home_page_lcs = _find_page_by_key(pages, _DOC_PAGE_KEYS["home_page_lcs"])
+    home_page_stem = _find_page_by_key(pages, _DOC_PAGE_KEYS["home_page_stem"])
     syllabus_online = _find_page_by_key(pages, _DOC_PAGE_KEYS["syllabus_online"])
     syllabus_f2f = _find_page_by_key(pages, _DOC_PAGE_KEYS["syllabus_f2f"])
     about_instructor = _find_page_by_key(pages, _DOC_PAGE_KEYS["about_instructor"])
@@ -162,10 +186,14 @@ def extract_template_standards(template_package: Path | None) -> dict:
     home_page_text = _strip_html(home_page)
     about_instructor_text = _strip_html(about_instructor)
     intro_text = _strip_html(intro_page)
+    ic_text = _strip_html(ic_page)
     lesson_text = _strip_html(lesson_page)
+    review_text = _strip_html(review_page)
 
     start_here_items = children_by_top_level.get("Start Here", [])
-    instructor_items = children_by_top_level.get("Instructor Module (Do Not Publish)", [])
+    instructor_items = children_by_top_level.get(
+        "Instructor Module (Do Not Publish)", []
+    )
     lesson_module_items = next(
         (
             children
@@ -178,10 +206,48 @@ def extract_template_standards(template_package: Path | None) -> dict:
         (
             children
             for title, children in children_by_top_level.items()
-            if title.lower().startswith("course conclusion")
+            if "course conclusion" in title.lower()
         ),
         [],
     )
+
+    # Extract required section headings for each page type from the actual template pages
+    def _extract_headings(html_source: str) -> list[str]:
+        return [
+            _strip_html(m.group(1))
+            for m in re.finditer(
+                r"<h[1-6]\b[^>]*>(.*?)</h[1-6]>", html_source, re.IGNORECASE | re.DOTALL
+            )
+            if _strip_html(m.group(1))
+        ]
+
+    ic_required_sections = _extract_headings(ic_page)
+    learning_activities_required_sections = _extract_headings(learning_page)
+    review_required_sections = _extract_headings(review_page)
+    lesson_required_sections = _extract_headings(lesson_page)
+
+    # Detect division-specific home page variants
+    home_page_variants: dict[str, list[str]] = {}
+    _HP_DIVISION_KEYS = [
+        ("Health Sciences", home_page),
+        ("Business & Public Services", home_page_bps),
+        ("Liberal Arts, Communication & Social Sciences", home_page_lcs),
+        ("STEM", home_page_stem),
+    ]
+    for division_label, hp_html in _HP_DIVISION_KEYS:
+        hp_text = _strip_html(hp_html)
+        if hp_text:
+            hp_links = [
+                label
+                for label in (
+                    "Syllabus",
+                    "Policies and Support",
+                    "Course Q&A",
+                    "AI Excellence Institute",
+                )
+                if label.lower() in hp_text.lower()
+            ]
+            home_page_variants[division_label] = hp_links
 
     course_credentials_in_shell = any(
         child.lower() == "course credentials"
@@ -189,7 +255,9 @@ def extract_template_standards(template_package: Path | None) -> dict:
         for child in children
     )
     instructions_reference_course_credentials = "course credentials" in all_text.lower()
-    course_overview_survey_replaced = "replaces the course overview survey" in intro_text.lower()
+    course_overview_survey_replaced = (
+        "replaces the course overview survey" in intro_text.lower()
+    )
     paste_without_formatting_guidance_present = (
         "paste without formatting" in lesson_text.lower()
         or "paste text without formatting" in lesson_text.lower()
@@ -203,24 +271,41 @@ def extract_template_standards(template_package: Path | None) -> dict:
 
     return {
         "template_package": str(template_package),
+        "page_section_requirements": {
+            "ic_page": ic_required_sections,
+            "learning_activities_page": learning_activities_required_sections,
+            "review_page": review_required_sections,
+            "lesson_page": lesson_required_sections,
+        },
         "visual": {
             "heading_icon_width_px": 45 if width_match is not None else None,
             "decorative_icon_alt_expected": "decorative" in image_page.lower(),
-            "sinclair_red_hex": color_match.group(0).lower() if color_match is not None else "",
-            "icon_text_can_be_copied_separately": "two separate elements" in image_page.lower(),
-            "primary_page_heading_rule": "border-bottom: 10px solid #ac1a2f"
-            if primary_heading_rule_match is not None
-            else "",
-            "thick_red_divider_rule": "border-top: 8px solid #ac1a2f"
-            if thick_divider_match is not None
-            else "",
-            "internal_separator_rule": "unstyled <hr>"
-            if "<hr" in "\n".join(pages.values()).lower()
-            else "",
-            "home_page_section_rule": "border-bottom: 2px solid #cccccc"
-            if home_gray_rule_match is not None
-            else "",
-            "home_page_header_background": "#eeeeee" if home_gray_bg_match is not None else "",
+            "sinclair_red_hex": (
+                color_match.group(0).lower() if color_match is not None else ""
+            ),
+            "icon_text_can_be_copied_separately": "two separate elements"
+            in image_page.lower(),
+            "primary_page_heading_rule": (
+                "border-bottom: 10px solid #ac1a2f"
+                if primary_heading_rule_match is not None
+                else ""
+            ),
+            "thick_red_divider_rule": (
+                "border-top: 8px solid #ac1a2f"
+                if thick_divider_match is not None
+                else ""
+            ),
+            "internal_separator_rule": (
+                "unstyled <hr>" if "<hr" in "\n".join(pages.values()).lower() else ""
+            ),
+            "home_page_section_rule": (
+                "border-bottom: 2px solid #cccccc"
+                if home_gray_rule_match is not None
+                else ""
+            ),
+            "home_page_header_background": (
+                "#eeeeee" if home_gray_bg_match is not None else ""
+            ),
         },
         "shell": {
             "start_here_items": start_here_items,
@@ -231,12 +316,15 @@ def extract_template_standards(template_package: Path | None) -> dict:
             "instructions_reference_course_credentials": instructions_reference_course_credentials,
         },
         "content": {
-            "view_requires_video_title_transcript_timestamp_citation": title_match is not None,
+            "view_requires_video_title_transcript_timestamp_citation": title_match
+            is not None,
             "paste_without_formatting_guidance_present": paste_without_formatting_guidance_present,
             "accordion_guidance_present": "accordion" in all_text.lower(),
             "start_here_replaces_course_overview_survey": course_overview_survey_replaced,
-            "home_page_ai_notice_present": "this course is open to ai usage" in home_page_text.lower(),
-            "home_page_ai_notice_conditional": "if your course policy allows ai use" in home_page_text.lower(),
+            "home_page_ai_notice_present": "this course is open to ai usage"
+            in home_page_text.lower(),
+            "home_page_ai_notice_conditional": "if your course policy allows ai use"
+            in home_page_text.lower(),
             "home_page_links": [
                 label
                 for label in (
@@ -247,9 +335,12 @@ def extract_template_standards(template_package: Path | None) -> dict:
                 )
                 if label.lower() in home_page_text.lower()
             ],
-            "syllabus_has_table_of_contents": "syllabus table of contents" in syllabus_online_text.lower(),
-            "syllabus_has_return_to_toc_links": "return to table of contents" in syllabus_online_text.lower(),
-            "syllabus_has_ai_disclosure_section": "use of artificial intelligence in creating this course" in syllabus_online_text.lower(),
+            "syllabus_has_table_of_contents": "syllabus table of contents"
+            in syllabus_online_text.lower(),
+            "syllabus_has_return_to_toc_links": "return to table of contents"
+            in syllabus_online_text.lower(),
+            "syllabus_has_ai_disclosure_section": "use of artificial intelligence in creating this course"
+            in syllabus_online_text.lower(),
             "syllabus_variants_present": [
                 label
                 for label, text in (
@@ -258,8 +349,10 @@ def extract_template_standards(template_package: Path | None) -> dict:
                 )
                 if text
             ],
-            "about_instructor_belonging_language_present": "sense of belonging" in about_instructor_text.lower(),
+            "about_instructor_belonging_language_present": "sense of belonging"
+            in about_instructor_text.lower(),
             "policies_support_page_present": bool(policies_support.strip()),
+            "home_page_variants": home_page_variants,
         },
         "warnings": warnings,
     }

@@ -10,12 +10,17 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from .reference_docs import parse_best_practice_policy
-from .template_standards import extract_template_standards, resolve_default_template_package
+from .template_standards import (
+    extract_template_standards,
+    resolve_default_template_package,
+)
 from .training_corpus import collect_course_artifacts
 
 
 _HTML_EXTENSIONS = {".html", ".htm"}
-_TITLE_RE = re.compile(r"<title\b[^>]*>(?P<body>.*?)</title>", flags=re.IGNORECASE | re.DOTALL)
+_TITLE_RE = re.compile(
+    r"<title\b[^>]*>(?P<body>.*?)</title>", flags=re.IGNORECASE | re.DOTALL
+)
 _TAG_RE = re.compile(r"<[^>]+>")
 _TEMPLATE_ASSET_RE = re.compile(
     r"(?:TemplateAssets|templateassets|template-images/(?:icons|sample-images))/"
@@ -26,7 +31,13 @@ _STANDARD_IMAGE_ASSET_RE = re.compile(
     r"(?:standardImages|standardimages)/(?P<basename>[^\"'#?/\s>]+)",
     flags=re.IGNORECASE,
 )
-_SHARED_TEMPLATE_RE = re.compile(r"shared/brightspace_html_template/", flags=re.IGNORECASE)
+_SHARED_TEMPLATE_RE = re.compile(
+    r"shared/brightspace_html_template/", flags=re.IGNORECASE
+)
+_IC_PAGE_TITLE_RE = re.compile(r"introduction\s+and\s+checklist", flags=re.IGNORECASE)
+_IC_SECTION_INTRO_RE = re.compile(r"\bintroduction\b", flags=re.IGNORECASE)
+_IC_SECTION_OBJ_RE = re.compile(r"module\s+objectives", flags=re.IGNORECASE)
+_IC_SECTION_CHK_RE = re.compile(r"module\s+checklist", flags=re.IGNORECASE)
 _BOOTSTRAP_ACCORDION_RE = re.compile(
     r"class\s*=\s*[\"'][^\"']*(?:card-header|collapse)[^\"']*[\"']",
     flags=re.IGNORECASE,
@@ -53,7 +64,10 @@ _TOPIC_RE = re.compile(r"^topic\s+\d+", flags=re.IGNORECASE)
 _MODULE_RE = re.compile(r"^module\s+\d+", flags=re.IGNORECASE)
 _SECTION_TITLES = ("Overview", "Learning Activities", "Review")
 _PROTECTED_SHELL_TITLES = ("Start Here", "Instructor Module (Do Not Publish)")
-_HEADING_BLOCK_RE = re.compile(r"<h(?P<level>[1-6])\b[^>]*>(?P<body>.*?)</h(?P=level)>", flags=re.IGNORECASE | re.DOTALL)
+_HEADING_BLOCK_RE = re.compile(
+    r"<h(?P<level>[1-6])\b[^>]*>(?P<body>.*?)</h(?P=level)>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 _TEMPLATE_ICON_RE = re.compile(
     r"(?:TemplateAssets|templateassets|template-images/icons)/(?P<basename>[^\"'#?/\s>]+)",
     flags=re.IGNORECASE,
@@ -92,7 +106,8 @@ _CONSENSUS_TRANSFORMS = (
     {
         "key": "intro_objectives_to_checklist",
         "label": '"Introduction and Objectives" pages become "Introduction and Checklist"',
-        "applicable": lambda before, after: before.get("intro_objectives_titles", 0) > 0,
+        "applicable": lambda before, after: before.get("intro_objectives_titles", 0)
+        > 0,
         "matched": lambda before, after: after.get("intro_checklist_titles", 0) > 0,
         "sample": lambda row: (
             f"{row['course_code']}: {row['before']['intro_objectives_titles']} intro/objectives -> "
@@ -111,10 +126,25 @@ _CONSENSUS_TRANSFORMS = (
         ),
     },
     {
+        "key": "ic_page_structure",
+        "label": "Introduction and Checklist pages contain all 3 required sections: Introduction, Module Objectives, Module Checklist",
+        "applicable": lambda before, after: after.get("ic_pages_total", 0) > 0,
+        "matched": lambda before, after: after.get("ic_pages_total", 0) > 0
+        and after.get("ic_pages_with_all_sections", 0)
+        / max(after.get("ic_pages_total", 0), 1)
+        >= 0.8,
+        "sample": lambda row: (
+            f"{row['course_code']}: {row['after']['ic_pages_with_all_sections']} / "
+            f"{row['after']['ic_pages_total']} IC pages have all 3 sections"
+        ),
+    },
+    {
         "key": "accordion_modernization",
         "label": "Legacy accordions are replaced by accessible details blocks or flattened sections",
-        "applicable": lambda before, after: before.get("bootstrap_accordion_blocks", 0) > 0,
-        "matched": lambda before, after: after.get("bootstrap_accordion_blocks", 0) == 0,
+        "applicable": lambda before, after: before.get("bootstrap_accordion_blocks", 0)
+        > 0,
+        "matched": lambda before, after: after.get("bootstrap_accordion_blocks", 0)
+        == 0,
         "sample": lambda row: (
             f"{row['course_code']}: accordion blocks {row['before']['bootstrap_accordion_blocks']} -> "
             f"{row['after']['bootstrap_accordion_blocks']} (details {row['after']['details_blocks']})"
@@ -195,21 +225,33 @@ def _load_manifest_structure(zip_path: Path) -> dict[str, list[str]]:
     all_titles: list[str] = []
     children_by_top_level: dict[str, list[str]] = {}
 
-    for organization in [node for node in root.iter() if _local_name(node.tag) == "organization"]:
-        top_level_items = [child for child in list(organization) if _local_name(child.tag) == "item"]
+    for organization in [
+        node for node in root.iter() if _local_name(node.tag) == "organization"
+    ]:
+        top_level_items = [
+            child for child in list(organization) if _local_name(child.tag) == "item"
+        ]
         if (
             len(top_level_items) == 1
             and not _extract_item_title(top_level_items[0])
-            and any(_local_name(child.tag) == "item" for child in list(top_level_items[0]))
+            and any(
+                _local_name(child.tag) == "item" for child in list(top_level_items[0])
+            )
         ):
-            top_level_items = [child for child in list(top_level_items[0]) if _local_name(child.tag) == "item"]
+            top_level_items = [
+                child
+                for child in list(top_level_items[0])
+                if _local_name(child.tag) == "item"
+            ]
         for item in top_level_items:
             title = _extract_item_title(item)
             if title:
                 top_level_titles.append(title)
                 all_titles.append(title)
                 children_by_top_level.setdefault(title, [])
-            for child_item in [child for child in list(item) if _local_name(child.tag) == "item"]:
+            for child_item in [
+                child for child in list(item) if _local_name(child.tag) == "item"
+            ]:
                 child_title = _extract_item_title(child_item)
                 if child_title:
                     section_titles.append(child_title)
@@ -231,7 +273,10 @@ def _load_manifest_structure(zip_path: Path) -> dict[str, list[str]]:
 
 
 def _count_template_assets(html_text: str) -> Counter[str]:
-    return Counter(match.group("basename").lower() for match in _TEMPLATE_ASSET_RE.finditer(html_text))
+    return Counter(
+        match.group("basename").lower()
+        for match in _TEMPLATE_ASSET_RE.finditer(html_text)
+    )
 
 
 def _package_features(zip_path: Path) -> dict:
@@ -246,12 +291,31 @@ def _package_features(zip_path: Path) -> dict:
     top_titles = manifest.get("top_level_titles", [])
     section_titles = manifest.get("section_titles", [])
     all_titles = manifest.get("all_titles", []) + html_titles
-    normalized_titles = Counter(_normalize_key(title) for title in all_titles if _normalize_key(title))
+    normalized_titles = Counter(
+        _normalize_key(title) for title in all_titles if _normalize_key(title)
+    )
     pipe_titles = [title for title in all_titles if _PIPE_TITLE_RE.search(title)]
     colon_titles = [title for title in all_titles if _COLON_TITLE_RE.search(title)]
 
     divider_count = len(_HR_RE.findall(all_html))
     standard_dividers = len(_STANDARD_DIVIDER_RE.findall(all_html))
+
+    ic_pages_total = 0
+    ic_pages_with_all_sections = 0
+    for path, content in html_files.items():
+        page_title = _extract_title(content, Path(path).stem.replace("_", " ").strip())
+        if not _IC_PAGE_TITLE_RE.search(page_title):
+            continue
+        ic_pages_total += 1
+        headings_text = " ".join(
+            _strip_html(m.group("body")) for m in _HEADING_BLOCK_RE.finditer(content)
+        )
+        if (
+            _IC_SECTION_INTRO_RE.search(headings_text)
+            and _IC_SECTION_OBJ_RE.search(headings_text)
+            and _IC_SECTION_CHK_RE.search(headings_text)
+        ):
+            ic_pages_with_all_sections += 1
 
     return {
         "zip_path": str(zip_path),
@@ -267,10 +331,20 @@ def _package_features(zip_path: Path) -> dict:
         "divider_count": divider_count,
         "standard_dividers": standard_dividers,
         "nonstandard_dividers": max(divider_count - standard_dividers, 0),
-        "top_level_topic_titles": sum(1 for title in top_titles if _TOPIC_RE.match(title)),
-        "top_level_module_titles": sum(1 for title in top_titles if _MODULE_RE.match(title)),
-        "intro_objectives_titles": normalized_titles.get("introduction and objectives", 0),
-        "intro_checklist_titles": normalized_titles.get("introduction and checklist", 0),
+        "top_level_topic_titles": sum(
+            1 for title in top_titles if _TOPIC_RE.match(title)
+        ),
+        "top_level_module_titles": sum(
+            1 for title in top_titles if _MODULE_RE.match(title)
+        ),
+        "intro_objectives_titles": normalized_titles.get(
+            "introduction and objectives", 0
+        ),
+        "intro_checklist_titles": normalized_titles.get(
+            "introduction and checklist", 0
+        ),
+        "ic_pages_total": ic_pages_total,
+        "ic_pages_with_all_sections": ic_pages_with_all_sections,
         "learning_activities_titles": normalized_titles.get("learning activities", 0),
         "pipe_delimited_titles": len(pipe_titles),
         "colon_delimited_titles": len(colon_titles),
@@ -280,7 +354,11 @@ def _package_features(zip_path: Path) -> dict:
         "section_titles": section_titles[:30],
         "children_by_top_level": manifest.get("children_by_top_level", {}),
         "section_title_counts": {
-            label: sum(1 for title in section_titles if _normalize_key(title) == _normalize_key(label))
+            label: sum(
+                1
+                for title in section_titles
+                if _normalize_key(title) == _normalize_key(label)
+            )
             for label in _SECTION_TITLES
         },
         "sample_titles": html_titles[:12],
@@ -299,15 +377,26 @@ def _collect_training_pairs(
     for artifacts in collect_course_artifacts(roots):
         before_zip = artifacts.get("before_zip")
         after_zip = artifacts.get("after_zip")
-        if before_zip is None or after_zip is None or not before_zip.exists() or not after_zip.exists():
+        if (
+            before_zip is None
+            or after_zip is None
+            or not before_zip.exists()
+            or not after_zip.exists()
+        ):
             continue
         rows.append(
             {
                 "course_code": artifacts["course_code"],
                 "training_source_root": str(artifacts.get("root", "")),
-                "snapshot_course_id": artifacts.get("snapshot_identity", {}).get("course_id"),
-                "snapshot_course_name": artifacts.get("snapshot_identity", {}).get("course_name", ""),
-                "snapshot_course_code": artifacts.get("snapshot_identity", {}).get("course_code", ""),
+                "snapshot_course_id": artifacts.get("snapshot_identity", {}).get(
+                    "course_id"
+                ),
+                "snapshot_course_name": artifacts.get("snapshot_identity", {}).get(
+                    "course_name", ""
+                ),
+                "snapshot_course_code": artifacts.get("snapshot_identity", {}).get(
+                    "course_code", ""
+                ),
                 "before_zip": str(before_zip),
                 "after_zip": str(after_zip),
                 "before": _package_features(before_zip),
@@ -323,12 +412,15 @@ def _template_features(template_package: Path | None) -> dict:
     features = _package_features(template_package)
     return {
         "page_titles": features.get("sample_titles", []),
-        "manifest_titles": features.get("section_titles", []) + features.get("top_level_titles", []),
+        "manifest_titles": features.get("section_titles", [])
+        + features.get("top_level_titles", []),
         "asset_basenames": features.get("template_asset_basenames", {}),
     }
 
 
-def _template_elements_kept(training_rows: list[dict], template_package: Path | None) -> dict:
+def _template_elements_kept(
+    training_rows: list[dict], template_package: Path | None
+) -> dict:
     template = _template_features(template_package)
     template_titles = {
         title
@@ -341,7 +433,10 @@ def _template_elements_kept(training_rows: list[dict], template_package: Path | 
     for row in training_rows:
         after_titles = {
             _normalize_key(title)
-            for title in (row.get("after", {}).get("top_level_titles", []) + row.get("after", {}).get("section_titles", []))
+            for title in (
+                row.get("after", {}).get("top_level_titles", [])
+                + row.get("after", {}).get("section_titles", [])
+            )
             if _normalize_key(title)
         }
         for template_title in template_titles:
@@ -349,7 +444,9 @@ def _template_elements_kept(training_rows: list[dict], template_package: Path | 
             if normalized and normalized in after_titles:
                 title_presence[template_title] += 1
 
-        after_assets = set((row.get("after", {}).get("template_asset_basenames", {}) or {}).keys())
+        after_assets = set(
+            (row.get("after", {}).get("template_asset_basenames", {}) or {}).keys()
+        )
         for basename in after_assets:
             if basename in template.get("asset_basenames", {}):
                 asset_presence[basename] += 1
@@ -368,7 +465,9 @@ def _template_elements_kept(training_rows: list[dict], template_package: Path | 
     }
 
 
-def _protected_shell_playbook(training_rows: list[dict], template_package: Path | None) -> list[dict]:
+def _protected_shell_playbook(
+    training_rows: list[dict], template_package: Path | None
+) -> list[dict]:
     if template_package is None or not template_package.exists():
         return []
 
@@ -378,13 +477,19 @@ def _protected_shell_playbook(training_rows: list[dict], template_package: Path 
 
     for shell_title in _PROTECTED_SHELL_TITLES:
         template_children = template_children_by_top.get(shell_title, [])
-        template_child_keys = {_normalize_key(title): title for title in template_children if _normalize_key(title)}
+        template_child_keys = {
+            _normalize_key(title): title
+            for title in template_children
+            if _normalize_key(title)
+        }
         presence_count = 0
         intact_child_counts: Counter[str] = Counter()
         custom_child_counts: Counter[str] = Counter()
 
         for row in training_rows:
-            after_children_map = row.get("after", {}).get("children_by_top_level", {}) or {}
+            after_children_map = (
+                row.get("after", {}).get("children_by_top_level", {}) or {}
+            )
             after_children = after_children_map.get(shell_title, [])
             if not after_children:
                 continue
@@ -403,7 +508,8 @@ def _protected_shell_playbook(training_rows: list[dict], template_package: Path 
                 "title": shell_title,
                 "training_course_presence": presence_count,
                 "template_child_count": len(template_children),
-                "recommended_protected_shell": presence_count >= max(2, len(training_rows) // 2),
+                "recommended_protected_shell": presence_count
+                >= max(2, len(training_rows) // 2),
                 "common_intact_children": [
                     {"title": child_title, "course_count": count}
                     for child_title, count in intact_child_counts.most_common()
@@ -448,7 +554,9 @@ def _after_icon_signatures(html_files: dict[str, str]) -> dict[str, str]:
             basename = Path(icon_match.group("basename")).name.lower()
             current_text = _strip_html(body)
             signature_text = current_text
-            if _normalize_key(current_text) in _GENERIC_ICON_LABEL_KEYS and index + 1 < len(headings):
+            if _normalize_key(
+                current_text
+            ) in _GENERIC_ICON_LABEL_KEYS and index + 1 < len(headings):
                 next_text = _strip_html(headings[index + 1].group("body") or "")
                 if next_text:
                     signature_text = next_text
@@ -493,7 +601,9 @@ def _icon_mapping_playbook(training_rows: list[dict]) -> list[dict]:
     return rows
 
 
-def _consensus_transforms(training_rows: list[dict], current_row: dict | None) -> list[dict]:
+def _consensus_transforms(
+    training_rows: list[dict], current_row: dict | None
+) -> list[dict]:
     rows: list[dict] = []
     for definition in _CONSENSUS_TRANSFORMS:
         applicable = [
@@ -510,10 +620,14 @@ def _consensus_transforms(training_rows: list[dict], current_row: dict | None) -
             continue
 
         current_state = "not_applicable"
-        if current_row is not None and definition["applicable"](current_row.get("before", {}), current_row.get("after", {})):
+        if current_row is not None and definition["applicable"](
+            current_row.get("before", {}), current_row.get("after", {})
+        ):
             current_state = (
                 "matched"
-                if definition["matched"](current_row.get("before", {}), current_row.get("after", {}))
+                if definition["matched"](
+                    current_row.get("before", {}), current_row.get("after", {})
+                )
                 else "missing"
             )
 
@@ -538,16 +652,23 @@ def _is_consensus_transform(row: dict) -> bool:
     return applicable_courses >= 2 and matching_courses >= 2 and match_rate >= 0.5
 
 
-def _current_alignment(current_row: dict | None, kept: dict, transforms: list[dict]) -> dict:
+def _current_alignment(
+    current_row: dict | None, kept: dict, transforms: list[dict]
+) -> dict:
     if current_row is None:
         return {}
 
     after_titles = {
         _normalize_key(title)
-        for title in (current_row.get("after", {}).get("top_level_titles", []) + current_row.get("after", {}).get("section_titles", []))
+        for title in (
+            current_row.get("after", {}).get("top_level_titles", [])
+            + current_row.get("after", {}).get("section_titles", [])
+        )
         if _normalize_key(title)
     }
-    after_assets = set((current_row.get("after", {}).get("template_asset_basenames", {}) or {}).keys())
+    after_assets = set(
+        (current_row.get("after", {}).get("template_asset_basenames", {}) or {}).keys()
+    )
 
     kept_titles = [
         row["title"]
@@ -581,28 +702,48 @@ def _title_delimiter_playbook(
 ) -> dict:
     policy = parse_best_practice_policy(best_practices_docx)
     after_pipe_courses = sum(
-        1 for row in training_rows if int(row.get("after", {}).get("pipe_delimited_titles", 0) or 0) > 0
+        1
+        for row in training_rows
+        if int(row.get("after", {}).get("pipe_delimited_titles", 0) or 0) > 0
     )
     after_colon_courses = sum(
-        1 for row in training_rows if int(row.get("after", {}).get("colon_delimited_titles", 0) or 0) > 0
+        1
+        for row in training_rows
+        if int(row.get("after", {}).get("colon_delimited_titles", 0) or 0) > 0
     )
     before_pipe_courses = sum(
-        1 for row in training_rows if int(row.get("before", {}).get("pipe_delimited_titles", 0) or 0) > 0
+        1
+        for row in training_rows
+        if int(row.get("before", {}).get("pipe_delimited_titles", 0) or 0) > 0
     )
 
-    current_before = current_row.get("before", {}) if isinstance(current_row, dict) else {}
-    current_after = current_row.get("after", {}) if isinstance(current_row, dict) else {}
+    current_before = (
+        current_row.get("before", {}) if isinstance(current_row, dict) else {}
+    )
+    current_after = (
+        current_row.get("after", {}) if isinstance(current_row, dict) else {}
+    )
     return {
         "best_practice_policy": policy,
         "training_before_pipe_courses": before_pipe_courses,
         "training_after_pipe_courses": after_pipe_courses,
         "training_after_colon_courses": after_colon_courses,
         "historical_corpus_is_mixed": bool(after_pipe_courses and after_colon_courses),
-        "current_before_pipe_titles": int(current_before.get("pipe_delimited_titles", 0) or 0),
-        "current_after_pipe_titles": int(current_after.get("pipe_delimited_titles", 0) or 0),
-        "current_after_colon_titles": int(current_after.get("colon_delimited_titles", 0) or 0),
-        "current_after_pipe_examples": list(current_after.get("pipe_title_examples", []) or [])[:8],
-        "current_after_colon_examples": list(current_after.get("colon_title_examples", []) or [])[:8],
+        "current_before_pipe_titles": int(
+            current_before.get("pipe_delimited_titles", 0) or 0
+        ),
+        "current_after_pipe_titles": int(
+            current_after.get("pipe_delimited_titles", 0) or 0
+        ),
+        "current_after_colon_titles": int(
+            current_after.get("colon_delimited_titles", 0) or 0
+        ),
+        "current_after_pipe_examples": list(
+            current_after.get("pipe_title_examples", []) or []
+        )[:8],
+        "current_after_colon_examples": list(
+            current_after.get("colon_title_examples", []) or []
+        )[:8],
     }
 
 
@@ -636,7 +777,9 @@ def build_pattern_report(
         training_courses_root,
         examples_courses_root=examples_courses_root,
     )
-    source_counter = Counter(Path(str(row.get("training_source_root", ""))).name for row in training_rows)
+    source_counter = Counter(
+        Path(str(row.get("training_source_root", ""))).name for row in training_rows
+    )
 
     current_row: dict | None = None
     if current_source_zip is not None and current_converted_zip is not None:
@@ -654,17 +797,29 @@ def build_pattern_report(
     observed_transforms = _consensus_transforms(training_rows, current_row)
     transforms = [row for row in observed_transforms if _is_consensus_transform(row)]
     current_alignment = _current_alignment(current_row, kept, transforms)
-    title_delimiter_policy = _title_delimiter_playbook(training_rows, current_row, best_practices_docx)
+    title_delimiter_policy = _title_delimiter_playbook(
+        training_rows, current_row, best_practices_docx
+    )
 
     report = {
         "inputs": {
             "current_course_code": current_course_code,
-            "current_source_zip": str(current_source_zip) if current_source_zip is not None else "",
-            "current_converted_zip": str(current_converted_zip) if current_converted_zip is not None else "",
+            "current_source_zip": (
+                str(current_source_zip) if current_source_zip is not None else ""
+            ),
+            "current_converted_zip": (
+                str(current_converted_zip) if current_converted_zip is not None else ""
+            ),
             "training_courses_root": str(training_courses_root),
-            "examples_courses_root": str(examples_courses_root) if examples_courses_root is not None else "",
-            "template_package": str(template_package) if template_package is not None else "",
-            "best_practices_docx": str(best_practices_docx) if best_practices_docx is not None else "",
+            "examples_courses_root": (
+                str(examples_courses_root) if examples_courses_root is not None else ""
+            ),
+            "template_package": (
+                str(template_package) if template_package is not None else ""
+            ),
+            "best_practices_docx": (
+                str(best_practices_docx) if best_practices_docx is not None else ""
+            ),
         },
         "summary": {
             "training_course_pairs": len(training_rows),
@@ -672,10 +827,16 @@ def build_pattern_report(
             "consensus_transforms": len(transforms),
             "kept_template_titles": len(kept.get("page_or_module_titles", [])),
             "kept_template_assets": len(kept.get("template_assets", [])),
-            "protected_shell_modules": sum(1 for row in protected_shells if row.get("recommended_protected_shell")),
+            "protected_shell_modules": sum(
+                1 for row in protected_shells if row.get("recommended_protected_shell")
+            ),
             "icon_mapping_rules": len(icon_mappings),
-            "current_matching_transforms": current_alignment.get("matching_consensus_transforms", 0),
-            "current_missing_transforms": len(current_alignment.get("missing_consensus_transforms", [])),
+            "current_matching_transforms": current_alignment.get(
+                "matching_consensus_transforms", 0
+            ),
+            "current_missing_transforms": len(
+                current_alignment.get("missing_consensus_transforms", [])
+            ),
             "template_warnings": len(template_standards.get("warnings", [])),
         },
         "title_delimiter_policy": title_delimiter_policy,
@@ -692,7 +853,9 @@ def build_pattern_report(
     if current_converted_zip is not None:
         output_json = output_json_path or _default_output_json(current_converted_zip)
     else:
-        output_json = output_json_path or (training_courses_root.parent / "pattern-report.json")
+        output_json = output_json_path or (
+            training_courses_root.parent / "pattern-report.json"
+        )
     output_markdown = output_markdown_path or _default_output_markdown(output_json)
     output_json.parent.mkdir(parents=True, exist_ok=True)
 
@@ -738,14 +901,20 @@ def build_pattern_report(
             f"- {row['title']}: {status} | present in {row['training_course_presence']} courses"
         )
         for child in row.get("common_intact_children", [])[:6]:
-            lines.append(f"- {row['title']} intact child: {child['title']} ({child['course_count']})")
+            lines.append(
+                f"- {row['title']} intact child: {child['title']} ({child['course_count']})"
+            )
         for child in row.get("common_custom_children", [])[:4]:
-            lines.append(f"- {row['title']} common custom child: {child['title']} ({child['course_count']})")
+            lines.append(
+                f"- {row['title']} common custom child: {child['title']} ({child['course_count']})"
+            )
     template_shell = template_standards.get("shell", {})
     template_visual = template_standards.get("visual", {})
     template_content = template_standards.get("content", {})
     lines.extend(["", "## Current Template Standards", ""])
-    lines.append(f"- Template package: {template_standards.get('template_package', '') or 'none'}")
+    lines.append(
+        f"- Template package: {template_standards.get('template_package', '') or 'none'}"
+    )
     if template_visual:
         lines.append(
             f"- Heading icon width: {template_visual.get('heading_icon_width_px', 'unknown')}px"
@@ -833,18 +1002,26 @@ def build_pattern_report(
     for row in icon_mappings[:12]:
         lines.append(
             f"- {row['before_icon']} -> {row['after_icon']} ({row['course_count']} courses)"
-            + (f" | sample: {row['sample_heading']}" if row.get("sample_heading") else "")
+            + (
+                f" | sample: {row['sample_heading']}"
+                if row.get("sample_heading")
+                else ""
+            )
         )
     lines.extend(["", "## Title Delimiter Policy", ""])
     policy = title_delimiter_policy.get("best_practice_policy", {})
-    lines.append(f"- Best-practice doc pipes deprecated: {policy.get('pipes_deprecated', False)}")
+    lines.append(
+        f"- Best-practice doc pipes deprecated: {policy.get('pipes_deprecated', False)}"
+    )
     lines.append(
         f"- Best-practice doc accessible accordion allowed: {policy.get('accessible_accordion_allowed', False)}"
     )
     if policy.get("title_policy_excerpt"):
         lines.append(f"- Title policy excerpt: {policy['title_policy_excerpt']}")
     if policy.get("accordion_policy_excerpt"):
-        lines.append(f"- Accordion policy excerpt: {policy['accordion_policy_excerpt']}")
+        lines.append(
+            f"- Accordion policy excerpt: {policy['accordion_policy_excerpt']}"
+        )
     lines.append(
         f"- Training courses with pipe-delimited Canvas titles after migration: "
         f"{title_delimiter_policy.get('training_after_pipe_courses', 0)}/{len(training_rows)}"
@@ -883,9 +1060,23 @@ def main() -> None:
         prog="lms-pattern-report",
         description="Analyze deterministic before/after patterns across the local training corpus.",
     )
-    parser.add_argument("--current-course-code", default="current-course", help="Course code for the current package")
-    parser.add_argument("--current-source-zip", type=Path, default=None, help="Optional current source D2L zip")
-    parser.add_argument("--current-converted-zip", type=Path, default=None, help="Optional current converted zip")
+    parser.add_argument(
+        "--current-course-code",
+        default="current-course",
+        help="Course code for the current package",
+    )
+    parser.add_argument(
+        "--current-source-zip",
+        type=Path,
+        default=None,
+        help="Optional current source D2L zip",
+    )
+    parser.add_argument(
+        "--current-converted-zip",
+        type=Path,
+        default=None,
+        help="Optional current converted zip",
+    )
     parser.add_argument(
         "--training-courses-root",
         type=Path,
@@ -907,11 +1098,23 @@ def main() -> None:
     parser.add_argument(
         "--best-practices-docx",
         type=Path,
-        default=Path("resources/helpers/Canvas Blueprints - Best Practices-20260316.docx"),
+        default=Path(
+            "resources/helpers/Canvas Blueprints - Best Practices-20260316.docx"
+        ),
         help="Optional best-practices docx used to compare historical title/accordion trends against current policy.",
     )
-    parser.add_argument("--output-json", type=Path, default=None, help="Optional pattern report JSON path")
-    parser.add_argument("--output-markdown", type=Path, default=None, help="Optional pattern report Markdown path")
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        default=None,
+        help="Optional pattern report JSON path",
+    )
+    parser.add_argument(
+        "--output-markdown",
+        type=Path,
+        default=None,
+        help="Optional pattern report Markdown path",
+    )
     args = parser.parse_args()
 
     output_json, output_markdown = build_pattern_report(

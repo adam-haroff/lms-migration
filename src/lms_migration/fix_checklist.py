@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,7 +75,10 @@ def _map_canvas_issue(issue: dict) -> ChecklistItem:
             reference=reference,
         )
 
-    if "missing links found in imported content - assessment question question_text" in lowered:
+    if (
+        "missing links found in imported content - assessment question question_text"
+        in lowered
+    ):
         return ChecklistItem(
             priority="P1",
             source="canvas_import",
@@ -122,11 +126,37 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
     lowered = reason.lower()
 
     if "legacy script blocks" in lowered:
-        return ("P1", "html_script_cleanup", "ID", "Remove legacy script behavior and verify page rendering in Canvas.")
+        return (
+            "P1",
+            "html_script_cleanup",
+            "ID",
+            "Remove legacy script behavior and verify page rendering in Canvas.",
+        )
     if "embedded iframe" in lowered:
-        return ("P1", "embedded_iframe_review", "ID", "Review each iframe for accessibility, security, and responsive behavior.")
+        return (
+            "P1",
+            "embedded_iframe_review",
+            "ID",
+            "Review each iframe for accessibility, security, and responsive behavior.",
+        )
+    if "lti tool embed" in lowered:
+        # Pattern from detect_lti_embed_issues: "LTI tool embed (ToolName) — verify launch URL after migration"
+        tool_match = re.search(r"lti tool embed \(([^)]+)\)", lowered)
+        tool_name = tool_match.group(1).title() if tool_match else "LTI tool"
+        return (
+            "P1",
+            "lti_embed_reconfiguration",
+            "ID",
+            f"Re-embed {tool_name} using the Canvas LTI integration (Settings → Apps → {tool_name}) "
+            "rather than the raw D2L src URL, which will not resolve after migration.",
+        )
     if "template placeholder text remains" in lowered:
-        return ("P1", "template_placeholder_cleanup", "Faculty/ID", "Replace unresolved template placeholders with final course-specific content.")
+        return (
+            "P1",
+            "template_placeholder_cleanup",
+            "Faculty/ID",
+            "Replace unresolved template placeholders with final course-specific content.",
+        )
     if "template asset reference not mapped to canvas template package" in lowered:
         return (
             "P1",
@@ -135,7 +165,12 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "Map unresolved Brightspace template assets to approved Canvas template assets and re-run migration.",
         )
     if "legacy d2l links were neutralized" in lowered:
-        return ("P1", "relink_neutralized_d2l_links", "ID", "Replace neutralized D2L links with valid Canvas links.")
+        return (
+            "P1",
+            "relink_neutralized_d2l_links",
+            "ID",
+            "Replace neutralized D2L links with valid Canvas links.",
+        )
     if "question bank migration requires manual verification" in lowered:
         return (
             "P1",
@@ -144,27 +179,80 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "Rebuild question-pool logic in Canvas, verify draw counts/randomization, and share any required item banks with the course so coordinators can edit them.",
         )
     if "youtube embeds may violate ad-free requirement" in lowered:
-        return ("P2", "youtube_hosting_review", "Faculty/ID", "Confirm hosting approach (for example Canvas Studio or approved platform).")
+        return (
+            "P2",
+            "youtube_hosting_review",
+            "Faculty/ID",
+            "Confirm hosting approach (for example Canvas Studio or approved platform).",
+        )
     if "announcement migration behavior is non-standard" in lowered:
-        return ("P2", "announcement_settings_review", "ID", "Verify announcement posting state and notification behavior in Canvas.")
+        return (
+            "P2",
+            "announcement_settings_review",
+            "ID",
+            "Verify announcement posting state and notification behavior in Canvas.",
+        )
     if "panopto embed requires permissions" in lowered:
-        return ("P1", "panopto_permissions_review", "ID", "Validate Panopto folder permissions and embed behavior for students.")
+        return (
+            "P1",
+            "panopto_permissions_review",
+            "ID",
+            "Validate Panopto folder permissions and embed behavior for students.",
+        )
     if "h5p content requires manual conversion" in lowered:
-        return ("P2", "h5p_conversion_decision", "ID", "Replace or rebuild H5P content using approved Canvas-compatible workflow.")
+        return (
+            "P2",
+            "h5p_conversion_decision",
+            "ID",
+            "Replace or rebuild H5P content using approved Canvas-compatible workflow.",
+        )
     if "scorm packages require upload" in lowered:
-        return ("P1", "scorm_upload_workflow", "ID", "Re-import SCORM package through Canvas SCORM integration workflow.")
+        return (
+            "P1",
+            "scorm_upload_workflow",
+            "ID",
+            "Re-import SCORM package through Canvas SCORM integration workflow.",
+        )
 
     if issue_type == "accessibility":
-        if "image missing alt attribute" in lowered or "image alt attribute is empty" in lowered:
-            return ("P1", "a11y_alt_text", "Faculty/ID", "Add meaningful alt text or mark decorative images appropriately.")
+        if (
+            "image missing alt attribute" in lowered
+            or "image alt attribute is empty" in lowered
+        ):
+            return (
+                "P1",
+                "a11y_alt_text",
+                "Faculty/ID",
+                "Add meaningful alt text or mark decorative images appropriately.",
+            )
         if "heading level jump detected" in lowered:
-            return ("P2", "a11y_heading_order", "Faculty/ID", "Fix heading hierarchy to avoid level jumps.")
+            return (
+                "P2",
+                "a11y_heading_order",
+                "Faculty/ID",
+                "Fix heading hierarchy to avoid level jumps.",
+            )
         if "table missing caption" in lowered:
-            return ("P2", "a11y_table_caption", "Faculty/ID", "Add table captions and header associations as needed.")
+            return (
+                "P2",
+                "a11y_table_caption",
+                "Faculty/ID",
+                "Add table captions and header associations as needed.",
+            )
         if "non-descriptive link text" in lowered:
-            return ("P2", "a11y_link_text", "Faculty/ID", "Replace vague link text with descriptive labels.")
+            return (
+                "P2",
+                "a11y_link_text",
+                "Faculty/ID",
+                "Replace vague link text with descriptive labels.",
+            )
 
-    return ("P2", "manual_review_item", "ID", "Review and resolve this migration finding.")
+    return (
+        "P2",
+        "manual_review_item",
+        "ID",
+        "Review and resolve this migration finding.",
+    )
 
 
 def _map_reference_best_practice_gap(row_id: str, label: str) -> tuple[str, str, str]:
@@ -199,7 +287,96 @@ def _map_reference_best_practice_gap(row_id: str, label: str) -> tuple[str, str,
             "Faculty/ID",
             "Use browser device emulation or Canvas mobile tooling to verify the final course pages and assessments in a mobile-sized view before release.",
         )
-    return ("P2", "ID Lead", "Add explicit rule, trigger, or preflight check to cover this best-practice topic.")
+    return (
+        "P2",
+        "ID Lead",
+        "Add explicit rule, trigger, or preflight check to cover this best-practice topic.",
+    )
+
+
+def _generate_standard_postmigration_tasks() -> list[ChecklistItem]:
+    """Return standard post-migration QA tasks based on known D2L→Canvas migration pain-points.
+
+    These items represent manual checks that are required (or likely needed) for every
+    course migration.  They cannot be fully auto-detected from HTML or Canvas import logs
+    because they depend on D2L gradebook/quiz XML that is not yet parsed by the pipeline.
+    They are included as P2 reminders so nothing falls through the cracks.
+    """
+    return [
+        ChecklistItem(
+            priority="P2",
+            source="standard_migration",
+            category="gradebook_structure",
+            owner="ID",
+            description="Verify Canvas Gradebook assignment groups, weights, and drop rules",
+            action=(
+                "Open Gradebook → Assignment Groups.  Recreate D2L category weights, confirm "
+                "assignment group totals match D2L, and configure drop-lowest/drop-highest rules "
+                "for any activity with student-drop policies."
+            ),
+        ),
+        ChecklistItem(
+            priority="P2",
+            source="standard_migration",
+            category="bonus_extra_credit",
+            owner="ID/Faculty",
+            description="Verify bonus / extra-credit assignments are configured correctly",
+            action=(
+                "In Canvas, extra-credit assignments must be worth 0 points and have an attached "
+                "rubric (or a manual points entry).  Find any D2L 'bonus' items and set them up "
+                "in Canvas accordingly.  Confirm they do not count against the total points denominator."
+            ),
+        ),
+        ChecklistItem(
+            priority="P2",
+            source="standard_migration",
+            category="syllabus_quiz_gate",
+            owner="ID/Faculty",
+            description="Verify Syllabus Quiz / prerequisite-gating is re-implemented in Canvas",
+            action=(
+                "If the D2L course gated module access with a Syllabus Quiz (quiz set to "
+                "'Not in Gradebook'), recreate the prerequisite using Canvas Module Requirements "
+                "(complete the quiz before proceeding) and verify the quiz is excluded from "
+                "grade calculations."
+            ),
+        ),
+        ChecklistItem(
+            priority="P2",
+            source="standard_migration",
+            category="faculty_only_content",
+            owner="ID",
+            description="Verify instructor-only / faculty-only pages are unpublished in Canvas",
+            action=(
+                "Identify D2L pages restricted to Staff/Instructor roles (release conditions).  "
+                "In Canvas, set those pages to Unpublished and add '(Instructor Only)' to the "
+                "page title per naming convention so they are excluded from student view."
+            ),
+        ),
+        ChecklistItem(
+            priority="P2",
+            source="standard_migration",
+            category="rubric_configuration",
+            owner="ID/Faculty",
+            description="Verify rubric point ranges, criteria, and grading connections in Canvas",
+            action=(
+                "Open each migrated rubric in Canvas.  Check that criterion point ranges are "
+                "correct (D2L and Canvas range differently), attach the rubric to its assignment, "
+                "and enable 'Use this rubric for grading' on graded assessments."
+            ),
+        ),
+        ChecklistItem(
+            priority="P2",
+            source="standard_migration",
+            category="item_bank_sharing",
+            owner="ID",
+            description="Share item banks with course coordinator after quiz migration",
+            action=(
+                "After rebuilding quiz question banks, open Canvas Item Banks, share each required "
+                "bank at the course level, and confirm the course coordinator can view and edit "
+                "questions.  This is required before the course goes live for multi-section courses."
+            ),
+        ),
+    ]
 
 
 def _load_canvas_items(path: Path) -> list[ChecklistItem]:
@@ -235,7 +412,9 @@ def _load_manual_review_items(path: Path | None) -> list[ChecklistItem]:
     for (issue_type, reason), meta in grouped.items():
         priority, category, owner, action = _map_manual_review_group(issue_type, reason)
         sample_files = ", ".join(meta["files"][:3])
-        reference = f"{path.name} | sample files: {sample_files}" if sample_files else path.name
+        reference = (
+            f"{path.name} | sample files: {sample_files}" if sample_files else path.name
+        )
         items.append(
             ChecklistItem(
                 priority=priority,
@@ -283,7 +462,9 @@ def _load_reference_items(path: Path | None) -> list[ChecklistItem]:
         label = str(row.get("label", "")).strip()
         if not label:
             continue
-        priority, owner, action = _map_reference_best_practice_gap(str(row.get("id", "")), label)
+        priority, owner, action = _map_reference_best_practice_gap(
+            str(row.get("id", "")), label
+        )
         items.append(
             ChecklistItem(
                 priority=priority,
@@ -343,7 +524,15 @@ def build_fix_checklist(
     items.extend(_load_canvas_items(canvas_issues_json))
     items.extend(_load_manual_review_items(manual_review_csv))
     items.extend(_load_reference_items(reference_audit_json))
-    items.sort(key=lambda item: (_priority_rank(item.priority), item.source, item.category, item.description))
+    items.extend(_generate_standard_postmigration_tasks())
+    items.sort(
+        key=lambda item: (
+            _priority_rank(item.priority),
+            item.source,
+            item.category,
+            item.description,
+        )
+    )
 
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
@@ -386,15 +575,25 @@ def build_fix_checklist(
         "# Migration Fix Checklist",
         "",
         f"- Canvas issues input: `{canvas_issues_json}`",
-        f"- Manual review input: `{manual_review_csv}`" if manual_review_csv else "- Manual review input: none",
-        f"- Reference audit input: `{reference_audit_json}`" if reference_audit_json else "- Reference audit input: none",
+        (
+            f"- Manual review input: `{manual_review_csv}`"
+            if manual_review_csv
+            else "- Manual review input: none"
+        ),
+        (
+            f"- Reference audit input: `{reference_audit_json}`"
+            if reference_audit_json
+            else "- Reference audit input: none"
+        ),
         f"- Total checklist items: {len(items)}",
         f"- CSV output: `{csv_path}`",
         "",
         "## Summary",
         "",
     ]
-    for priority, count in sorted(by_priority.items(), key=lambda x: _priority_rank(x[0])):
+    for priority, count in sorted(
+        by_priority.items(), key=lambda x: _priority_rank(x[0])
+    ):
         lines.append(f"- {priority}: {count}")
     lines.append("")
     for source, count in by_source.items():
@@ -422,11 +621,30 @@ def build_parser() -> argparse.ArgumentParser:
         prog="lms-build-fix-checklist",
         description="Build migration fix checklist from Canvas import issues and optional audit files.",
     )
-    parser.add_argument("canvas_issues_json", type=Path, help="Path to canvas-migration-issues.json")
-    parser.add_argument("--output-dir", type=Path, default=Path("output"), help="Output directory")
-    parser.add_argument("--manual-review-csv", type=Path, default=None, help="Optional manual-review CSV")
-    parser.add_argument("--reference-audit-json", type=Path, default=None, help="Optional reference-audit JSON")
-    parser.add_argument("--basename", type=str, default="migration-fix-checklist", help="Output base name")
+    parser.add_argument(
+        "canvas_issues_json", type=Path, help="Path to canvas-migration-issues.json"
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("output"), help="Output directory"
+    )
+    parser.add_argument(
+        "--manual-review-csv",
+        type=Path,
+        default=None,
+        help="Optional manual-review CSV",
+    )
+    parser.add_argument(
+        "--reference-audit-json",
+        type=Path,
+        default=None,
+        help="Optional reference-audit JSON",
+    )
+    parser.add_argument(
+        "--basename",
+        type=str,
+        default="migration-fix-checklist",
+        help="Output base name",
+    )
     return parser
 
 
