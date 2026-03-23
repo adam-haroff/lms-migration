@@ -150,6 +150,17 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "set the point value, and attach the appropriate assignment group. "
             "D2L graded discussion scoring does not transfer automatically.",
         )
+    if "d2l dropbox assignment detected" in lowered:
+        return (
+            "P1",
+            "dropbox_assignment_setup",
+            "ID/Faculty",
+            "Canvas does not import D2L Dropbox folders automatically (proprietary resource type). "
+            "For each assignment: (1) create a new Canvas Assignment; (2) set the submission type "
+            "(File Upload, Text Entry, etc.) and point value from the evidence column; (3) re-enter "
+            "due date and availability window; (4) attach any rubric listed in the evidence; "
+            "(5) publish when ready. Verify that the assignment appears in the correct assignment group.",
+        )
     if "availability window detected in gradebook item" in lowered:
         return (
             "P2",

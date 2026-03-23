@@ -1330,6 +1330,93 @@ def _audit_rubrics(zip_path: Path) -> list[dict]:
     return rows
 
 
+def _audit_dropbox_folders(zip_path: Path) -> list[dict]:
+    """Return one row per D2L Dropbox submission folder found in dropbox_d2l.xml.
+
+    D2L Dropbox folders are the primary assignment-submission mechanism and map
+    to Canvas Assignments.  Canvas does NOT auto-import them — they use the D2L
+    proprietary ``d2ldropbox`` IMSCC resource type which Canvas ignores.  Each
+    folder must be recreated manually in Canvas.
+    """
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            dropbox_files = [
+                n for n in names if re.match(r"dropbox_d2l\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in dropbox_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                raw = re.sub(r"<\?xml[^>]*\?>", "", raw, count=1)
+                # Strip the d2l_2p0 namespace prefix so ET can parse cleanly
+                raw = re.sub(r'\bd2l_2p0:', '', raw)
+                raw = re.sub(r'\bxmlns:d2l_2p0="[^"]*"', '', raw)
+                try:
+                    root = ET.fromstring(raw)
+                except ET.ParseError:
+                    continue
+                for folder in root.iter("folder"):
+                    name = folder.get("name", "").strip() or folder.get("id", "unknown")
+                    out_of = folder.get("out_of", "").strip()
+                    grade_item = folder.get("grade_item", "").strip()
+                    is_hidden = folder.get("is_hidden", "false").strip().lower()
+
+                    # Due date
+                    due_el = folder.find("date_due")
+                    due_str = ""
+                    if due_el is not None and due_el.text:
+                        due_str = due_el.text.strip()[:10]  # YYYY-MM-DD
+
+                    # Availability window
+                    start_el = folder.find("availability_start/availability_date")
+                    end_el = folder.find("availability_end/availability_date")
+                    avail_parts: list[str] = []
+                    if start_el is not None and start_el.text:
+                        avail_parts.append(f"open {start_el.text.strip()[:10]}")
+                    if end_el is not None and end_el.text:
+                        avail_parts.append(f"close {end_el.text.strip()[:10]}")
+                    avail_str = " | ".join(avail_parts) if avail_parts else ""
+
+                    # Rubric association
+                    rubric_el = folder.find(".//rubric")
+                    rubric_note = f" | rubric: {rubric_el.text.strip()}" if (
+                        rubric_el is not None and rubric_el.text
+                    ) else ""
+
+                    # Build evidence string
+                    evidence_parts = [f'folder: "{name}"']
+                    if out_of:
+                        evidence_parts.append(f"points: {out_of.rstrip('0').rstrip('.')}")
+                    if grade_item:
+                        evidence_parts.append(f"grade_item: {grade_item}")
+                    if due_str:
+                        evidence_parts.append(f"due: {due_str}")
+                    if avail_str:
+                        evidence_parts.append(avail_str)
+                    if rubric_note:
+                        evidence_parts.append(rubric_note.lstrip(" | "))
+                    if is_hidden == "true":
+                        evidence_parts.append("status: hidden")
+
+                    rows.append(
+                        {
+                            "file": fname,
+                            "type": "d2l_xml_audit",
+                            "reason": (
+                                "D2L Dropbox assignment detected — "
+                                "verify Canvas imported as Assignment and configure submission settings"
+                            ),
+                            "evidence": " | ".join(evidence_parts),
+                        }
+                    )
+    except Exception:
+        pass
+    return rows
+
+
 def _audit_date_shift_items(zip_path: Path) -> list[dict]:
     """Inventory date-bearing D2L items to support Canvas date-shift planning.
 
@@ -1462,6 +1549,7 @@ def _append_xml_audit_rows_to_csv(zip_path: Path, csv_path: Path) -> None:
     rows.extend(_audit_availability_windows(zip_path))
     rows.extend(_audit_gradebook_groups(zip_path))
     rows.extend(_audit_rubrics(zip_path))
+    rows.extend(_audit_dropbox_folders(zip_path))
     rows.extend(_audit_date_shift_items(zip_path))
     if not rows:
         return

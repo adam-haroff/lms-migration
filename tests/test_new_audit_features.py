@@ -297,6 +297,16 @@ class TestFixChecklistNewHandlers:
         assert category == "graded_discussion_setup"
         assert "grading" in action.lower()
 
+    def test_dropbox_assignment_handler(self):
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "D2L Dropbox assignment detected — verify Canvas imported as Assignment and configure submission settings",
+        )
+        assert priority == "P1"
+        assert category == "dropbox_assignment_setup"
+        assert "Canvas" in action
+        assert "assignment" in action.lower()
+
     def test_availability_window_handler(self):
         priority, category, owner, action = _map_manual_review_group(
             "d2l_xml_audit",
@@ -405,6 +415,116 @@ class TestPipelineXmlAuditHelpers:
         zp = self._make_zip({"imsmanifest.xml": "<manifest/>"})
         rows = _audit_graded_discussions(zp)
         assert rows == []
+
+
+class TestAuditDropboxFolders:
+    """_audit_dropbox_folders() detects D2L Dropbox assignment folders."""
+
+    def _make_zip(self, files: dict[str, str]) -> Path:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, content in files.items():
+                zf.writestr(name, content)
+        buf.seek(0)
+        tmp = Path("/tmp/test_dropbox_audit.zip")
+        tmp.write_bytes(buf.read())
+        return tmp
+
+    def _dropbox_xml(self, folders_xml: str) -> str:
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<dropbox xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">'
+            + folders_xml
+            + "</dropbox>"
+        )
+
+    def test_basic_folder_detected(self):
+        from lms_migration.pipeline import _audit_dropbox_folders
+
+        xml = self._dropbox_xml(
+            '<folder name="Essay Assignment" id="1" out_of="50.000000" '
+            'grade_item="Sinclair-12345" is_hidden="false">'
+            "<date_due>2026-03-15T23:59:00</date_due>"
+            "</folder>"
+        )
+        zp = self._make_zip({"dropbox_d2l.xml": xml})
+        rows = _audit_dropbox_folders(zp)
+        assert len(rows) == 1
+        row = rows[0]
+        assert "d2l dropbox assignment" in row["reason"].lower()
+        assert "Essay Assignment" in row["evidence"]
+        assert "50" in row["evidence"]
+        assert "2026-03-15" in row["evidence"]
+
+    def test_folder_with_availability_window(self):
+        from lms_migration.pipeline import _audit_dropbox_folders
+
+        xml = self._dropbox_xml(
+            '<folder name="Report" id="2" out_of="30" grade_item="abc" is_hidden="false">'
+            "<availability_start><availability_date>2026-01-10T00:00:00</availability_date>"
+            "<availability_type>0</availability_type></availability_start>"
+            "<availability_end><availability_date>2026-05-01T23:59:00</availability_date>"
+            "<availability_type>0</availability_type></availability_end>"
+            "</folder>"
+        )
+        zp = self._make_zip({"dropbox_d2l.xml": xml})
+        rows = _audit_dropbox_folders(zp)
+        assert len(rows) == 1
+        assert "open 2026-01-10" in rows[0]["evidence"]
+        assert "close 2026-05-01" in rows[0]["evidence"]
+
+    def test_folder_with_rubric(self):
+        from lms_migration.pipeline import _audit_dropbox_folders
+
+        xml = self._dropbox_xml(
+            '<folder name="Project" id="3" out_of="100" grade_item="xyz" is_hidden="false">'
+            '<d2l_2p0:associations><d2l_2p0:rubric isDefault="false">7</d2l_2p0:rubric>'
+            "</d2l_2p0:associations>"
+            "</folder>"
+        )
+        zp = self._make_zip({"dropbox_d2l.xml": xml})
+        rows = _audit_dropbox_folders(zp)
+        assert len(rows) == 1
+        assert "rubric" in rows[0]["evidence"].lower()
+
+    def test_multiple_folders(self):
+        from lms_migration.pipeline import _audit_dropbox_folders
+
+        xml = self._dropbox_xml(
+            '<folder name="A1" id="1" out_of="10" grade_item="g1" is_hidden="false"/>'
+            '<folder name="A2" id="2" out_of="20" grade_item="g2" is_hidden="false"/>'
+        )
+        zp = self._make_zip({"dropbox_d2l.xml": xml})
+        rows = _audit_dropbox_folders(zp)
+        assert len(rows) == 2
+
+    def test_hidden_folder_flagged(self):
+        from lms_migration.pipeline import _audit_dropbox_folders
+
+        xml = self._dropbox_xml(
+            '<folder name="Hidden" id="5" out_of="0" grade_item="" is_hidden="true"/>'
+        )
+        zp = self._make_zip({"dropbox_d2l.xml": xml})
+        rows = _audit_dropbox_folders(zp)
+        assert len(rows) == 1
+        assert "hidden" in rows[0]["evidence"].lower()
+
+    def test_no_dropbox_file_returns_empty(self):
+        from lms_migration.pipeline import _audit_dropbox_folders
+
+        zp = self._make_zip({"imsmanifest.xml": "<manifest/>"})
+        rows = _audit_dropbox_folders(zp)
+        assert rows == []
+
+    def test_row_type_is_d2l_xml_audit(self):
+        from lms_migration.pipeline import _audit_dropbox_folders
+
+        xml = self._dropbox_xml(
+            '<folder name="A" id="1" out_of="10" grade_item="g" is_hidden="false"/>'
+        )
+        zp = self._make_zip({"dropbox_d2l.xml": xml})
+        rows = _audit_dropbox_folders(zp)
+        assert rows[0]["type"] == "d2l_xml_audit"
 
 
 # ===========================================================================
