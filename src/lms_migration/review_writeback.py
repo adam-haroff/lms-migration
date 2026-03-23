@@ -6,6 +6,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from .html_tools import (
@@ -276,7 +277,7 @@ def apply_review_draft(
 
         _zip_directory(unpack_dir, output_zip)
 
-    report = {
+    report: dict[str, Any] = {
         "inputs": {
             "draft_json": str(draft_json),
             "converted_zip": str(converted_zip),

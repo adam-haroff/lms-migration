@@ -206,7 +206,7 @@ def classify_page(
     # Module intro: XX-ChapterName/Introduction and Objectives.html
     m = _MODULE_FOLDER_RE.match(path)
     if m and ("introduction" in path_lower or "objectives" in path_lower):
-        module_number = int(m.group(1))
+        module_number: int | None = int(m.group(1))
         chapter_title = m.group(2).replace("_", " ").replace("-", " ").title().strip()
         return PageRole.MODULE_INTRO, module_number, chapter_title
 
@@ -219,14 +219,19 @@ def classify_page(
     # module-intro pattern but whose body clearly contains both an
     # Introduction heading and an Objectives list are treated as MODULE_INTRO.
     if body and _INTRO_HEADING_RE.search(body) and _OBJECTIVES_HEADING_RE.search(body):
-        mod_match = re.search(r"\b(?:module|chapter|unit)\s*(\d+)", title, re.IGNORECASE)
+        mod_match = re.search(
+            r"\b(?:module|chapter|unit)\s*(\d+)", title, re.IGNORECASE
+        )
         module_number = int(mod_match.group(1)) if mod_match else None
-        chapter_title = re.sub(
-            r"\s*[:\-\u2013\u2014]\s*(?:introduction|objectives?).*$",
-            "",
-            title,
-            flags=re.IGNORECASE,
-        ).strip() or title
+        chapter_title = (
+            re.sub(
+                r"\s*[:\-\u2013\u2014]\s*(?:introduction|objectives?).*$",
+                "",
+                title,
+                flags=re.IGNORECASE,
+            ).strip()
+            or title
+        )
         return PageRole.MODULE_INTRO, module_number, chapter_title
 
     return PageRole.STANDALONE, None, ""

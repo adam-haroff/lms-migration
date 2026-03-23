@@ -1185,8 +1185,6 @@ class TestNewHandlers:
 class TestDetectIframeIssues:
     """Tests for domain-aware detect_iframe_issues() and related fix_checklist handlers."""
 
-    from lms_migration.html_tools import detect_iframe_issues as _f
-
     def test_youtube_iframe_detected(self):
         from lms_migration.html_tools import detect_iframe_issues
 

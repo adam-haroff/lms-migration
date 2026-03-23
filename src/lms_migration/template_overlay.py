@@ -1143,7 +1143,7 @@ def apply_template_overlay(
                     updated_tag,
                     flags=re.IGNORECASE,
                 )
-                style_tokens: list[str] = []
+                style_tokens = []
                 if style_match is not None:
                     existing_style = style_match.group("style")
                     for token in existing_style.split(";"):
@@ -1216,7 +1216,7 @@ def apply_template_overlay(
                 updated_tag,
                 flags=re.IGNORECASE,
             )
-            style_tokens: list[str] = []
+            style_tokens = []
             has_float_style = False
             if style_match is not None:
                 existing_style = style_match.group("style")
@@ -1858,9 +1858,9 @@ def build_template_overlay_report(
     output_json_path: Path,
     materialization: dict | None = None,
 ) -> dict:
-    totals = Counter()
-    unresolved_basenames = Counter()
-    ignored_basenames = Counter()
+    totals: Counter[str] = Counter()
+    unresolved_basenames: Counter[str] = Counter()
+    ignored_basenames: Counter[str] = Counter()
     alias_pairs_used: set[str] = set()
     unresolved_file_count = 0
 

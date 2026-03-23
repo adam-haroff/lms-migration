@@ -672,8 +672,8 @@ def _to_serializable_issue(issue: ManualReviewIssue) -> dict[str, str]:
 def _build_issue_summary(file_results: list[FileResult]) -> dict:
     manual_files = 0
     a11y_files = 0
-    manual_reason_counts = Counter()
-    a11y_reason_counts = Counter()
+    manual_reason_counts: Counter[str] = Counter()
+    a11y_reason_counts: Counter[str] = Counter()
     file_issue_rows: list[dict] = []
 
     for result in file_results:
@@ -1284,7 +1284,7 @@ def _audit_rubrics(zip_path: Path) -> list[dict]:
 
                     # State: 0=active, 1=archived, 2=draft (common D2L conventions)
                     state_raw = state_m.group(1).strip() if state_m else ""
-                    state_label: dict[str, str] = {
+                    state_label: str = {
                         "0": "active",
                         "1": "archived",
                         "2": "draft",
@@ -1507,8 +1507,8 @@ def _write_preflight_checklist(
     manual_review_csv: Path | None = None,
 ) -> None:
     summary = report["summary"]
-    manual_counts = Counter()
-    a11y_counts = Counter()
+    manual_counts: Counter[str] = Counter()
+    a11y_counts: Counter[str] = Counter()
     for file_entry in report["files"]:
         for issue in file_entry.get("manual_review_issues", []):
             reason = str(issue.get("reason", "")).strip()
@@ -2037,7 +2037,7 @@ def run_migration(
 
                 original = description
                 updated = original
-                applied_changes: list[AppliedChange] = []
+                applied_changes = []
 
                 updated, duplicate_title_count = _remove_leading_duplicate_title_block(
                     updated, title_text
@@ -2061,7 +2061,7 @@ def run_migration(
                 )
                 applied_changes.extend(rewrite_changes)
 
-                overlay_issues: list[ManualReviewIssue] = []
+                overlay_issues = []
                 if template_overlay_context is not None:
                     updated, overlay_changes, overlay_issues, overlay_file_summary = (
                         apply_template_overlay(

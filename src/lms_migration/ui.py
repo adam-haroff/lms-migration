@@ -1673,12 +1673,6 @@ class LMSMigrationUI:
                 str(_default_pattern_report_json_path(converted_zip))
             )
 
-    def _on_main_configure(self, event: tk.Event) -> None:
-        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
-
-    def _on_canvas_configure(self, event: tk.Event) -> None:
-        self.scroll_canvas.itemconfigure(self.scroll_window, width=event.width)
-
     def _bind_mousewheel(self, event: tk.Event | None = None) -> None:
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
         self.root.bind_all("<Button-4>", self._on_mousewheel)
@@ -1800,7 +1794,9 @@ class LMSMigrationUI:
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
 
-    def _task_failed(self, task_name: str, exc: Exception, traceback_text: str) -> None:
+    def _task_failed(
+        self, task_name: str, exc: BaseException, traceback_text: str
+    ) -> None:
         self._set_busy(False)
         self.status_text_var.set(f"Status: Failed - {task_name}")
         self._log(f"[ERROR] {task_name}: {exc}")
@@ -2086,16 +2082,17 @@ class LMSMigrationUI:
             )
             if snapshot_json is not None and not snapshot_json.exists():
                 snapshot_json = None
-            pre_issues_json = output_dir / "canvas-migration-issues-pre.json"
-            if not pre_issues_json.exists():
-                pre_issues_json = None
-            post_issues_json = output_dir / "canvas-migration-issues-post.json"
-            if not post_issues_json.exists():
-                fallback_issues = output_dir / "canvas-migration-issues.json"
-                post_issues_json = fallback_issues if fallback_issues.exists() else None
-            live_audit_json = output_dir / "canvas-live-link-audit.json"
-            if not live_audit_json.exists():
-                live_audit_json = None
+            _p_pre = output_dir / "canvas-migration-issues-pre.json"
+            pre_issues_json: Path | None = _p_pre if _p_pre.exists() else None
+            _p_post = output_dir / "canvas-migration-issues-post.json"
+            _p_fallback = output_dir / "canvas-migration-issues.json"
+            post_issues_json: Path | None = (
+                _p_post
+                if _p_post.exists()
+                else (_p_fallback if _p_fallback.exists() else None)
+            )
+            _p_live = output_dir / "canvas-live-link-audit.json"
+            live_audit_json: Path | None = _p_live if _p_live.exists() else None
             if not self._artifact_is_current(snapshot_json, result.report_json):
                 snapshot_json = None
             if not self._artifact_is_current(pre_issues_json, result.report_json):
@@ -2926,7 +2923,7 @@ class LMSMigrationUI:
         )
         self.page_review_html_var.set(str(page_review_html))
         if self.auto_open_page_review_var.get() and page_review_html.exists():
-            self.root.after(400, lambda p=page_review_html: webbrowser.open(p.as_uri()))
+            self.root.after(400, lambda p=page_review_html: webbrowser.open(p.as_uri()))  # type: ignore[misc]
         self.root.after(200, lambda: self.notebook.select(1))
         self._task_succeeded("Prepare Canvas package")
 
@@ -3756,7 +3753,7 @@ class LMSMigrationUI:
 
         def task() -> None:
             def _on_progress(msg: str) -> None:
-                self.root.after(0, lambda m=msg: self._log(f"  {m}"))
+                self.root.after(0, lambda m=msg: self._log(f"  {m}"))  # type: ignore[misc]
 
             self.root.after(
                 0,
@@ -4211,21 +4208,21 @@ class LMSMigrationUI:
         template_overlay_json = self._find_latest_matching_file(
             output_dir, "*.template-overlay-report.json"
         )
-        live_audit_json = output_dir / "canvas-live-link-audit.json"
-        if not live_audit_json.exists():
-            live_audit_json = None
+        _p_live = output_dir / "canvas-live-link-audit.json"
+        live_audit_json: Path | None = _p_live if _p_live.exists() else None
 
         course_id = self.canvas_course_id_var.get().strip()
         snapshot_json = self._find_latest_snapshot_json(output_dir, course_id)
         if snapshot_json is not None and not snapshot_json.exists():
             snapshot_json = None
 
-        pre_issues_json = output_dir / "canvas-migration-issues-pre.json"
-        if not pre_issues_json.exists():
-            pre_issues_json = None
+        _p_pre = output_dir / "canvas-migration-issues-pre.json"
+        pre_issues_json: Path | None = _p_pre if _p_pre.exists() else None
 
-        post_issues_json = output_dir / "canvas-migration-issues-post.json"
-        if not post_issues_json.exists():
+        _p_post = output_dir / "canvas-migration-issues-post.json"
+        if _p_post.exists():
+            post_issues_json: Path | None = _p_post
+        else:
             issues_text = self.canvas_issues_output_var.get().strip()
             fallback_issues = (
                 Path(issues_text)
@@ -4385,14 +4382,15 @@ class LMSMigrationUI:
         snapshot_path = self._find_latest_snapshot_json(
             output_dir, self.canvas_course_id_var.get().strip()
         )
-        issues_path = output_dir / "canvas-migration-issues-post.json"
-        if not issues_path.exists():
-            issues_path = output_dir / "canvas-migration-issues.json"
-        if not issues_path.exists():
-            issues_path = None
-        live_audit_path = output_dir / "canvas-live-link-audit.json"
-        if not live_audit_path.exists():
-            live_audit_path = None
+        _p_issues_post = output_dir / "canvas-migration-issues-post.json"
+        _p_issues_fallback = output_dir / "canvas-migration-issues.json"
+        issues_path: Path | None = (
+            _p_issues_post
+            if _p_issues_post.exists()
+            else (_p_issues_fallback if _p_issues_fallback.exists() else None)
+        )
+        _p_live_audit = output_dir / "canvas-live-link-audit.json"
+        live_audit_path: Path | None = _p_live_audit if _p_live_audit.exists() else None
 
         if not self._artifact_is_current(visual_audit_path, migration_report_path):
             visual_audit_path = None
