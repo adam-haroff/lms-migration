@@ -31,6 +31,8 @@ lms-analyze-examples = "lms_migration.example_corpus:main"
 lms-analyze-template-package = "lms_migration.template_package:main"
 lms-visual-audit = "lms_migration.visual_audit:main"
 lms-canvas-preview = "lms_migration.canvas_preview:main"
+lms-snapshot-diff = "lms_migration.canvas_snapshot_diff:main"
+lms-quiz-audit = "lms_migration.quiz_audit:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

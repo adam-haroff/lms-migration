@@ -132,12 +132,131 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "ID",
             "Remove legacy script behavior and verify page rendering in Canvas.",
         )
+    if "d2l media library content detected" in lowered:
+        return (
+            "P1",
+            "d2l_media_library_migration",
+            "ID/Faculty",
+            "Upload D2L-hosted media files to Canvas Studio or Canvas course Files, "
+            "then update each embed/link to point to the new Canvas location. "
+            "D2L ouFileId and /d2l/lp/media/ URLs will not resolve after migration.",
+        )
+    if "graded discussion detected" in lowered:
+        return (
+            "P1",
+            "graded_discussion_setup",
+            "ID/Faculty",
+            "Open the Canvas discussion imported from D2L, enable grading (Graded type), "
+            "set the point value, and attach the appropriate assignment group. "
+            "D2L graded discussion scoring does not transfer automatically.",
+        )
+    if "availability window detected in gradebook item" in lowered:
+        return (
+            "P2",
+            "assignment_availability_window",
+            "Faculty/Course Coordinator",
+            "Re-enter the availability window (available from / until dates) on each "
+            "affected Canvas assignment or quiz. D2L gradebook availability dates are "
+            "not imported by the standard Canvas migration and must be set manually.",
+        )
+    if "gradebook category with drop rule" in lowered:
+        return (
+            "P1",
+            "gradebook_drop_rule_setup",
+            "ID",
+            "In Canvas Grades, open Assignment Groups and set the 'Rules' for this group: "
+            "enter the number of lowest (and/or highest) scores to drop, matching the D2L "
+            "category configuration shown in the evidence column. "
+            "Canvas does not import D2L drop rules automatically.",
+        )
+    if "gradebook category weight" in lowered:
+        return (
+            "P1",
+            "gradebook_group_weights",
+            "ID",
+            "Verify the Canvas assignment group weight matches the D2L category weight "
+            "shown in the evidence column (Grades > Assignment Groups > edit group > weight). "
+            "Enable 'Weight final grade' in Assignments if not already on. "
+            "Incorrect weights directly affect final grade calculations.",
+        )
+    if "bonus/extra-credit grade item detected" in lowered:
+        return (
+            "P1",
+            "extra_credit_setup",
+            "ID/Faculty",
+            "Configure this item as extra credit in Canvas: set the assignment to 0 points "
+            "and check 'Display grade as: Points', or mark the assignment group as extra "
+            "credit via Assignment Groups > Edit Group > Extra Credit. "
+            "D2L bonus items are not automatically flagged as extra credit after migration.",
+        )
+    if "course start date not in d2l export" in lowered:
+        return (
+            "P1",
+            "canvas_date_shift_setup",
+            "Faculty/Course Coordinator",
+            "After importing the course package, open Course Settings > 'Adjust Events and "
+            "Due Dates' and enter the new course start date. This triggers Canvas's bulk "
+            "date-shift so all assignment due dates, availability windows, and module "
+            "unlock dates are moved proportionally. "
+            "The D2L IMSCC export does not include a course offering start date.",
+        )
+    if "quiz availability window detected" in lowered:
+        return (
+            "P1",
+            "quiz_date_window_verification",
+            "Faculty/Course Coordinator",
+            "Set the quiz availability window (available from / until / due dates) in Canvas. "
+            "Go to Quizzes > Edit for each affected quiz and enter the correct dates for the "
+            "new course schedule. These dates are not imported from D2L automatically. "
+            "See `d2l-export.quiz-audit.md` for the complete per-quiz settings inventory "
+            "(time limits, attempts, shuffle settings).",
+        )
+    if "layout css may render differently" in lowered:
+        return (
+            "P2",
+            "layout_css_rendering_review",
+            "ID",
+            "Open each affected page in Canvas and compare the visual layout. "
+            "Common issues include fixed-width tables overflowing on narrow screens, "
+            "multi-column grids collapsing to single-column, and custom font sizes "
+            "being overridden by Canvas styles. Where possible, replace fixed pixel "
+            "widths with percentage widths or the Canvas responsive table pattern. "
+            "Refer to the evidence column for the specific element and width value.",
+        )
+    if "embedded youtube video" in lowered or "embedded vimeo video" in lowered:
+        platform = "YouTube" if "youtube" in lowered else "Vimeo"
+        return (
+            "P2",
+            "a11y_video_captions",
+            "ID/Faculty",
+            f"Verify that all {platform} videos include closed captions or a linked "
+            f"transcript. On {platform}, check the video's CC settings (auto-generated "
+            "captions may need editing for accuracy). Add a transcript link directly "
+            "below the embed if captions are unavailable. This is required for ADA "
+            "compliance (WCAG 2.1 SC 1.2.2).",
+        )
     if "embedded iframe" in lowered:
         return (
             "P1",
             "embedded_iframe_review",
             "ID",
             "Review each iframe for accessibility, security, and responsive behavior.",
+        )
+    if "d2l quicklink" in lowered and "lti tool embed" in lowered:
+        # Extract rCode and title from the reason string for a specific action.
+        rcode_match = re.search(r"\[rcode:\s*([^\]]+)\]", lowered)
+        rcode_note = (
+            f" (D2L rCode: {rcode_match.group(1).strip()})" if rcode_match else ""
+        )
+        return (
+            "P1",
+            "lti_quicklink_reconfiguration",
+            "Faculty/Course Coordinator",
+            f"This D2L LTI quick-link{rcode_note} will NOT resolve after migration. "
+            "To fix: (1) confirm with your Canvas admin that the LTI tool is configured "
+            "in Canvas (Settings \u2192 Apps); (2) open the Canvas page, delete this broken "
+            "embed, and re-insert the tool using the Rich Content Editor \u2192 Apps picker. "
+            "The original D2L rCode URL is institution-specific and cannot be reused in Canvas.",
         )
     if "lti tool embed" in lowered:
         # Pattern from detect_lti_embed_issues: "LTI tool embed (ToolName) — verify launch URL after migration"
@@ -146,16 +265,40 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
         return (
             "P1",
             "lti_embed_reconfiguration",
-            "ID",
-            f"Re-embed {tool_name} using the Canvas LTI integration (Settings → Apps → {tool_name}) "
-            "rather than the raw D2L src URL, which will not resolve after migration.",
+            "Faculty/Course Coordinator",
+            f"Coordinate with your instructional designer or Canvas admin to verify {tool_name} "
+            f"is configured in Canvas (Settings → Apps → {tool_name}), then replace the D2L "
+            "embed with a Canvas LTI embed using the Rich Content Editor. "
+            "The original D2L src URL will not resolve after migration.",
+        )
+    if "d2l rubric detected" in lowered:
+        return (
+            "P1",
+            "rubric_import_setup",
+            "ID/Faculty",
+            "D2L rubrics are not automatically migrated by Canvas import. For each rubric: "
+            "(1) recreate it in Canvas via Outcomes > Manage Rubrics > Add Rubric, matching "
+            "the criteria names, level names, and point values shown in the evidence column; "
+            "(2) attach it to the corresponding assignment or discussion via Edit Assignment → "
+            "Add Rubric; (3) check 'Use this rubric for grading' and (4) verify 'Free-form "
+            "comment' and 'Hide score total' settings match faculty expectations.",
+        )
+    if "instructor note placeholder remains" in lowered:
+        return (
+            "P1",
+            "instructor_note_cleanup",
+            "Faculty/Course Coordinator",
+            "Replace [Instructor Note: ...] placeholders with finalized, course-specific "
+            "content before publishing. These are instructor-variable sections that the "
+            "migration tool cannot fill in automatically.",
         )
     if "template placeholder text remains" in lowered:
         return (
             "P1",
             "template_placeholder_cleanup",
-            "Faculty/ID",
-            "Replace unresolved template placeholders with final course-specific content.",
+            "Faculty/Course Coordinator",
+            "Replace unresolved template placeholders (such as 'Fill in text here') with "
+            "final, course-specific content before publishing.",
         )
     if "template asset reference not mapped to canvas template package" in lowered:
         return (
@@ -196,8 +339,10 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
         return (
             "P1",
             "panopto_permissions_review",
-            "ID",
-            "Validate Panopto folder permissions and embed behavior for students.",
+            "Faculty/Course Coordinator",
+            "Verify your Panopto folder permissions allow enrolled students to view the video. "
+            "Re-embed the video using the Canvas Panopto LTI picker (via Rich Content Editor) "
+            "rather than the original D2L src URL, which will not resolve after migration.",
         )
     if "h5p content requires manual conversion" in lowered:
         return (
@@ -210,8 +355,11 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
         return (
             "P1",
             "scorm_upload_workflow",
-            "ID",
-            "Re-import SCORM package through Canvas SCORM integration workflow.",
+            "Faculty/Course Coordinator",
+            "Re-upload the SCORM package to Canvas via Files > Upload, then embed it using "
+            "the Canvas SCORM player. Verify completion tracking and gradebook sync after "
+            "upload. Coordinate with your instructional designer if the SCORM package "
+            "needs to be rebuilt or re-authored.",
         )
 
     if issue_type == "accessibility":

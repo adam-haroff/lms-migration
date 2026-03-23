@@ -3359,6 +3359,16 @@ class LMSMigrationUI:
             migration_report_json = None
 
         def task() -> None:
+            template_pkg_text = self.template_package_var.get().strip()
+            template_pkg = Path(template_pkg_text) if template_pkg_text else None
+            if template_pkg is not None and not template_pkg.exists():
+                template_pkg = None
+
+            alias_map_text = self.template_alias_map_var.get().strip()
+            alias_map = Path(alias_map_text) if alias_map_text else None
+            if alias_map is not None and not alias_map.exists():
+                alias_map = None
+
             result = apply_review_draft(
                 draft_json=draft_json,
                 converted_zip=converted_zip,
@@ -3383,6 +3393,8 @@ class LMSMigrationUI:
                 best_practice_enforcer=bool(
                     self.enable_best_practice_enforcer_var.get()
                 ),
+                template_package=template_pkg,
+                template_alias_map_json=alias_map,
                 output_zip_path=output_zip,
             )
 

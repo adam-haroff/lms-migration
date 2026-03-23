@@ -13,13 +13,16 @@
       "require_mc_closing_bullet": false,
       "preflight_items": [
         "Review all manual-review CSV findings before publishing.",
-        "Run Canvas link validator after import and resolve broken links.",
+        "Run Canvas link validator after import. For any 404s where the correct replacement URL is unknown, flag them for the faculty/course coordinator to supply the new destination.",
         "Verify quiz scoring, attempts, and item-bank behavior for migrated assessments.",
-        "If quizzes use item banks, confirm the banks are course-shared so the course coordinator can edit them.",
+        "If quizzes use item banks, share each item bank with the course and grant the Course Coordinator editing privileges (Item Banks > share > allow editing).",
         "Confirm rubric connection and ensure 'Use this rubric for grading' is enabled where required.",
         "If videos came from the D2L media library, rehost them in course-owned Canvas Studio or another approved course-owned location and replace the embeds.",
-        "Check key content and assessments in mobile view before release.",
-        "Run Canvas accessibility checker on all edited pages."
+        "Do a final review from the default view and 'View as Student'; test on iPad or phone using the Canvas Teacher and Student apps if time allows.",
+        "Run Canvas accessibility checker on all edited pages.",
+        "Add the Course Coordinator as faculty to both the Migrated D2L Course Shell and the Blueprint via People.",
+        "Backup the completed Blueprint: export the course as a zip file, create a folder in Canvas Blueprint Backups named DEPT NNNN (e.g., ACC 2321), and upload the zip without renaming it.",
+        "Send the Course Migration Complete notice to the Course Coordinator (Email #2 — Course Migration Complete)."
       ]
     },
     "strict": {
@@ -37,14 +40,17 @@
         "Review all manual-review CSV findings before publishing.",
         "Resolve any unresolved template placeholders (Instructor Notes, 'Fill in text here', title placeholders).",
         "Verify each IC page checklist includes the required Course Q&A closing bullet.",
-        "Run Canvas link validator after import and resolve broken links.",
+        "Run Canvas link validator after import. For any 404s where the correct replacement URL is unknown, flag them for the faculty/course coordinator to supply the new destination.",
         "Verify quiz scoring, attempts, item-bank draw logic, and avoid Detect Multiple Sessions warning behavior.",
-        "If quizzes use item banks, confirm the banks are course-shared so the course coordinator can edit them.",
+        "If quizzes use item banks, share each item bank with the course and grant the Course Coordinator editing privileges (Item Banks > share > allow editing).",
         "Confirm rubric connection and ensure 'Use this rubric for grading' is enabled where required.",
         "If videos came from the D2L media library, rehost them in course-owned Canvas Studio or another approved course-owned location and replace the embeds.",
-        "Check key content and assessments in mobile view before release.",
+        "Do a final review from the default view and 'View as Student'; test on iPad or phone using the Canvas Teacher and Student apps if time allows.",
         "Complete syllabus finalization and confirm CAD link alignment before release.",
-        "Run Canvas accessibility checker on all edited pages."
+        "Run Canvas accessibility checker on all edited pages.",
+        "Add the Course Coordinator as faculty to both the Migrated D2L Course Shell and the Blueprint via People.",
+        "Backup the completed Blueprint: export the course as a zip file, create a folder in Canvas Blueprint Backups named DEPT NNNN (e.g., ACC 2321), and upload the zip without renaming it.",
+        "Send the Course Migration Complete notice to the Course Coordinator (Email #2 — Course Migration Complete)."
       ]
     }
   }

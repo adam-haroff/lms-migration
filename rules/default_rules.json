@@ -22,11 +22,6 @@
   ],
   "manual_review_triggers": [
     {
-      "reason": "Embedded iframe requires manual accessibility and policy review",
-      "pattern": "<iframe\\b",
-      "flags": "i"
-    },
-    {
       "reason": "Legacy script blocks should be removed or replaced",
       "pattern": "<script\\b",
       "flags": "i"

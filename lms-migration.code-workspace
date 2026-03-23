@@ -29,7 +29,10 @@
     "python.testing.pytestArgs": ["tests"],
     "python.analysis.extraPaths": ["src"],
     "ruff.enable": true,
-    "ruff.organizeImports": true
+    "ruff.organizeImports": true,
+    "chat.tools.terminal.autoApprove": {
+      ".venv/bin/python": true
+    }
   },
   "extensions": {
     "recommendations": [

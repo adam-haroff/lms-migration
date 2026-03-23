@@ -27,10 +27,13 @@ from .html_tools import (
     check_template_heuristics,
     detect_layout_breaking_issues,
     detect_lti_embed_issues,
+    detect_iframe_issues,
+    detect_d2l_media_library_embeds,
     detect_manual_review_issues,
     neutralize_legacy_d2l_hrefs_in_markup,
     repair_missing_local_references,
 )
+from .fix_checklist import _map_manual_review_group
 from .policy_profiles import PolicyProfile, get_policy_profile
 from .rules import load_rules
 from .template_merger import run_template_merge
@@ -659,7 +662,11 @@ def _apply_template_module_structure_to_organization(
 
 
 def _to_serializable_issue(issue: ManualReviewIssue) -> dict[str, str]:
-    return {"reason": issue.reason, "evidence": issue.evidence}
+    return {
+        "reason": issue.reason,
+        "evidence": issue.evidence,
+        "category": issue.category,
+    }
 
 
 def _build_issue_summary(file_results: list[FileResult]) -> dict:
@@ -993,6 +1000,477 @@ def _write_markdown_report(report: dict, output_path: Path) -> None:
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# D2L XML audit helpers — graded discussions and availability windows
+# ---------------------------------------------------------------------------
+
+_D2L_NS_URI = "http://desire2learn.com/xsd/d2lcp_v2p0"
+_D2L_TAG = "{" + _D2L_NS_URI + "}"
+
+
+def _d2l_text_el(element: ET.Element, local: str) -> str:
+    child = element.find(f"{_D2L_TAG}{local}")
+    return (child.text or "").strip() if child is not None else ""
+
+
+def _audit_graded_discussions(zip_path: Path) -> list[dict]:
+    """Return one row per graded discussion topic found in D2L discussion XML files."""
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            disc_files = [
+                n
+                for n in names
+                if re.match(r"discussion_d2l_\d+\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in disc_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                # Strip XML declaration
+                raw = re.sub(r"<\?xml[^>]*\?>", "", raw, count=1)
+                try:
+                    root = ET.fromstring(raw)
+                except ET.ParseError:
+                    continue
+                for forum in root.iter("forum"):
+                    forum_title_el = forum.find("content/title")
+                    if forum_title_el is None:
+                        forum_title_el = forum.find("title")
+                    forum_title = (
+                        (forum_title_el.text or "").strip()
+                        if forum_title_el is not None
+                        else forum.get("id", "unknown")
+                    )
+                    for topic in forum.iter("topic"):
+                        # Graded topics have a <grade> child element
+                        grade_el = topic.find("grade")
+                        if grade_el is None:
+                            # Also check for score-related attributes
+                            if not (
+                                topic.get("gradeid")
+                                or topic.get("grade_item")
+                                or topic.find("grade_item") is not None
+                            ):
+                                continue
+                        topic_title_el = topic.find("content/title")
+                        if topic_title_el is None:
+                            topic_title_el = topic.find("title")
+                        topic_title = (
+                            (topic_title_el.text or "").strip()
+                            if topic_title_el is not None
+                            else topic.get("id", "unknown topic")
+                        )
+                        rows.append(
+                            {
+                                "file": fname,
+                                "type": "d2l_xml_audit",
+                                "reason": "Graded discussion detected — enable scoring in Canvas Discussions",
+                                "evidence": f"Forum: {forum_title} | Topic: {topic_title}",
+                            }
+                        )
+    except Exception:
+        pass
+    return rows
+
+
+def _audit_availability_windows(zip_path: Path) -> list[dict]:
+    """Return one row per gradebook item that has an availability window set."""
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            grades_files = [
+                n for n in names if re.match(r"grades_d2l\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in grades_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                # Items block contains <item> elements
+                items_match = re.search(r"<items>(.*?)</items>", raw, re.DOTALL)
+                if items_match is None:
+                    continue
+                items_text = items_match.group(1)
+                for item_m in re.finditer(
+                    r"<item\b[^>]*>.*?</item>", items_text, re.DOTALL
+                ):
+                    item_xml = item_m.group(0)
+                    date_start = re.search(r"<date_start>(.*?)</date_start>", item_xml)
+                    date_end = re.search(r"<date_end>(.*?)</date_end>", item_xml)
+                    ds = date_start.group(1).strip() if date_start else ""
+                    de = date_end.group(1).strip() if date_end else ""
+                    if not (ds or de):
+                        continue
+                    name_m = re.search(r"<name>(.*?)</name>", item_xml)
+                    name = name_m.group(1).strip() if name_m else "unknown item"
+                    window_parts = []
+                    if ds:
+                        window_parts.append(f"start: {ds}")
+                    if de:
+                        window_parts.append(f"end: {de}")
+                    rows.append(
+                        {
+                            "file": fname,
+                            "type": "d2l_xml_audit",
+                            "reason": "Availability window detected in gradebook item — re-enter dates in Canvas",
+                            "evidence": f"{name} | {', '.join(window_parts)}",
+                        }
+                    )
+    except Exception:
+        pass
+    return rows
+
+
+def _audit_gradebook_groups(zip_path: Path) -> list[dict]:
+    """Return one row per grade category with drop rules or bonus items.
+
+    Emits P1-worthy rows for categories that require specific Canvas configuration
+    (drop rules and extra-credit items) and P2-worthy rows for weighted categories
+    so the ID knows what weights to enter in Canvas assignment groups.
+    """
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            grades_files = [
+                n for n in names if re.match(r"grades_d2l\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in grades_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+
+                # ── Categories ─────────────────────────────────────────────
+                for cat_m in re.finditer(
+                    r"<category\b[^>]*>.*?</category>", raw, re.DOTALL
+                ):
+                    cat_xml = cat_m.group(0)
+                    name_m = re.search(r"<name>(.*?)</name>", cat_xml)
+                    weight_m = re.search(r"<weight>(.*?)</weight>", cat_xml)
+                    low_m = re.search(
+                        r"<low_non_bonus_drop>(.*?)</low_non_bonus_drop>", cat_xml
+                    )
+                    high_m = re.search(
+                        r"<high_non_bonus_drop>(.*?)</high_non_bonus_drop>", cat_xml
+                    )
+
+                    name = name_m.group(1).strip() if name_m else "unknown category"
+                    weight = weight_m.group(1).strip() if weight_m else "0"
+                    low_drop = low_m.group(1).strip() if low_m else "0"
+                    high_drop = high_m.group(1).strip() if high_m else "0"
+
+                    try:
+                        low_int = int(low_drop)
+                        high_int = int(high_drop)
+                    except ValueError:
+                        low_int = high_int = 0
+
+                    if low_int > 0 or high_int > 0:
+                        drop_parts = []
+                        if low_int > 0:
+                            drop_parts.append(f"drop {low_int} lowest")
+                        if high_int > 0:
+                            drop_parts.append(f"drop {high_int} highest")
+                        rows.append(
+                            {
+                                "file": fname,
+                                "type": "d2l_xml_audit",
+                                "reason": (
+                                    "Gradebook category with drop rule — "
+                                    "configure in Canvas assignment group"
+                                ),
+                                "evidence": (
+                                    f"{name} | {', '.join(drop_parts)} | weight={weight}%"
+                                ),
+                            }
+                        )
+                    else:
+                        try:
+                            weight_int = int(float(weight))
+                        except ValueError:
+                            weight_int = 0
+                        if weight_int > 0:
+                            rows.append(
+                                {
+                                    "file": fname,
+                                    "type": "d2l_xml_audit",
+                                    "reason": (
+                                        "Gradebook category weight — "
+                                        "verify in Canvas assignment group"
+                                    ),
+                                    "evidence": f"{name} | weight={weight}%",
+                                }
+                            )
+
+                # ── Bonus / extra-credit items ──────────────────────────────
+                items_match = re.search(r"<items>(.*?)</items>", raw, re.DOTALL)
+                if items_match:
+                    for item_m in re.finditer(
+                        r"<item\b[^>]*>.*?</item>", items_match.group(1), re.DOTALL
+                    ):
+                        item_xml = item_m.group(0)
+                        bonus_m = re.search(r"<is_bonus>(.*?)</is_bonus>", item_xml)
+                        if not (bonus_m and bonus_m.group(1).strip().lower() == "true"):
+                            continue
+                        iname_m = re.search(r"<name>(.*?)</name>", item_xml)
+                        item_name = (
+                            iname_m.group(1).strip()
+                            if iname_m
+                            else "unknown bonus item"
+                        )
+                        rows.append(
+                            {
+                                "file": fname,
+                                "type": "d2l_xml_audit",
+                                "reason": (
+                                    "Bonus/extra-credit grade item detected — "
+                                    "configure in Canvas as extra credit"
+                                ),
+                                "evidence": item_name,
+                            }
+                        )
+    except Exception:
+        pass
+    return rows
+
+
+# D2L rubric scoring_method values
+_RUBRIC_SCORING_METHOD_LABELS: dict[str, str] = {
+    "1": "no-score (holistic/analytics only)",
+    "2": "level-based points (all criteria share the same level values)",
+    "3": "custom points (per-criterion cell values)",
+}
+
+
+def _audit_rubrics(zip_path: Path) -> list[dict]:
+    """Return one row per rubric found in ``rubrics_d2l.xml``, with criteria/level counts.
+
+    D2L rubrics are NOT transferred by the standard Canvas IMSCC import; each must be
+    recreated manually in Canvas.  This function inventories what needs to be recreated
+    so the ID has a complete list with exact names and complexity indicators.
+    """
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            rubric_files = [
+                n for n in names if re.match(r"rubrics_d2l\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in rubric_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+
+                for rub_m in re.finditer(
+                    r"<rubric\b[^>]*>.*?</rubric>", raw, re.DOTALL
+                ):
+                    rub_xml = rub_m.group(0)
+
+                    name_m = re.search(r'\bname="([^"]*)"', rub_xml)
+                    method_m = re.search(r'\bscoring_method="([^"]*)"', rub_xml)
+                    state_m = re.search(r'\bstate="([^"]*)"', rub_xml)
+
+                    name = name_m.group(1).strip() if name_m else "unnamed rubric"
+                    method_raw = method_m.group(1).strip() if method_m else ""
+                    scoring_label = _RUBRIC_SCORING_METHOD_LABELS.get(
+                        method_raw, f"scoring_method={method_raw}"
+                    )
+
+                    # State: 0=active, 1=archived, 2=draft (common D2L conventions)
+                    state_raw = state_m.group(1).strip() if state_m else ""
+                    state_label: dict[str, str] = {
+                        "0": "active",
+                        "1": "archived",
+                        "2": "draft",
+                    }.get(state_raw, f"state={state_raw}")
+
+                    criteria = re.findall(r"<criterion\b", rub_xml)
+                    levels = re.findall(r"<level\b", rub_xml)
+                    criteria_count = len(criteria)
+                    level_count = len(set(re.findall(r'level_id="([^"]*)"', rub_xml)))
+
+                    # Detect range-style cells: cells where cell_value is empty
+                    # (D2L level-based rubrics) vs fixed numeric (custom points)
+                    cell_values = re.findall(r'cell_value="([^"]*)"', rub_xml)
+                    has_empty_cells = any(v.strip() == "" for v in cell_values)
+                    has_numeric_cells = any(
+                        v.strip() not in ("", "0", "0.000000000") for v in cell_values
+                    )
+
+                    evidence_parts = [
+                        f'rubric: "{name}"',
+                        f"{criteria_count} criteria",
+                        f"{level_count} levels",
+                        scoring_label,
+                        f"status: {state_label}",
+                    ]
+                    if has_empty_cells and not has_numeric_cells:
+                        evidence_parts.append(
+                            "NOTE: level-value cells — enable Range option in Canvas rubric"
+                        )
+
+                    rows.append(
+                        {
+                            "file": fname,
+                            "type": "d2l_xml_audit",
+                            "reason": (
+                                "D2L rubric detected — recreate in Canvas and attach to assignment"
+                            ),
+                            "evidence": " | ".join(evidence_parts),
+                        }
+                    )
+    except Exception:
+        pass
+    return rows
+
+
+def _audit_date_shift_items(zip_path: Path) -> list[dict]:
+    """Inventory date-bearing D2L items to support Canvas date-shift planning.
+
+    D2L content exports (IMSCC) do NOT include the course offering start date — that
+    lives in the D2L enrollment system.  This function:
+      1. Reports that the start date is absent (P1 advisory for every course).
+      2. Surfaces quiz availability windows when present (courses other than ACC-2321 may have them).
+      3. Extracts course announcement dates from news_d2l.xml as a proxy date-range hint.
+    """
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            names = zf.namelist()
+
+            # ── Announcement dates (news_d2l.xml) ──────────────────────────
+            news_files = [
+                n for n in names if re.match(r"news_d2l\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            all_news_dates: list[str] = []
+            for fname in news_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                for item_m in re.finditer(r"<item\b[^>]*>.*?</item>", raw, re.DOTALL):
+                    date_m = re.search(
+                        r"<date_start>(.*?)</date_start>", item_m.group(0)
+                    )
+                    if date_m:
+                        ds = date_m.group(1).strip()
+                        if ds:
+                            all_news_dates.append(ds)
+
+            # ── Quiz availability windows ───────────────────────────────────
+            quiz_files = [
+                n
+                for n in names
+                if re.match(r"quiz_d2l_\d+\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in quiz_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                # D2L namespace prefix varies; match any prefix
+                for ext_m in re.finditer(
+                    r"<(?:[^>:\s]*:)?assess_procextension\b[^>]*>.*?"
+                    r"</(?:[^>:\s]*:)?assess_procextension>",
+                    raw,
+                    re.DOTALL,
+                ):
+                    ext_xml = ext_m.group(0)
+                    ds_m = re.search(
+                        r"<(?:[^>:\s]*:)?date_start>(.*?)</(?:[^>:\s]*:)?date_start>",
+                        ext_xml,
+                    )
+                    de_m = re.search(
+                        r"<(?:[^>:\s]*:)?date_end>(.*?)</(?:[^>:\s]*:)?date_end>",
+                        ext_xml,
+                    )
+                    dd_m = re.search(
+                        r"<(?:[^>:\s]*:)?date_due>(.*?)</(?:[^>:\s]*:)?date_due>",
+                        ext_xml,
+                    )
+                    ds = ds_m.group(1).strip() if ds_m else ""
+                    de = de_m.group(1).strip() if de_m else ""
+                    dd = dd_m.group(1).strip() if dd_m else ""
+                    if not (ds or de or dd):
+                        continue
+
+                    title_m = re.search(r'<assessment[^>]+title="([^"]+)"', raw)
+                    quiz_name = title_m.group(1).strip() if title_m else fname
+
+                    parts = [f"quiz: {quiz_name}"]
+                    if ds:
+                        parts.append(f"available from: {ds}")
+                    if de:
+                        parts.append(f"available until: {de}")
+                    if dd:
+                        parts.append(f"due: {dd}")
+                    rows.append(
+                        {
+                            "file": fname,
+                            "type": "d2l_xml_audit",
+                            "reason": (
+                                "Quiz availability window detected — "
+                                "verify dates after Canvas date-shift"
+                            ),
+                            "evidence": " | ".join(parts),
+                        }
+                    )
+
+            # ── Course-start-date advisory (always emitted) ─────────────────
+            if all_news_dates:
+                earliest = min(all_news_dates)[:10]
+                latest = max(all_news_dates)[:10]
+                evidence = (
+                    f"No course offering date in IMSCC export. "
+                    f"Announcement date range (proxy): {earliest} → {latest}. "
+                    "Use Canvas Settings > Adjust Events and Due Dates with the "
+                    "actual new course start date."
+                )
+            else:
+                evidence = (
+                    "No course offering date in IMSCC export and no announcement "
+                    "dates found. Use Canvas Settings > Adjust Events and Due Dates "
+                    "with the actual new course start date."
+                )
+            rows.append(
+                {
+                    "file": "news_d2l.xml",
+                    "type": "d2l_xml_audit",
+                    "reason": (
+                        "Course start date not in D2L export — "
+                        "set manually during Canvas import"
+                    ),
+                    "evidence": evidence,
+                }
+            )
+    except Exception:
+        pass
+    return rows
+
+
+def _append_xml_audit_rows_to_csv(zip_path: Path, csv_path: Path) -> None:
+    """Append D2L XML audit rows (graded discussions, availability windows,
+    gradebook groups, rubrics, date-shift advisory) to the manual-review CSV."""
+    rows: list[dict] = []
+    rows.extend(_audit_graded_discussions(zip_path))
+    rows.extend(_audit_availability_windows(zip_path))
+    rows.extend(_audit_gradebook_groups(zip_path))
+    rows.extend(_audit_rubrics(zip_path))
+    rows.extend(_audit_date_shift_items(zip_path))
+    if not rows:
+        return
+    with csv_path.open("a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["file", "type", "reason", "evidence"])
+        for row in rows:
+            writer.writerow(row)
+
+
 def _write_manual_review_csv(file_results: list[FileResult], output_path: Path) -> None:
     with output_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
@@ -1023,7 +1501,10 @@ def _write_manual_review_csv(file_results: list[FileResult], output_path: Path) 
 
 
 def _write_preflight_checklist(
-    report: dict, profile: PolicyProfile, output_path: Path
+    report: dict,
+    profile: PolicyProfile,
+    output_path: Path,
+    manual_review_csv: Path | None = None,
 ) -> None:
     summary = report["summary"]
     manual_counts = Counter()
@@ -1038,6 +1519,17 @@ def _write_preflight_checklist(
             if reason:
                 a11y_counts[reason] += 1
 
+    # Read D2L XML audit rows from the CSV (written after report is built)
+    xml_audit_counts: Counter = Counter()
+    if manual_review_csv and manual_review_csv.exists():
+        with manual_review_csv.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                if str(row.get("type", "")).strip() == "d2l_xml_audit":
+                    reason = str(row.get("reason", "")).strip()
+                    if reason:
+                        xml_audit_counts[reason] += 1
+
     lines = [
         "# Migration Preflight Checklist",
         "",
@@ -1046,16 +1538,86 @@ def _write_preflight_checklist(
         f"- Policy profile: `{profile.profile_id}`",
         f"- Profile description: {profile.description}",
         "",
+        "## Glossary",
+        "",
+        "| Abbreviation | Meaning |",
+        "| --- | --- |",
+        "| ID | Instructional Designer |",
+        "| IC | Introduction and Checklist page (Canvas page combining D2L Introduction/Objectives and Module Checklist) |",
+        "| CAD | Course Alignment Document (linked from syllabus) |",
+        "| LTI | Learning Tools Interoperability (external tool integration standard) |",
+        "",
         "## Automated Summary",
         "",
         f"- HTML files scanned: {summary['html_files_scanned']}",
         f"- HTML files changed: {summary['html_files_changed']}",
-        f"- Manual review issues: {summary['manual_review_issues']}",
-        f"- Accessibility issues: {summary['accessibility_issues']}",
-        "",
-        "## Required Verifications Before Release",
-        "",
     ]
+
+    # Build breakdown parentheticals for manual review and a11y
+    # Human-readable label for each fix_checklist category code
+    _CATEGORY_LABELS: dict[str, str] = {
+        "lti_quicklink_reconfiguration": "LTI QuickLink",
+        "lti_embed_reconfiguration": "LTI embed",
+        "rubric_import_setup": "D2L rubric",
+        "d2l_media_library_file": "D2L media library",
+        "graded_discussion_reconnect": "Graded discussion",
+        "availability_window_reentry": "Availability window",
+        "gradebook_group_drop_rules": "Gradebook drop rule",
+        "gradebook_group_weights": "Gradebook weight",
+        "extra_credit_setup": "Extra credit",
+        "date_shift_planning": "Course start date",
+        "quiz_settings_inventory": "Quiz settings",
+        "layout_css_rendering_review": "Layout CSS",
+        "embedded_iframe_review": "Embedded iframe",
+        "a11y_video_captions": "Video captions",
+        "instructor_note_cleanup": "Instructor note",
+        "template_placeholder_cleanup": "Template placeholder",
+        "broken_link_review": "Broken link",
+    }
+
+    def _top_reasons_summary(counter: Counter, limit: int = 3) -> str:
+        # Aggregate raw reason strings by their fix_checklist category so that
+        # many unique LTI QuickLink reason strings (each with a different title)
+        # count as one group rather than appearing as N individual entries.
+        category_counts: Counter = Counter()
+        for reason, count in counter.items():
+            try:
+                _, cat, _, _ = _map_manual_review_group("manual_review", reason)
+            except Exception:
+                cat = ""
+            label = _CATEGORY_LABELS.get(cat) if cat else None
+            if label is None:
+                # Fall back to a shortened form of the raw reason
+                short = re.split(r"\s[—\-]\s", reason)[0].strip()
+                if len(short) > 40:
+                    short = short[:38].rstrip() + "…"
+                label = short
+            category_counts[label] += count
+
+        parts = []
+        for label, count in category_counts.most_common(limit):
+            parts.append(f"{count} {label}")
+        remainder = sum(category_counts.values()) - sum(
+            v for _, v in category_counts.most_common(limit)
+        )
+        if remainder > 0:
+            parts.append(f"{remainder} other")
+        return f" ({', '.join(parts)})" if parts else ""
+
+    manual_total = summary["manual_review_issues"]
+    a11y_total = summary["accessibility_issues"]
+    manual_breakdown = _top_reasons_summary(manual_counts) if manual_total else ""
+    a11y_breakdown = _top_reasons_summary(a11y_counts) if a11y_total else ""
+
+    lines.extend(
+        [
+            f"- Manual review issues: {manual_total}{manual_breakdown}",
+            f"- Accessibility issues: {a11y_total}{a11y_breakdown}",
+            "",
+            "## Required Verifications Before Release",
+            "",
+        ]
+    )
 
     if profile.preflight_items:
         for item in profile.preflight_items:
@@ -1069,16 +1631,99 @@ def _write_preflight_checklist(
     if manual_counts:
         lines.append("### Manual Review Reasons")
         lines.append("")
-        for reason, count in manual_counts.most_common():
+
+        # --- Collect LTI QuickLink reasons to emit as a single grouped entry ---
+        quicklink_entries: list[tuple[str, str]] = []  # [(title, rcode), ...]
+        non_quicklink_counts: Counter = Counter()
+        for reason, count in manual_counts.items():
+            try:
+                _p, cat, _o, _a = _map_manual_review_group("manual_review", reason)
+            except Exception:
+                cat = ""
+            if cat == "lti_quicklink_reconfiguration":
+                # Extract title (between '— '' and ' [rCode:') and rCode
+                title_match = re.search(
+                    r"—\s+'([^']+)'\s+\[rcode:", reason, re.IGNORECASE
+                )
+                rcode_match = re.search(r"\[rcode:\s*([^\]]+)\]", reason, re.IGNORECASE)
+                title = title_match.group(1).strip() if title_match else reason
+                rcode = rcode_match.group(1).strip() if rcode_match else ""
+                # count copies (usually 1 per rCode, but honour count for safety)
+                quicklink_entries.extend([(title, rcode)] * count)
+            else:
+                non_quicklink_counts[reason] += count
+
+        # Emit the grouped LTI QuickLink block at the top (most-common-first among others)
+        if quicklink_entries:
+            total_ql = len(quicklink_entries)
+            lines.append(
+                f"- [ ] ({total_ql}) LTI tool embed{'s' if total_ql > 1 else ''} "
+                "(D2L QuickLink) — reconfigure as Canvas LTI external tool"
+                f"{'s' if total_ql > 1 else ''} after migration"
+            )
+            lines.append("  - **Owner:** Faculty/Course Coordinator")
+            lines.append(
+                "  - **Action:** These D2L LTI quick-links will NOT resolve after migration. "
+                "For each item: (1) confirm with your Canvas admin that the LTI tool is "
+                "configured in Canvas (Settings \u2192 Apps); (2) open the Canvas page, delete "
+                "the broken embed, and re-insert the tool using the Rich Content Editor \u2192 "
+                "Apps picker. The original D2L rCode URLs are institution-specific and cannot "
+                "be reused in Canvas."
+                if total_ql > 1
+                else "  - **Action:** This D2L LTI quick-link will NOT resolve after migration. "
+                "(1) Confirm with your Canvas admin that the LTI tool is configured in Canvas "
+                "(Settings \u2192 Apps); (2) open the Canvas page, delete the broken embed, and "
+                "re-insert the tool using the Rich Content Editor \u2192 Apps picker."
+            )
+            lines.append("")
+            lines.append("  | # | Assignment Title | D2L rCode |")
+            lines.append("  |---|---|---|")
+            for idx, (title, rcode) in enumerate(quicklink_entries, 1):
+                safe_title = title.replace("|", "\\|")
+                lines.append(f"  | {idx} | {safe_title} | {rcode} |")
+            lines.append("")
+
+        # Emit remaining manual review reasons
+        for reason, count in non_quicklink_counts.most_common():
             lines.append(f"- [ ] ({count}) {reason}")
+            try:
+                _p, _cat, owner, action = _map_manual_review_group(
+                    "manual_review", reason
+                )
+                lines.append(f"  - **Owner:** {owner}")
+                lines.append(f"  - **Action:** {action}")
+            except Exception:
+                pass
         lines.append("")
     if a11y_counts:
         lines.append("### Accessibility Reasons")
         lines.append("")
         for reason, count in a11y_counts.most_common():
             lines.append(f"- [ ] ({count}) {reason}")
+            try:
+                _p, _cat, owner, action = _map_manual_review_group(
+                    "accessibility", reason
+                )
+                lines.append(f"  - **Owner:** {owner}")
+                lines.append(f"  - **Action:** {action}")
+            except Exception:
+                pass
         lines.append("")
-    if not manual_counts and not a11y_counts:
+    if xml_audit_counts:
+        lines.append("### D2L XML Audit Items (Require Canvas Configuration)")
+        lines.append("")
+        for reason, count in xml_audit_counts.most_common():
+            lines.append(f"- [ ] ({count}) {reason}")
+            try:
+                _p, _cat, owner, action = _map_manual_review_group(
+                    "d2l_xml_audit", reason
+                )
+                lines.append(f"  - **Owner:** {owner}")
+                lines.append(f"  - **Action:** {action}")
+            except Exception:
+                pass
+        lines.append("")
+    if not manual_counts and not a11y_counts and not xml_audit_counts:
         lines.append("- [ ] No issues flagged by automation.")
         lines.append("")
 
@@ -1299,7 +1944,11 @@ def run_migration(
                     )
                 )
             manual_issues.extend(detect_layout_breaking_issues(updated))
-            manual_issues.extend(detect_lti_embed_issues(updated))
+            # Detect LTI and media-library issues on the ORIGINAL content: the
+            # sanitizer neutralises quickLink hrefs to '#' before we get here.
+            manual_issues.extend(detect_lti_embed_issues(original))
+            manual_issues.extend(detect_iframe_issues(updated))
+            manual_issues.extend(detect_d2l_media_library_embeds(original))
             a11y_issues = check_accessibility_heuristics(updated)
 
             changed = updated != original
@@ -1470,7 +2119,10 @@ def run_migration(
                         )
                     )
                 manual_issues.extend(detect_layout_breaking_issues(updated))
-                manual_issues.extend(detect_lti_embed_issues(updated))
+                # Detect on original: sanitizer neutralises quickLink hrefs.
+                manual_issues.extend(detect_lti_embed_issues(original))
+                manual_issues.extend(detect_iframe_issues(updated))
+                manual_issues.extend(detect_d2l_media_library_embeds(original))
                 a11y_issues = check_accessibility_heuristics(updated)
 
                 changed = updated != original
@@ -1657,7 +2309,9 @@ def run_migration(
                     intro_manual_issues.extend(
                         detect_layout_breaking_issues(intro_updated)
                     )
-                    intro_manual_issues.extend(detect_lti_embed_issues(intro_updated))
+                    # Detect on original: sanitizer neutralises quickLink hrefs.
+                    intro_manual_issues.extend(detect_lti_embed_issues(intro_original))
+                    intro_manual_issues.extend(detect_iframe_issues(intro_updated))
                     intro_a11y_issues = check_accessibility_heuristics(intro_updated)
 
                     _upsert_file_result(
@@ -1861,7 +2515,9 @@ def run_migration(
                         )
                     )
                 final_manual_issues.extend(detect_layout_breaking_issues(updated))
-                final_manual_issues.extend(detect_lti_embed_issues(updated))
+                # Detect on original: sanitizer neutralises quickLink hrefs.
+                final_manual_issues.extend(detect_lti_embed_issues(original))
+                final_manual_issues.extend(detect_iframe_issues(updated))
                 final_a11y_issues = check_accessibility_heuristics(updated)
                 _upsert_file_result(
                     file_results,
@@ -1952,7 +2608,10 @@ def run_migration(
     report_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _write_markdown_report(report, report_markdown)
     _write_manual_review_csv(file_results, manual_review_csv)
-    _write_preflight_checklist(report, policy_profile, preflight_checklist)
+    _append_xml_audit_rows_to_csv(input_zip, manual_review_csv)
+    _write_preflight_checklist(
+        report, policy_profile, preflight_checklist, manual_review_csv
+    )
 
     return MigrationOutput(
         output_zip=output_zip,

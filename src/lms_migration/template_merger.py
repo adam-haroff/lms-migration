@@ -185,12 +185,16 @@ _WELCOME_KEYWORDS = frozenset(
 def classify_page(
     path: str,
     title: str,
+    body: str = "",
 ) -> tuple[PageRole, int | None, str]:
     """Classify a D2L page and extract module metadata.
 
     Args:
         path: Relative path of the HTML file within the package.
         title: Page ``<title>`` text.
+        body: Full HTML content of the page (optional).  When supplied,
+              content-based heuristics are applied as a fallback for pages
+              whose path does not match the standard module-intro pattern.
 
     Returns:
         ``(role, module_number, chapter_title)`` where the last two are only
@@ -210,6 +214,20 @@ def classify_page(
         "welcome" in path_lower and "instructor" in path_lower
     ):
         return PageRole.WELCOME_INSTRUCTOR, None, ""
+
+    # Content-based fallback: pages whose path doesn't match the standard
+    # module-intro pattern but whose body clearly contains both an
+    # Introduction heading and an Objectives list are treated as MODULE_INTRO.
+    if body and _INTRO_HEADING_RE.search(body) and _OBJECTIVES_HEADING_RE.search(body):
+        mod_match = re.search(r"\b(?:module|chapter|unit)\s*(\d+)", title, re.IGNORECASE)
+        module_number = int(mod_match.group(1)) if mod_match else None
+        chapter_title = re.sub(
+            r"\s*[:\-\u2013\u2014]\s*(?:introduction|objectives?).*$",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        ).strip() or title
+        return PageRole.MODULE_INTRO, module_number, chapter_title
 
     return PageRole.STANDALONE, None, ""
 
@@ -585,7 +603,7 @@ def run_template_merge(
         rel = str(html_file.relative_to(unpack_dir).as_posix())
         content = html_file.read_text(encoding="utf-8", errors="replace")
         title = _extract_title(content)
-        role, module_number, chapter_title = classify_page(rel, title)
+        role, module_number, chapter_title = classify_page(rel, title, body=content)
 
         if role == PageRole.MODULE_INTRO:
             new_html = _fill_module_intro(

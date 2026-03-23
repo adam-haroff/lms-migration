@@ -33,6 +33,7 @@ class AppliedChange:
 class ManualReviewIssue:
     reason: str
     evidence: str
+    category: str = "content"  # "content" | "accessibility" | "template"
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,12 @@ _BSP_TEMPLATE_RE = re.compile(
 _BSP_FONT_RE = re.compile(r"^https?://s\.brightspace\.com/", flags=re.IGNORECASE)
 _LEGACY_D2L_RE = re.compile(r"^/?d2l/", flags=re.IGNORECASE)
 _LEGACY_ENFORCED_RE = re.compile(r"^/?content/enforced/", flags=re.IGNORECASE)
+# D2L media library URL patterns — distinct P1 category because media files must
+# be migrated to Canvas Studio/Files before links can be restored.
+_D2L_MEDIA_LIBRARY_RE = re.compile(
+    r"(?:ouFileId=|/d2l/lp/media[/?#]|/d2l/tools/mediaLibrary[/?#])",
+    flags=re.IGNORECASE,
+)
 _D2L_QUICKLINK_PATH_RE = re.compile(
     r"^/?d2l/common/dialogs/quicklink/quicklink\.d2l$",
     flags=re.IGNORECASE,
@@ -154,18 +161,38 @@ _BOOTSTRAP_UTILITY_CSS_MAP: dict[str, dict[str, str]] = {
     "p-3": {"padding": "1rem"},
     "p-4": {"padding": "1.5rem"},
     "p-5": {"padding": "3rem"},
+    "pt-1": {"padding-top": "0.25rem"},
+    "pt-2": {"padding-top": "0.5rem"},
+    "pt-3": {"padding-top": "1rem"},
+    "pt-4": {"padding-top": "1.5rem"},
+    "pt-5": {"padding-top": "3rem"},
+    "pb-1": {"padding-bottom": "0.25rem"},
+    "pb-2": {"padding-bottom": "0.5rem"},
+    "pb-3": {"padding-bottom": "1rem"},
+    "pb-4": {"padding-bottom": "1.5rem"},
+    "pb-5": {"padding-bottom": "3rem"},
     "mt-1": {"margin-top": "0.25rem"},
     "mt-2": {"margin-top": "0.5rem"},
     "mt-3": {"margin-top": "1rem"},
+    "mt-4": {"margin-top": "1.5rem"},
+    "mt-5": {"margin-top": "3rem"},
     "mb-1": {"margin-bottom": "0.25rem"},
     "mb-2": {"margin-bottom": "0.5rem"},
     "mb-3": {"margin-bottom": "1rem"},
+    "mb-4": {"margin-bottom": "1.5rem"},
+    "mb-5": {"margin-bottom": "3rem"},
+    "mr-auto": {"margin-right": "auto"},
+    "ml-auto": {"margin-left": "auto"},
     "py-1": {"padding-top": "0.25rem", "padding-bottom": "0.25rem"},
     "py-2": {"padding-top": "0.5rem", "padding-bottom": "0.5rem"},
     "py-3": {"padding-top": "1rem", "padding-bottom": "1rem"},
+    "py-4": {"padding-top": "1.5rem", "padding-bottom": "1.5rem"},
+    "py-5": {"padding-top": "3rem", "padding-bottom": "3rem"},
     "px-1": {"padding-left": "0.25rem", "padding-right": "0.25rem"},
     "px-2": {"padding-left": "0.5rem", "padding-right": "0.5rem"},
     "px-3": {"padding-left": "1rem", "padding-right": "1rem"},
+    "px-4": {"padding-left": "1.5rem", "padding-right": "1.5rem"},
+    "px-5": {"padding-left": "3rem", "padding-right": "3rem"},
 }
 # Accordion card-header text values that are generic D2L template placeholders
 # rather than meaningful section titles.  In flatten mode these are silently
@@ -1255,6 +1282,82 @@ def apply_canvas_sanitizer(
                         count=promoted_utility_css,
                     )
                 )
+
+            # Pass 1b — Promote Bootstrap grid layout classes (row / col-*) to
+            # CSS flexbox so multi-column layouts survive class stripping.
+            # row → flex container; col-*-N → flex item with proportional basis.
+            # Single-child rows collapse naturally to full-width in Canvas.
+            _GRID_COL_N_RE = re.compile(
+                r"\bcol-(?:[a-z]+-)?([0-9]{1,2})\b", re.IGNORECASE
+            )
+            _FLEX_BASIS_BY_COLS: dict[int, str] = {
+                1: "60px",
+                2: "100px",
+                3: "160px",
+                4: "220px",
+                5: "260px",
+                6: "300px",
+                7: "360px",
+                8: "400px",
+                9: "450px",
+                10: "500px",
+                11: "540px",
+                12: "100%",
+            }
+            promoted_grid_css = 0
+
+            def _promote_grid_cls(m: re.Match[str]) -> str:
+                nonlocal promoted_grid_css
+                tag = m.group(0)
+                class_text = _extract_attr_value(tag, "class") or ""
+                if not class_text:
+                    return tag
+                tokens = class_text.split()
+                has_row = "row" in tokens
+                col_ns = [
+                    int(cm.group(1))
+                    for t in tokens
+                    for cm in [_GRID_COL_N_RE.search(t)]
+                    if cm
+                ]
+                if not has_row and not col_ns:
+                    return tag
+                css_props: dict[str, str] = {}
+                if has_row:
+                    css_props = {
+                        "display": "flex",
+                        "flex-wrap": "wrap",
+                        "gap": "16px",
+                        "align-items": "flex-start",
+                    }
+                elif col_ns:
+                    col_n = min(col_ns)
+                    if col_n == 12:
+                        css_props = {"width": "100%", "box-sizing": "border-box"}
+                    else:
+                        basis = _FLEX_BASIS_BY_COLS.get(col_n, "300px")
+                        css_props = {
+                            "flex": f"1 1 {basis}",
+                            "min-width": "0",
+                            "box-sizing": "border-box",
+                        }
+                if not css_props:
+                    return tag
+                updated_tag, changed = _merge_inline_style(tag, css_props)
+                if changed:
+                    promoted_grid_css += 1
+                return updated_tag
+
+            updated = _full_tag_pat.sub(_promote_grid_cls, updated)
+            if promoted_grid_css:
+                applied.append(
+                    AppliedChange(
+                        category="sanitizer",
+                        description="Promoted Bootstrap grid classes to CSS flexbox to preserve multi-column layouts in Canvas",
+                        count=promoted_grid_css,
+                    )
+                )
+
             # Pass 2 — strip Bootstrap grid / utility / legacy template class tokens.
             class_attr_pattern = re.compile(
                 r'(?P<prefix>\sclass\s*=\s*)(?P<quote>["\'])(?P<classes>[^"\']*)(?P=quote)',
@@ -1809,6 +1912,49 @@ def apply_canvas_sanitizer(
 
     # Convert fixed pixel-width tables wider than 500 px to a fluid layout so
     # they do not cause horizontal scroll in Canvas.
+
+    # Convert presentational valign attributes on table cells to inline CSS so
+    # Canvas (which ignores HTML4 presentational attributes) respects them.
+    valign_tag_pat = re.compile(r"<(?:td|th|tr)\b[^>]*>", flags=re.IGNORECASE)
+    valign_attr_pat = re.compile(
+        r"\s+valign\s*=\s*([\"'])(?P<val>[^\"']*)(\1)", re.IGNORECASE
+    )
+    _VALIGN_TO_CSS = {
+        "top": "top",
+        "middle": "middle",
+        "bottom": "bottom",
+        "baseline": "baseline",
+    }
+    promoted_valign = 0
+
+    def _promote_valign(m: re.Match[str]) -> str:
+        nonlocal promoted_valign
+        tag = m.group(0)
+        va_m = valign_attr_pat.search(tag)
+        if not va_m:
+            return tag
+        val = va_m.group("val").strip().lower()
+        css_val = _VALIGN_TO_CSS.get(val)
+        if not css_val:
+            return tag
+        tag_no_attr = valign_attr_pat.sub("", tag)
+        updated_tag, changed = _merge_inline_style(
+            tag_no_attr, {"vertical-align": css_val}
+        )
+        if changed:
+            promoted_valign += 1
+        return updated_tag
+
+    updated = valign_tag_pat.sub(_promote_valign, updated)
+    if promoted_valign:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Converted presentational valign attributes to vertical-align CSS for Canvas compatibility",
+                count=promoted_valign,
+            )
+        )
+
     wide_table_pattern = re.compile(r"<table\b[^>]*>", flags=re.IGNORECASE)
     tables_made_responsive = 0
 
@@ -2730,19 +2876,30 @@ def detect_lti_embed_issues(content: str) -> list[ManualReviewIssue]:
 
     Canvas LTI integrations (Panopto, Studio, Kaltura, etc.) use institution-specific
     launch URLs.  When importing from D2L these src URLs will not resolve in Canvas.
-    Flagging them gives instructors a guided checklist item for each affected page.
 
-    One issue is reported per unique tool type per page to avoid noise when multiple
-    embeds of the same tool appear on a single page.
+    - Named tools (Panopto, Kaltura, etc.): one issue per unique tool name per page.
+    - D2L quickLink LTI embeds: one issue per unique rCode, including the assignment
+      title and rCode value so the course coordinator has a complete inventory.
 
     Args:
         content: Full HTML document string.
 
     Returns:
-        List of :class:`ManualReviewIssue` objects, one per distinct LTI tool found.
+        List of :class:`ManualReviewIssue` objects.
     """
     issues: list[ManualReviewIssue] = []
     seen_tools: set[str] = set()
+    seen_rcodes: set[str] = set()
+
+    def _extract_rcode(url: str) -> str:
+        """Extract rCode parameter value from a quickLink URL, or empty string."""
+        m = re.search(r"[?&]rCode=([^&\"'\s>]+)", url, re.IGNORECASE)
+        return m.group(1) if m else ""
+
+    def _extract_title(tag: str) -> str:
+        """Extract title attribute from an HTML tag, or empty string."""
+        m = re.search(r'\btitle\s*=\s*["\']([^"\']*)["\']', tag, re.IGNORECASE)
+        return m.group(1).strip() if m else ""
 
     for iframe_match in re.finditer(
         r"<iframe\b[^>]*>", content, flags=re.IGNORECASE | re.DOTALL
@@ -2758,6 +2915,8 @@ def detect_lti_embed_issues(content: str) -> list[ManualReviewIssue]:
             continue
 
         src = src_match.group(1).lower()
+        # Check known LTI tool domains — one issue per tool name per page.
+        matched = False
         for domain, tool_name in _LTI_TOOL_DOMAIN_MAP.items():
             if domain in src and tool_name not in seen_tools:
                 seen_tools.add(tool_name)
@@ -2769,6 +2928,199 @@ def detect_lti_embed_issues(content: str) -> list[ManualReviewIssue]:
                         evidence=tag[:240],
                     )
                 )
+                matched = True
                 break
+        # D2L quickLink LTI iframes — one issue per unique rCode.
+        if not matched:
+            raw_src = html.unescape(src_match.group(1))
+            if re.search(r"quickLink\.d2l", raw_src, re.IGNORECASE) and re.search(
+                r"[?&]type=lti\b", raw_src, re.IGNORECASE
+            ):
+                rcode = _extract_rcode(raw_src)
+                dedup_key = rcode if rcode else raw_src
+                if dedup_key not in seen_rcodes:
+                    seen_rcodes.add(dedup_key)
+                    title = _extract_title(tag)
+                    label = f"'{title}'" if title else "(untitled)"
+                    rcode_note = f" [rCode: {rcode}]" if rcode else ""
+                    issues.append(
+                        ManualReviewIssue(
+                            reason=(
+                                f"LTI tool embed (D2L QuickLink) — {label}{rcode_note} "
+                                "— reconfigure as Canvas LTI external tool after migration"
+                            ),
+                            evidence=tag[:240],
+                        )
+                    )
+
+    # Also detect D2L quickLink LTI hrefs in <a> tags — one issue per unique rCode.
+    for a_match in re.finditer(r"<a\b[^>]*>", content, flags=re.IGNORECASE | re.DOTALL):
+        tag = a_match.group(0)
+        href_match = re.search(
+            r'\bhref\s*=\s*["\']([^"\']*)["\']', tag, flags=re.IGNORECASE
+        )
+        if not href_match:
+            continue
+        href = html.unescape(href_match.group(1))
+        if re.search(r"quickLink\.d2l", href, re.IGNORECASE) and re.search(
+            r"[?&]type=lti\b", href, re.IGNORECASE
+        ):
+            rcode = _extract_rcode(href)
+            dedup_key = rcode if rcode else href
+            if dedup_key not in seen_rcodes:
+                seen_rcodes.add(dedup_key)
+                # Extract visible link text from following text node (between > and </a>)
+                a_text_match = re.search(
+                    r">([^<]{1,120})</a",
+                    content[a_match.start() : a_match.start() + 200],
+                    re.IGNORECASE,
+                )
+                link_text = a_text_match.group(1).strip() if a_text_match else ""
+                label = f"'{link_text}'" if link_text else "(untitled)"
+                rcode_note = f" [rCode: {rcode}]" if rcode else ""
+                issues.append(
+                    ManualReviewIssue(
+                        reason=(
+                            f"LTI tool embed (D2L QuickLink) — {label}{rcode_note} "
+                            "— reconfigure as Canvas LTI external tool after migration"
+                        ),
+                        evidence=tag[:240],
+                    )
+                )
 
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Known video-hosting domains that embed third-party video players.
+# Maps hostname substring → human-readable label used in the reason string.
+# ---------------------------------------------------------------------------
+_EMBED_VIDEO_DOMAINS: dict[str, str] = {
+    "youtube.com": "YouTube",
+    "youtu.be": "YouTube",
+    "youtube-nocookie.com": "YouTube",
+    "vimeo.com": "Vimeo",
+}
+
+# Domains that are known LTI tools — already handled by detect_lti_embed_issues().
+# We skip them here so they are not double-counted.
+_LTI_SKIP_DOMAINS = frozenset(
+    d.split("/")[0] for d in _LTI_TOOL_DOMAIN_MAP
+) | frozenset(["quicklink.d2l", "d2l.com"])
+
+
+def detect_iframe_issues(content: str) -> list[ManualReviewIssue]:
+    """Detect non-LTI embedded iframes and group results by domain.
+
+    - Known video platforms (YouTube, Vimeo): emits a caption/transcript
+      accessibility reminder.
+    - Unknown third-party domains: emits a generic accessibility-and-policy
+      review item.
+
+    Iframes that were already captured by :func:`detect_lti_embed_issues`
+    (Panopto, Kaltura, YuJa, D2L quickLink LTI) are skipped.
+
+    Returns one :class:`ManualReviewIssue` per unique domain found.
+    """
+    from urllib.parse import urlparse as _urlparse
+
+    seen_domains: dict[str, int] = {}  # domain → count
+    domain_evidence: dict[str, str] = {}  # domain → first tag snippet
+
+    for m in re.finditer(r"<iframe\b[^>]*>", content, flags=re.IGNORECASE | re.DOTALL):
+        tag = m.group(0)
+        src_m = re.search(
+            r'\bsrc\s*=\s*["\']([^"\']*)["\']', tag, flags=re.IGNORECASE
+        ) or re.search(
+            r'\bdata-mce-src\s*=\s*["\']([^"\']*)["\']', tag, flags=re.IGNORECASE
+        )
+        if not src_m:
+            continue
+
+        raw_src = html.unescape(src_m.group(1))
+
+        # Skip LTI iframes — already reported by detect_lti_embed_issues.
+        if any(skip in raw_src.lower() for skip in _LTI_SKIP_DOMAINS):
+            continue
+        for domain in _LTI_TOOL_DOMAIN_MAP:
+            if domain in raw_src.lower():
+                break
+        else:
+            # Extract hostname to group by domain.
+            try:
+                hostname = _urlparse(raw_src).hostname or ""
+            except Exception:
+                hostname = ""
+            # Strip leading www.
+            hostname = re.sub(r"^www\.", "", hostname.lower())
+            if not hostname:
+                continue
+            seen_domains[hostname] = seen_domains.get(hostname, 0) + 1
+            if hostname not in domain_evidence:
+                domain_evidence[hostname] = tag[:240]
+
+    issues: list[ManualReviewIssue] = []
+    for hostname, count in seen_domains.items():
+        # Determine label from known video domains map (check substring match).
+        label: str | None = None
+        for key, val in _EMBED_VIDEO_DOMAINS.items():
+            if key in hostname:
+                label = val
+                break
+
+        count_note = f" ({count} embed{'s' if count > 1 else ''})" if count > 1 else ""
+        if label:
+            reason = (
+                f"Embedded {label} video{count_note} — verify closed captions "
+                "or provide a transcript"
+            )
+        else:
+            reason = (
+                f"Embedded iframe ({hostname}){count_note} — review for "
+                "accessibility, security, and responsive behavior"
+            )
+        issues.append(
+            ManualReviewIssue(reason=reason, evidence=domain_evidence[hostname])
+        )
+
+    return issues
+
+
+def detect_d2l_media_library_embeds(content: str) -> list[ManualReviewIssue]:
+    """Detect links and embeds pointing to the D2L media library.
+
+    D2L-hosted media (URLs containing ``ouFileId=``, ``/d2l/lp/media/``, or
+    ``/d2l/tools/mediaLibrary/``) will not be accessible after migration.  These
+    files must be uploaded to Canvas Studio or the Canvas course Files area and
+    their embeds/links updated.
+
+    One issue is reported per page (even if multiple media links exist) to avoid
+    noise, but the evidence snippet shows the first matching URL found.
+
+    Args:
+        content: Full HTML document string.
+
+    Returns:
+        A list containing at most one :class:`ManualReviewIssue`.
+    """
+    # Check href attributes (links to media)
+    href_match = re.search(
+        r'href\s*=\s*["\'][^"\']*' + _D2L_MEDIA_LIBRARY_RE.pattern + r'[^"\']*["\']',
+        content,
+        flags=re.IGNORECASE,
+    )
+    # Check src attributes (embedded media / iframes)
+    src_match = re.search(
+        r'src\s*=\s*["\'][^"\']*' + _D2L_MEDIA_LIBRARY_RE.pattern + r'[^"\']*["\']',
+        content,
+        flags=re.IGNORECASE,
+    )
+    evidence_match = href_match or src_match
+    if evidence_match:
+        return [
+            ManualReviewIssue(
+                reason="D2L media library content detected — move to Canvas Studio or Files",
+                evidence=evidence_match.group(0)[:240],
+            )
+        ]
+    return []

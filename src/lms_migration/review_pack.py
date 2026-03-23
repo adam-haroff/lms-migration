@@ -336,6 +336,48 @@ def _apply_preview_asset_map(body_html: str, asset_map: dict[str, str]) -> str:
     return _SRC_ATTR_RE.sub(replace_src, body_html)
 
 
+_NEUTRAL_PREVIEW_CSS = (
+    "body{font-family:Georgia,serif;font-size:14px;line-height:1.6;"
+    "padding:12px;margin:0;color:#202020;word-wrap:break-word}"
+    "img{max-width:100%;height:auto;display:inline-block}"
+    "table{border-collapse:collapse;width:100%;max-width:100%}"
+    "td,th{padding:4px 8px;border:1px solid #ddd;vertical-align:top}"
+    "h1{font-size:1.5em;margin:.5em 0 .25em}h2{font-size:1.3em;margin:.5em 0 .25em}"
+    "h3{font-size:1.1em;margin:.5em 0 .25em}"
+    "p{margin:.4em 0}ul,ol{margin:.4em 0;padding-left:1.5em}"
+    "details>summary{cursor:pointer;font-weight:600}"
+)
+
+# Strips class="" attributes so Brightspace/Bootstrap selectors can't interfere.
+# All layout that matters (float, flex, padding) is already in inline style.
+_CLASS_ATTR_RE = re.compile(r'\s+class="[^"]*"', re.IGNORECASE)
+_CLASS_ATTR_SQ_RE = re.compile(r"\s+class='[^']*'", re.IGNORECASE)
+
+
+def _neutralize_body_html(body: str) -> str:
+    """Strip class attributes so platform-specific CSS selectors have nothing to match.
+
+    Inline style attributes are intentionally preserved — the pipeline promotes
+    layout-relevant Bootstrap utility / grid classes to inline CSS before stripping.
+    """
+    body = _CLASS_ATTR_RE.sub("", body)
+    body = _CLASS_ATTR_SQ_RE.sub("", body)
+    return body
+
+
+_PREVIEW_HEAD = (
+    '<!DOCTYPE html><html><head><meta charset="utf-8">'
+    "<style>" + _NEUTRAL_PREVIEW_CSS + "</style>"
+    "</head><body>"
+)
+_PREVIEW_TAIL = "</body></html>"
+
+
+def _build_neutral_srcdoc(body_html: str) -> str:
+    """Wrap a neutralized body fragment in a minimal self-contained HTML document."""
+    return _PREVIEW_HEAD + _neutralize_body_html(body_html) + _PREVIEW_TAIL
+
+
 def _metric_drift(original: dict[str, int], converted: dict[str, int]) -> list[str]:
     reasons: list[str] = []
     if original["image_count"] > 0 and converted["image_count"] == 0:
@@ -421,10 +463,17 @@ def _visual_index(payload: dict | None) -> dict[str, dict]:
     return rows
 
 
-def _priority(score: int, *, manual_count: int, accessibility_count: int) -> str:
-    if manual_count >= 4 or accessibility_count >= 3 or score >= 10:
+def _priority(
+    score: int,
+    *,
+    manual_count: int,
+    accessibility_count: int,
+    template_count: int = 0,
+    content_loss: bool = False,
+) -> str:
+    if manual_count >= 4 or accessibility_count >= 3 or score >= 10 or content_loss:
         return "high"
-    if manual_count > 0 or accessibility_count > 0 or score >= 4:
+    if manual_count > 0 or accessibility_count > 0 or template_count > 0 or score >= 4:
         return "medium"
     return "low"
 
@@ -530,21 +579,56 @@ def build_review_pack(
             3,
         )
 
+        template_issues = [
+            i
+            for i in manual_issues
+            if isinstance(i, dict) and i.get("category", "content") == "template"
+        ]
+        non_template_manual = [
+            i
+            for i in manual_issues
+            if not (isinstance(i, dict) and i.get("category", "content") == "template")
+        ]
         score = (
-            (len(manual_issues) * 4)
+            (len(non_template_manual) * 4)
             + (len(accessibility_issues) * 3)
             + (len(visual_reasons) * 2)
             + len(structural_reasons)
+            + (len(template_issues) * 2)
         )
         if preview_similarity and preview_similarity < 0.55:
             score += 2
         elif preview_similarity and preview_similarity < 0.72:
             score += 1
 
+        # Smarter signals
+        orig_words = int((original_metrics or {}).get("word_count", 0) or 0)
+        conv_words = int((converted_metrics or {}).get("word_count", 0) or 0)
+        content_loss = orig_words >= 50 and conv_words < orig_words * 0.75
+        if content_loss:
+            score += 3
+
+        orig_images = int((original_metrics or {}).get("image_count", 0) or 0)
+        conv_images = int((converted_metrics or {}).get("image_count", 0) or 0)
+        if orig_images > 0 and conv_images == 0:
+            score += 2
+
+        template_mapped = sum(
+            int(c.get("count", 0) or 0)
+            for c in (applied_changes if isinstance(applied_changes, list) else [])
+            if isinstance(c, dict)
+            and c.get("category") == "template_overlay"
+            and "Mapped" in str(c.get("description", ""))
+        )
+        if template_mapped == 0 and orig_words >= 100:
+            score += 1
+
         priority = _priority(
             score,
-            manual_count=len(manual_issues),
+            manual_count=len(non_template_manual),
             accessibility_count=len(accessibility_issues),
+            template_count=len(template_issues),
+            content_loss=content_loss,
         )
         files.append(
             {
@@ -562,15 +646,18 @@ def build_review_pack(
                 "converted_preview": converted_preview,
                 "original_metrics": original_metrics,
                 "converted_metrics": converted_metrics,
-                "manual_review_issues": manual_issues,
+                "manual_review_issues": non_template_manual,
+                "template_issues": template_issues,
                 "accessibility_issues": accessibility_issues,
                 "applied_changes": applied_changes,
                 "structural_reasons": structural_reasons,
                 "visual_reasons": visual_reasons,
+                "content_loss": content_loss,
             }
         )
         editor_payloads[path] = {
             "converted_body_html": _extract_body_html(converted),
+            "original_body_html": _extract_body_html(original),
         }
 
     files.sort(
@@ -592,6 +679,9 @@ def build_review_pack(
         "files_with_manual_issues": sum(
             1 for row in files if row.get("manual_review_issues")
         ),
+        "files_with_template_issues": sum(
+            1 for row in files if row.get("template_issues")
+        ),
         "files_with_accessibility_issues": sum(
             1 for row in files if row.get("accessibility_issues")
         ),
@@ -599,6 +689,7 @@ def build_review_pack(
         "files_with_structural_drift": sum(
             1 for row in files if row.get("structural_reasons")
         ),
+        "files_with_content_loss": sum(1 for row in files if row.get("content_loss")),
     }
 
     report = {
@@ -627,6 +718,7 @@ def build_review_pack(
     _write_html(
         report,
         output_html,
+        original_zip=original_zip,
         converted_zip=converted_zip,
         editor_payloads=editor_payloads,
     )
@@ -665,6 +757,7 @@ def _write_markdown(report: dict, output_markdown: Path) -> None:
         f"- Pages with accessibility issues: {summary.get('files_with_accessibility_issues', 0)}",
         f"- Pages with visual flags: {summary.get('files_with_visual_flags', 0)}",
         f"- Pages with structural drift: {summary.get('files_with_structural_drift', 0)}",
+        f"- Pages with content loss: {summary.get('files_with_content_loss', 0)}",
         "",
         "## Top Review Pages",
         "",
@@ -727,11 +820,12 @@ def _badge(priority: str) -> str:
     )
 
 
-def _render_issue_list(title: str, items: list[str]) -> str:
+def _render_issue_list(title: str, items: list[str], *, category: str = "") -> str:
     if not items:
         return ""
+    cat_attr = f' data-category="{html.escape(category)}"' if category else ""
     rendered = "".join(f"<li>{html.escape(item)}</li>" for item in items)
-    return f'<div class="issue-block"><h4>{html.escape(title)}</h4><ul>{rendered}</ul></div>'
+    return f'<div class="issue-block"{cat_attr}><h4>{html.escape(title)}</h4><ul>{rendered}</ul></div>'
 
 
 def _editor_dom_id(path: str) -> str:
@@ -743,6 +837,7 @@ def _write_html(
     report: dict,
     output_html: Path,
     *,
+    original_zip: Path,
     converted_zip: Path,
     editor_payloads: dict[str, dict[str, str]],
 ) -> None:
@@ -752,11 +847,13 @@ def _write_html(
         ("High priority", summary.get("files_with_high_priority_review", 0)),
         ("Medium priority", summary.get("files_with_medium_priority_review", 0)),
         ("Manual issue pages", summary.get("files_with_manual_issues", 0)),
+        ("Template issue pages", summary.get("files_with_template_issues", 0)),
         (
             "Accessibility issue pages",
             summary.get("files_with_accessibility_issues", 0),
         ),
         ("Visual flag pages", summary.get("files_with_visual_flags", 0)),
+        ("Content loss pages", summary.get("files_with_content_loss", 0)),
     ]
     draft_filename = _default_draft_filename(converted_zip)
     review_inputs_json = json.dumps(
@@ -803,10 +900,45 @@ def _write_html(
             body_html=raw_body_html,
         )
         preview_body_html = _apply_preview_asset_map(raw_body_html, asset_map)
+        # Build neutral-render iframes — strip class attrs so platform CSS doesn't fire;
+        # inline style (float, flex, padding) is preserved and renders correctly in both.
+        _orig_raw = str(editor_payload.get("original_body_html", "")).strip()
+        if _orig_raw:
+            _orig_asset_map = _build_preview_asset_map(
+                zip_path=original_zip,
+                page_path=page_path,
+                body_html=_orig_raw,
+            )
+            _orig_rendered = _apply_preview_asset_map(_orig_raw, _orig_asset_map)
+            _orig_srcdoc = _build_neutral_srcdoc(_orig_rendered)
+            original_preview_block = (
+                f'<iframe class="preview-frame" sandbox="allow-same-origin"'
+                f' loading="lazy" srcdoc="{html.escape(_orig_srcdoc, quote=True)}"></iframe>'
+            )
+        else:
+            original_preview_block = (
+                '<p class="no-preview">No original HTML available.</p>'
+            )
+        # Converted neutral-render iframe (same stylesheet so layout diff is visible)
+        if preview_body_html:
+            _conv_srcdoc = _build_neutral_srcdoc(preview_body_html)
+            converted_preview_block = (
+                f'<iframe class="preview-frame" sandbox="allow-same-origin"'
+                f' loading="lazy" srcdoc="{html.escape(_conv_srcdoc, quote=True)}"></iframe>'
+            )
+        else:
+            converted_preview_block = (
+                '<p class="no-preview">No converted HTML available.</p>'
+            )
         editor_id = _editor_dom_id(page_path)
         manual_items = [
             _issue_reason_text(item)
             for item in row.get("manual_review_issues", [])
+            if _issue_reason_text(item)
+        ]
+        template_items = [
+            _issue_reason_text(item)
+            for item in row.get("template_issues", [])
             if _issue_reason_text(item)
         ]
         accessibility_items = [
@@ -844,6 +976,7 @@ def _write_html(
               </div>
               <div class="issue-grid">
                 {_render_issue_list("Manual Review", manual_items[:5])}
+                {_render_issue_list("Template Issues", template_items[:5], category="template")}
                 {_render_issue_list("Accessibility", accessibility_items[:5])}
                 {_render_issue_list("Visual Flags", [str(item) for item in row.get("visual_reasons", [])[:5]])}
                 {_render_issue_list("Structural Drift", [str(item) for item in row.get("structural_reasons", [])[:5]])}
@@ -851,16 +984,16 @@ def _write_html(
               </div>
               <div class="compare-grid">
                 <div class="compare-column">
-                  <h3>Original Outline</h3>
+                  <h3>D2L Outline</h3>
                   <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in row.get("original_outline", [])[:8]) or "<li>No heading outline extracted.</li>"}</ul>
-                  <h3>Original Preview</h3>
-                  <pre>{html.escape(chr(10).join(row.get("original_preview", [])))}</pre>
+                  <h3>D2L Layout Preview</h3>
+                  {original_preview_block}
                 </div>
                 <div class="compare-column">
-                  <h3>Converted Outline</h3>
+                  <h3>Canvas Outline</h3>
                   <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in row.get("converted_outline", [])[:8]) or "<li>No heading outline extracted.</li>"}</ul>
-                  <h3>Converted Preview</h3>
-                  <pre>{html.escape(chr(10).join(row.get("converted_preview", [])))}</pre>
+                  <h3>Canvas Layout Preview</h3>
+                  {converted_preview_block}
                 </div>
               </div>
               <div class="editor-shell" id="{editor_id}" data-page-path="{html.escape(page_path, quote=True)}" data-page-title="{html.escape(str(((row.get("titles") or {}).get("converted", ""))), quote=True)}">
@@ -1131,6 +1264,13 @@ def _write_html(
       margin: 8px 0 0 18px;
       padding: 0;
     }}
+    .issue-block[data-category="template"] {{
+      border-left-color: #d97706;
+      background: #fffbf0;
+    }}
+    .issue-block[data-category="template"] h4 {{
+      color: #d97706;
+    }}
     .compare-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -1141,6 +1281,20 @@ def _write_html(
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 12px;
+    }}
+    .preview-frame {{
+      width: 100%;
+      height: 480px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      margin-top: 8px;
+      display: block;
+    }}
+    .no-preview {{
+      color: var(--muted);
+      font-style: italic;
+      margin: 8px 0;
     }}
     pre {{
       white-space: pre-wrap;
@@ -1874,7 +2028,7 @@ def _write_html(
         }};
       }}
 
-      function exportDraft() {{
+      async function exportDraft() {{
         const payload = draftPayload();
         const status = document.querySelector('[data-draft-status]');
         if (!payload.pages.length) {{
@@ -1884,7 +2038,30 @@ def _write_html(
           return;
         }}
         const draftName = reviewInputs().draft_filename || 'review-draft.json';
-        const blob = new Blob([JSON.stringify(payload, null, 2)], {{ type: 'application/json' }});
+        const jsonStr = JSON.stringify(payload, null, 2);
+        // Use File System Access API when available (Chrome/Edge) so the user can
+        // save directly to the output directory — no hunting in ~/Downloads.
+        if ('showSaveFilePicker' in window) {{
+          try {{
+            const handle = await window.showSaveFilePicker({{
+              suggestedName: draftName,
+              types: [{{ description: 'Review Draft JSON', accept: {{ 'application/json': ['.json'] }} }}],
+            }});
+            const writable = await handle.createWritable();
+            await writable.write(jsonStr);
+            await writable.close();
+            if (status) {{
+              status.textContent = 'Saved ' + payload.pages.length + ' edited page(s). Ready to apply in the UI.';
+            }}
+            return;
+          }} catch (e) {{
+            if (e.name === 'AbortError') return; // user cancelled — do nothing
+            // Any other error: fall through to the standard download below
+          }}
+        }}
+        // Fallback: trigger browser download (Safari, Firefox, or file:// contexts
+        // where showSaveFilePicker is unavailable).
+        const blob = new Blob([jsonStr], {{ type: 'application/json' }});
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
@@ -1894,7 +2071,7 @@ def _write_html(
         link.remove();
         URL.revokeObjectURL(url);
         if (status) {{
-          status.textContent = 'Exported ' + payload.pages.length + ' edited page(s) as ' + draftName + '.';
+          status.textContent = 'Downloaded ' + payload.pages.length + ' edited page(s) as ' + draftName + '.';
         }}
       }}
 

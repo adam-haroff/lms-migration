@@ -20,6 +20,12 @@ from .html_tools import (
 )
 from .policy_profiles import get_policy_profile
 from .rules import load_rules
+from .template_overlay import (
+    TemplateOverlayConfig,
+    TemplateOverlayContext,
+    build_template_overlay_context,
+    apply_template_overlay,
+)
 
 
 _BODY_RE = re.compile(
@@ -100,6 +106,8 @@ def apply_review_draft(
     accordion_details_hints: tuple[str, ...] = (),
     apply_template_divider_standards: bool = True,
     best_practice_enforcer: bool = True,
+    template_package: Path | None = None,
+    template_alias_map_json: Path | None = None,
     output_zip_path: Path | None = None,
     output_json_path: Path | None = None,
     output_markdown_path: Path | None = None,
@@ -136,6 +144,15 @@ def apply_review_draft(
         accordion_details_hints=accordion_details_hints,
     )
     rules = load_rules(rules_path) if rules_path is not None else None
+
+    template_overlay_context: TemplateOverlayContext | None = None
+    if template_package is not None and template_package.exists():
+        template_overlay_context = build_template_overlay_context(
+            TemplateOverlayConfig(
+                template_package=template_package,
+                alias_map_json_path=template_alias_map_json,
+            )
+        )
 
     output_zip = output_zip_path or _default_output_zip_path(converted_zip)
     report_json = output_json_path or _default_output_json_path(output_zip)
@@ -179,6 +196,14 @@ def apply_review_draft(
             updated_document = _replace_body_html(original_document, edited_body_html)
 
             applied_changes: list[AppliedChange] = []
+            if template_overlay_context is not None:
+                updated_document, overlay_changes, _, _ = apply_template_overlay(
+                    updated_document,
+                    file_path=relative_path,
+                    context=template_overlay_context,
+                )
+                applied_changes.extend(overlay_changes)
+
             updated_document, sanitizer_changes = apply_canvas_sanitizer(
                 updated_document,
                 policy=sanitizer_policy,
@@ -227,7 +252,11 @@ def apply_review_draft(
                     "edited_body_changed": edited_body_html.strip()
                     != original_body_html.strip(),
                     "manual_review_issues": [
-                        {"reason": issue.reason, "evidence": issue.evidence}
+                        {
+                            "reason": issue.reason,
+                            "evidence": issue.evidence,
+                            "category": issue.category,
+                        }
                         for issue in manual_issues
                     ],
                     "accessibility_issues": [

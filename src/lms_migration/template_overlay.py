@@ -67,6 +67,10 @@ _DEFAULT_ICON_LABELS = {
     "exclamation.png": "Important",
     "info.png": "Information",
 }
+_ICON_UNRESOLVABLE_FALLBACK = "info.png"
+_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {".png", ".gif", ".jpg", ".jpeg", ".svg", ".webp"}
+)
 _TEMPLATE_HEADING_ICON_STYLE = (
     "width: 45px; height: auto; vertical-align: middle; margin-right: 8px;"
 )
@@ -703,6 +707,7 @@ class TemplateOverlayConfig:
     apply_color_standards: bool = True
     apply_divider_standards: bool = True
     image_layout_mode: str = "safe-block"
+    inject_default_banner: bool = False
 
 
 @dataclass
@@ -717,6 +722,7 @@ class TemplateOverlayContext:
     apply_color_standards: bool
     apply_divider_standards: bool
     image_layout_mode: str
+    inject_default_banner: bool = False
 
 
 def build_template_overlay_context(
@@ -748,6 +754,7 @@ def build_template_overlay_context(
         apply_color_standards=bool(config.apply_color_standards),
         apply_divider_standards=bool(config.apply_divider_standards),
         image_layout_mode=str(config.image_layout_mode or "safe-block").strip().lower(),
+        inject_default_banner=bool(config.inject_default_banner),
     )
 
 
@@ -848,6 +855,7 @@ def apply_template_overlay(
     unresolved_basenames: list[str] = []
     ignored_basenames: list[str] = []
     matched_alias_pairs: set[str] = set()
+    icon_fallback_basenames: list[str] = []
 
     def replace_attr(match: re.Match[str]) -> str:
         nonlocal direct_mapped
@@ -889,6 +897,15 @@ def apply_template_overlay(
                 unresolved += 1
                 unresolved_refs.append(original_url)
                 unresolved_basenames.append(source_basename)
+                # Substitute a neutral fallback icon so the Canvas package
+                # doesn't contain broken Brightspace-hosted image URLs.
+                if posixpath.splitext(source_basename)[1].lower() in _IMAGE_EXTENSIONS:
+                    icon_fallback_basenames.append(source_basename)
+                    rebuilt = f"{_MATERIALIZED_ASSET_DIR}/{_ICON_UNRESOLVABLE_FALLBACK}"
+                    return (
+                        f'{match.group("prefix")}{match.group("quote")}'
+                        f'{rebuilt}{match.group("quote")}'
+                    )
             return match.group(0)
 
         parsed = urlparse(original_url)
@@ -917,6 +934,8 @@ def apply_template_overlay(
     promoted_icon_headings = 0
     page_heading_updates = 0
     leading_divider_removals = 0
+    icon_semantic_changes: list[str] = []
+    default_banner_injected = False
 
     if context.apply_visual_standards:
         known_template_asset_basenames = set(context.assets_by_basename.keys())
@@ -1399,11 +1418,16 @@ def apply_template_overlay(
             label_text, label_media = _extract_heading_title_and_media(label_body)
             if not label_text or len(label_text) > 100 or len(label_text.split()) > 12:
                 return match.group(0)
+            _pre_semantic = icon_basename
             icon_basename = _resolve_semantic_icon_basename(
                 current_basename=icon_basename,
                 label_text=label_text,
                 original_title=label_text,
             )
+            if icon_basename != _pre_semantic:
+                icon_semantic_changes.append(
+                    f"{_pre_semantic} → {icon_basename} (label: {label_text[:50]})"
+                )
             canonical_label = _canonical_heading_label(
                 context.icon_label_by_basename.get(icon_basename, "") or label_text,
                 icon_basename=icon_basename,
@@ -1450,6 +1474,10 @@ def apply_template_overlay(
                 label_text=context.icon_label_by_basename.get(icon_basename, ""),
                 original_title=original_title,
             )
+            if resolved_icon_basename != icon_basename:
+                icon_semantic_changes.append(
+                    f"{icon_basename} → {resolved_icon_basename} (title: {original_title[:50]})"
+                )
             canonical_label = _canonical_heading_label(
                 context.icon_label_by_basename.get(resolved_icon_basename, "")
                 or original_title,
@@ -1495,9 +1523,24 @@ def apply_template_overlay(
 
         def remove_leading_divider(payload: str, *, icon_basename: str) -> str:
             nonlocal leading_divider_removals
+            # Match the entire first div when it contains ONLY:
+            #   • empty spacer paragraphs (post-sanitisation form), OR
+            #   • paragraphs wrapping only a javascript: print anchor
+            #     (pre-sanitisation form — printer-link not yet removed)
+            # then a single <hr>.  Strip the whole div so the Canvas page body
+            # starts directly with the first content div.
+            _spacer_p = r"(?:<p\b[^>]*>\s*(?:<span\b[^>]*>\s*)?(?:&nbsp;|\s)*(?:</span>\s*)?</p>\s*)"
+            _chrome_p = (
+                r"(?:<p\b[^>]*>(?:<span\b[^>]*>)?\s*"
+                r"(?:<a\b[^>]*\bhref\s*=\s*[\"']javascript:[^\"']*[\"'][^>]*>.*?</a>)?\s*"
+                r"(?:</span>)?\s*</p>\s*)"
+            )
+            _any_chrome_p = r"(?:" + _spacer_p + r"|" + _chrome_p + r")"
             updated_payload, removed = re.subn(
-                rf"(<body[^>]*>\s*(?:<div\b[^>]*>\s*){{0,4}}(?:<p\b[^>]*>\s*(?:<span\b[^>]*>\s*)?(?:&nbsp;|\s)*(?:</span>\s*)?</p>\s*)?)<hr\b[^>]*>\s*(?:</div>\s*){{0,4}}(?=(?:\s*<div\b[^>]*>\s*){{0,4}}<h2\b[^>]*>.*?(?:\.\./)?TemplateAssets/{re.escape(icon_basename)})",
-                r"\1",
+                r"(<body[^>]*>)\s*<div\b[^>]*>\s*"
+                + _any_chrome_p
+                + r"*<hr\b[^>]*>\s*</div>\s*",
+                r"\1\n",
                 payload,
                 count=1,
                 flags=re.IGNORECASE | re.DOTALL,
@@ -1569,6 +1612,33 @@ def apply_template_overlay(
             updated = _HEADING_PATTERN.sub(normalize_learning_title, updated, count=1)
             if context.apply_divider_standards:
                 updated = remove_leading_divider(updated, icon_basename="bookmark.png")
+
+    if context.inject_default_banner:
+        if not re.search(
+            r"<img\b[^>]*TemplateAssets/banner", updated, flags=re.IGNORECASE
+        ):
+            banner_basename = next(
+                (
+                    bn
+                    for bn in sorted(context.assets_by_basename.keys())
+                    if bn.lower().startswith("banner")
+                ),
+                None,
+            )
+            if banner_basename:
+                banner_tag = (
+                    f'<img role="presentation" alt="" '
+                    f'src="TemplateAssets/{banner_basename}" '
+                    f'style="width: 100%; height: auto; display: block;">'
+                )
+                updated = re.sub(
+                    r"(<body\b[^>]*>)",
+                    rf"\1\n{banner_tag}\n",
+                    updated,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                default_banner_injected = True
 
     applied_changes: list[AppliedChange] = []
     if direct_mapped:
@@ -1671,6 +1741,30 @@ def apply_template_overlay(
                 count=responsive_image_updates,
             )
         )
+    if icon_fallback_basenames:
+        applied_changes.append(
+            AppliedChange(
+                category="template_overlay",
+                description="Substituted neutral fallback icon for unmapped Brightspace template images",
+                count=len(icon_fallback_basenames),
+            )
+        )
+    if icon_semantic_changes:
+        applied_changes.append(
+            AppliedChange(
+                category="template_overlay",
+                description="Semantically resolved icon types based on heading label and page context",
+                count=len(icon_semantic_changes),
+            )
+        )
+    if default_banner_injected:
+        applied_changes.append(
+            AppliedChange(
+                category="template_overlay",
+                description="Injected default template banner for content page missing a banner image",
+                count=1,
+            )
+        )
 
     manual_issues: list[ManualReviewIssue] = []
     if unresolved:
@@ -1683,6 +1777,24 @@ def apply_template_overlay(
             ManualReviewIssue(
                 reason="Template asset reference not mapped to Canvas template package",
                 evidence=evidence,
+            )
+        )
+    if icon_fallback_basenames:
+        evidence_fb = ", ".join(sorted(set(icon_fallback_basenames))[:5])
+        manual_issues.append(
+            ManualReviewIssue(
+                reason="Unmapped Brightspace icon(s) replaced with neutral fallback; verify icon is appropriate",
+                evidence=evidence_fb,
+                category="template",
+            )
+        )
+    if icon_semantic_changes:
+        evidence_sem = icon_semantic_changes[0][:120] if icon_semantic_changes else ""
+        manual_issues.append(
+            ManualReviewIssue(
+                reason=f"Icon type semantically resolved ({len(icon_semantic_changes)} heading(s)); verify icon selection is correct",
+                evidence=evidence_sem,
+                category="template",
             )
         )
 

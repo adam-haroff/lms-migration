@@ -76,6 +76,59 @@ Priority order reflects frequency and full-automation potential.
 
 ---
 
+## Phase 4 additions (from external research + codebase gap audit, 2026-03-21)
+
+Items below were identified by cross-referencing (a) universally-reported D2L→Canvas
+migration failure points, (b) codebase audit of what is and is not yet implemented,
+and (c) the lms-migration-custom-instructions-draft and pdf-best-practices docs.
+Confirmed non-redundant against existing pipeline capabilities before adding.
+
+Each item feeds the existing `fix_checklist.py` instruction engine — every detected
+condition emits a checklist item with `priority`, `owner`, `description`, and a
+step-by-step `action` field that appears in the generated Markdown and CSV reports.
+
+- **New Quizzes settings audit (pre-import)** — All quizzes are required to be Canvas
+  New Quizzes. D2L QTI exports through Canvas import but loses per-quiz settings:
+  timing limits, attempt counts, availability windows, and question randomization require
+  manual re-entry. Parse D2L gradebook/quiz XML pre-import to produce a per-quiz
+  settings inventory (name, time limit, attempts, shuffling, availability window).
+  The fix checklist emits a P1 item per quiz with specific instructions for recreating
+  each setting in New Quizzes — replacing the current unconditional boilerplate reminder.
+
+- **New Quizzes compatibility review (per-quiz)** — Certain D2L question types behave
+  differently or are unsupported in Canvas New Quizzes (e.g., ordering, multi-select
+  with partial credit, calculated formula questions). Parse QTI XML to inventory question
+  types per quiz and flag quizzes that contain at-risk types, with a P1 checklist item
+  describing how to rebuild or substitute in New Quizzes before release.
+
+- **Assignment / quiz / discussion availability window audit** — Due dates and
+  availability windows are stored in D2L manifest and grade item XML, not in HTML.
+  Nothing currently reads or reports on them. Parse these pre-import and emit a
+  per-item checklist entry for every date-bearing object, giving the ID the exact
+  original windows so they can be re-entered in Canvas. Feeds directly into the Canvas
+  import date-shift workflow.
+
+- **Course start-date and global date-shift report** — Canvas's import tool offers a
+  bulk date shift, but requires knowing the original course start date. Read the D2L
+  course offering XML for the official start date, surface it in the preflight report,
+  and emit a P1 checklist item with exact Canvas import date-shift instructions. Also
+  list every item that has explicit date windows so the ID can verify them after shift.
+
+- **D2L media library URL detection (distinct category)** — The existing `/d2l/` link
+  neutralizer catches media library URLs incidentally but treats them as generic
+  "D2L link needs review." Media library URLs (patterns: `ouFileId=`,
+  `/d2l/lp/media/`, `/d2l/tools/mediaLibrary/`) point to files that will be missing
+  after import. These must be identified as a separate P1 category with a checklist
+  action: move the file to Canvas Studio or course Files, update the embed/link.
+
+- **Graded discussion detection** — D2L graded discussions sometimes import into
+  Canvas as ungraded discussions, silently losing the gradebook connection. Parse
+  `*_d2l.xml` discussion XML for grade category associations; emit a P1 checklist item
+  per affected discussion with instructions to enable grading and reconnect to the
+  gradebook in Canvas.
+
+---
+
 ## Non-negotiable engineering controls
 
 - Deterministic transforms (same input + rules => same output).

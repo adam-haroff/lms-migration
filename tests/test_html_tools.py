@@ -564,3 +564,197 @@ class TestCanonicalHeadingLabel:
     def test_video_always_returns_view(self):
         assert _canonical_heading_label("", icon_basename="video.png") == "View"
         assert _canonical_heading_label("View") == "View"
+
+
+# ===========================================================================
+# remove_leading_divider — regression tests for the D2L template header strip
+# ===========================================================================
+
+
+class TestRemoveLeadingDivider:
+    """Regression tests for the remove_leading_divider fix.
+
+    The D2L Brightspace template adds a 'header region' <div> at the top of
+    every page that contains a printer-friendly link (removed by the sanitizer)
+    and a decorative <hr>.  After sanitisation the div is left with one or two
+    empty spacer paragraphs and the <hr>.  These tests verify that
+    remove_leading_divider strips the entire header div so Canvas pages don't
+    start with an orphan red rule.
+    """
+
+    @staticmethod
+    def _make_ctx() -> "TemplateOverlayContext":
+        return TemplateOverlayContext(
+            template_package=Path("."),
+            alias_map_source="test",
+            alias_map={},
+            assets_by_basename={
+                "star.png": ["TemplateAssets/star.png"],
+                "bullseye.png": ["TemplateAssets/bullseye.png"],
+                "bookmark.png": ["TemplateAssets/bookmark.png"],
+            },
+            file_name_collisions={},
+            icon_label_by_basename={
+                "star.png": "Introduction",
+                "bullseye.png": "Module Objectives",
+                "bookmark.png": "Learning Activities",
+            },
+            apply_visual_standards=True,
+            apply_color_standards=True,
+            apply_divider_standards=True,
+            image_layout_mode="safe-block",
+        )
+
+    def _apply(
+        self, html: str, file_path: str = "Introduction and Objectives.html"
+    ) -> str:
+        out, _, _, _ = apply_template_overlay(
+            html, file_path=file_path, context=self._make_ctx()
+        )
+        return out
+
+    def test_header_div_with_two_spacers_stripped(self):
+        """Two empty paragraphs + <hr> in the first div must be removed.
+
+        This was the primary bug: the regex only allowed ONE empty paragraph,
+        but the D2L template always emits TWO (the former printer-link paragraph
+        and the spacer paragraph).
+        """
+        html = (
+            "<body><div>"
+            "<p></p>"
+            '<p><span style="">&nbsp;</span></p>'
+            '<hr style="border: 0; height: 2px; background-color: #ac1a2f;" row="">'
+            "</div>"
+            "<div>"
+            '<h2><img src="../TemplateAssets/star.png" alt=""> Introduction</h2>'
+            "<p>Content here.</p>"
+            "</div>"
+            "</body>"
+        )
+        result = self._apply(html)
+        assert "<hr" not in result.lower(), "Header <hr> should have been stripped"
+
+    def test_header_div_not_present_in_output(self):
+        """The first orphan div (with only spacers + hr) should be gone entirely."""
+        html = (
+            "<body><div>"
+            "<p></p>"
+            '<p><span style="">&nbsp;</span></p>'
+            '<hr style="border: 0; height: 2px; background-color: #ac1a2f;">'
+            "</div>"
+            "<div>"
+            '<h2><img src="../TemplateAssets/star.png" alt=""> Introduction</h2>'
+            "<p>Content.</p>"
+            "</div>"
+            "</body>"
+        )
+        result = self._apply(html)
+        # Body should start immediately with the content div, not a bare <div>
+        import re
+
+        body_inner = re.search(r"<body[^>]*>(.*)", result, re.DOTALL)
+        assert body_inner is not None
+        stripped = body_inner.group(1).lstrip()
+        assert stripped.startswith("<div"), "Body should start with the content div"
+
+    def test_single_spacer_also_stripped(self):
+        """The fix must still handle the original single-spacer case."""
+        html = (
+            "<body><div>"
+            '<p><span style="">&nbsp;</span></p>'
+            '<hr style="height: 2px; background-color: #ac1a2f;">'
+            "</div>"
+            "<div>"
+            '<h2><img src="../TemplateAssets/star.png" alt=""> Introduction</h2>'
+            "<p>Content.</p>"
+            "</div>"
+            "</body>"
+        )
+        result = self._apply(html)
+        assert "<hr" not in result.lower()
+
+    def test_no_header_div_not_affected(self):
+        """Pages that already have no header <hr> div must not be changed."""
+        html = (
+            "<body>"
+            "<div>"
+            '<h2><img src="../TemplateAssets/star.png" alt=""> Introduction</h2>'
+            "<p>Content without any initial hr.</p>"
+            "</div>"
+            "</body>"
+        )
+        result = self._apply(html)
+        assert "<hr" not in result.lower()
+        assert "Introduction" in result
+
+    def test_content_hr_inside_body_not_stripped(self):
+        """An <hr> that appears WITHIN content (not as the first div) must be kept."""
+        html = (
+            "<body>"
+            "<div>"
+            '<h2><img src="../TemplateAssets/star.png" alt=""> Introduction</h2>'
+            "<p>Intro text.</p>"
+            '<hr style="height: 2px; background-color: #ac1a2f;">'
+            "<h2>Section Two</h2>"
+            "<p>More content.</p>"
+            "</div>"
+            "</body>"
+        )
+        result = self._apply(html)
+        # The in-content hr should be preserved
+        assert "<hr" in result.lower(), "In-content <hr> should not be removed"
+
+    def test_leading_divider_removal_logged_as_change(self):
+        """The AppliedChange for divider removal must be emitted."""
+        html = (
+            "<body><div>"
+            "<p></p>"
+            '<p><span style="">&nbsp;</span></p>'
+            '<hr style="height: 2px; background-color: #ac1a2f;" row="">'
+            "</div>"
+            "<div>"
+            '<h2><img src="../TemplateAssets/star.png" alt=""> Introduction</h2>'
+            "<p>Content.</p>"
+            "</div>"
+            "</body>"
+        )
+        _, changes, _, _ = apply_template_overlay(
+            html,
+            file_path="Introduction and Objectives.html",
+            context=self._make_ctx(),
+        )
+        divider_change = next(
+            (c for c in changes if "divider" in c.description.lower()), None
+        )
+        assert divider_change is not None, "Expected a divider-removal AppliedChange"
+        assert divider_change.count == 1
+
+    def test_pre_sanitization_structure_stripped(self):
+        """The fix must handle the PRE-sanitised structure where the printer-friendly
+        link paragraph is still present (before apply_canvas_sanitizer runs).
+
+        This is the actual pipeline call order: apply_template_overlay fires
+        BEFORE apply_canvas_sanitizer, so the printer-link anchor is still live
+        when remove_leading_divider executes.
+        """
+        html = (
+            '<body><div class="container-fluid">'
+            '<p><span style="font-family: Lato, sans-serif;">'
+            '<a href="javascript:window.print()" style="float: right;" class="courseLink">'
+            "Printer-friendly version</a>"
+            "</span></p>"
+            '<p><span style="font-family: Lato, sans-serif;">&nbsp;</span></p>'
+            '<hr style="width: 100%; height: 4px; color: #ac1a2f; background-color: #ac1a2f;" row=""></div>'
+            '<div class="offset-md-2 col-md-8">'
+            '<h2><img src="../TemplateAssets/star.png" alt=""> Introduction</h2>'
+            "<p>This topic will discuss taxation.</p>"
+            "</div>"
+            "</body>"
+        )
+        result = self._apply(html)
+        assert (
+            "<hr" not in result.lower()
+        ), "Header <hr> should be stripped even with printer link present"
+        # The printer link paragraph should also be gone (it was in the stripped header div)
+        assert "Printer-friendly version" not in result
