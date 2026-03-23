@@ -35,6 +35,7 @@ lms-snapshot-diff = "lms_migration.canvas_snapshot_diff:main"
 lms-quiz-audit = "lms_migration.quiz_audit:main"
 lms-style-inference = "lms_migration.style_inference:main"
 lms-a11y-audit = "lms_migration.canvas_a11y_audit:main"
+lms-blueprint-audit = "lms_migration.blueprint_audit:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
