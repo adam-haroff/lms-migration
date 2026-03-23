@@ -27,20 +27,44 @@ Standalone template pages
 All other pages
     Passed through unchanged.
 
+Module ordering (Canvas module_meta.xml)
+    ``course_settings/module_meta.xml`` is written into the package.  It places
+    the template shell modules (Instructor Module, Start Here) first, the D2L
+    content modules in the middle, and the Course Conclusion module last.
+    Canvas uses this file when importing a Canvas Common Cartridge to define
+    module titles, positions, and published states.  D2L modules whose title
+    matches a template shell are excluded (they map to the template positions).
+
+Home page auto-selection
+    The course code prefix (e.g. "ACC", "COM", "PSY") is extracted from the
+    D2L manifest title and mapped to one of four Sinclair divisional home page
+    templates:
+
+    - Health Sciences  → ``home-page.html`` (default)
+    - Business & Public Services → ``home-page-bps.html``
+    - Liberal Arts, Communication & Social Sciences → ``home-page-lcs.html``
+    - STEM → ``home-page-stem.html``
+
+    The selected variant is written to ``wiki_content/home-page.html`` with
+    ``<meta name="front_page" content="true"/>`` so Canvas sets it as the
+    course home page on import.  ``course_settings/course_settings.xml`` is
+    also written with ``<default_view>wiki</default_view>`` so Canvas switches
+    the home from Modules view to the Page.
+
 Notes
 -----
 * ``$IMS-CC-FILEBASE$/template-images/...`` URLs in injected template HTML are
   rewritten to ``../TemplateAssets/{basename}`` so they resolve once Canvas
   imports the package.  The ``TemplateAssets/`` folder is already materialised
   by ``materialize_template_assets()`` earlier in the pipeline.
-* No changes to ``imsmanifest.xml``.  Newly added wiki_content pages appear as
-  standalone Pages in Canvas; instructors assign them to Modules manually.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+import textwrap
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -175,6 +199,444 @@ _ABOUT_INSTRUCTOR_TEMPLATE_PAGE = "wiki_content/about-the-instructor.html"
 _WELCOME_KEYWORDS = frozenset(
     ["welcome from instructor", "welcome from the instructor", "text from"]
 )
+
+# ---------------------------------------------------------------------------
+# Division → home page mapping
+# ---------------------------------------------------------------------------
+
+# Maps a Sinclair divisional code to the template home-page variant basename.
+# The default variant (Health Sciences) is "home-page.html".
+#
+# Division codes are the official Sinclair Academic Division abbreviations:
+#   BPS  Business & Public Services
+#   LCS  Liberal Arts, Communication & Social Sciences
+#   STEM Science, Technology, Engineering & Mathematics
+#   HS   Health Sciences (default — all unrecognised prefixes fall here)
+#
+# Reference: https://www.sinclair.edu/programs/
+_DIVISION_HOME_PAGE: dict[str, str] = {
+    "bps": "home-page-bps.html",
+    "lcs": "home-page-lcs.html",
+    "stem": "home-page-stem.html",
+    "hs": "home-page.html",
+}
+
+# Maps every known Sinclair course-code prefix to a division code.
+# Derived from the Sinclair course catalog (sinclair.edu/programs/).
+# Prefixes not listed here default to "hs" (Health Sciences home page).
+_PREFIX_TO_DIVISION: dict[str, str] = {
+    # ── Business & Public Services ──────────────────────────────────────────
+    "acc": "bps",
+    "adm": "bps",
+    "bis": "bps",
+    "bus": "bps",
+    "cjs": "bps",
+    "eco": "bps",
+    "fin": "bps",
+    "hrs": "bps",
+    "lgm": "bps",
+    "mgt": "bps",
+    "mkt": "bps",
+    "pal": "bps",
+    "par": "bps",
+    "pbl": "bps",
+    "pls": "bps",
+    "rea": "bps",
+    "ret": "bps",
+    "sfm": "bps",
+    # ── Liberal Arts, Communication & Social Sciences ────────────────────────
+    "ant": "lcs",
+    "com": "lcs",
+    "edu": "lcs",
+    "eng": "lcs",
+    "fla": "lcs",
+    "fra": "lcs",
+    "geo": "lcs",
+    "his": "lcs",
+    "hon": "lcs",
+    "hum": "lcs",
+    "icd": "lcs",
+    "jpn": "lcs",
+    "lib": "lcs",
+    "mda": "lcs",
+    "phi": "lcs",
+    "psc": "lcs",
+    "psy": "lcs",
+    "rel": "lcs",
+    "soc": "lcs",
+    "spa": "lcs",
+    "spe": "lcs",
+    # ── STEM ─────────────────────────────────────────────────────────────────
+    "arc": "stem",
+    "asl": "stem",
+    "ast": "stem",
+    "bio": "stem",
+    "che": "stem",
+    "cis": "stem",
+    "cit": "stem",
+    "cnt": "stem",
+    "eet": "stem",
+    "egr": "stem",
+    "emt": "stem",
+    "env": "stem",
+    "ict": "stem",
+    "mat": "stem",
+    "mec": "stem",
+    "mtd": "stem",
+    "phy": "stem",
+    "sci": "stem",
+    "tec": "stem",
+    # ── Health Sciences (explicit — also the default) ─────────────────────────
+    "aht": "hs",
+    "bms": "hs",
+    "dms": "hs",
+    "dnt": "hs",
+    "ems": "hs",
+    "hlc": "hs",
+    "hlt": "hs",
+    "him": "hs",
+    "mlt": "hs",
+    "nrs": "hs",
+    "oce": "hs",
+    "omt": "hs",
+    "opt": "hs",
+    "pha": "hs",
+    "pht": "hs",
+    "rsp": "hs",
+    "sgm": "hs",
+    "sur": "hs",
+    "vet": "hs",
+    "xrt": "hs",
+}
+
+# ---------------------------------------------------------------------------
+# Module meta constants (Canvas IMSCC extension)
+# ---------------------------------------------------------------------------
+
+# Identifiers and titles for the template shell modules.
+# These match the template's module_meta.xml so Canvas merges them correctly.
+_TEMPLATE_INSTRUCTOR_MODULE_ID = "gefc69a554f08c641ed6d85003000fb40"
+_TEMPLATE_INSTRUCTOR_MODULE_TITLE = "Instructor Module (Do Not Publish)"
+
+_TEMPLATE_START_HERE_ID = "g43cc723a24e2461e24205f608e560f0a"
+_TEMPLATE_START_HERE_TITLE = "Start Here"
+
+_TEMPLATE_CONCLUSION_ID = "g66a1695af5ea06b33c8a1add85501ac2"
+_TEMPLATE_CONCLUSION_TITLE = "Module 16: Course Conclusion"
+
+# D2L module titles that map to a template shell — excluded from the
+# middle section so they don't appear twice.
+_D2L_SHELL_MODULE_TITLES = frozenset(
+    [
+        "preparing your course - for faculty use only",
+        "preparing your course",
+        "course overview",
+        "start here",
+        "d2l start here carryover (manual placement)",
+        "instructor module (do not publish)",
+        "module 16: course conclusion",
+        "course conclusion",
+    ]
+)
+
+_MODULE_META_NS = "http://canvas.instructure.com/xsd/cccv1p0"
+_MODULE_META_XSD = "https://canvas.instructure.com/xsd/cccv1p0.xsd"
+
+
+# ---------------------------------------------------------------------------
+# Home-page selection
+# ---------------------------------------------------------------------------
+
+
+def _course_prefix_from_manifest(manifest_path: Path) -> str:
+    """Return the lower-cased course-code prefix (e.g. ``"acc"``) or ``""``."""
+    try:
+        text = manifest_path.read_text(encoding="utf-8", errors="replace")
+        # Look for the langstring that holds the course title, e.g.
+        # "ACC 2321 Federal Taxation - Online Master"
+        m = re.search(
+            r"<(?:imsmd:)?langstring[^>]*>\s*([A-Z]{2,6})\s+\d",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).lower()
+    except OSError:
+        pass
+    return ""
+
+
+def _home_page_variant(course_prefix: str) -> str:
+    """Return the template wiki_content basename for the home page.
+
+    Args:
+        course_prefix: Lower-cased course-code prefix, e.g. ``"acc"``.
+
+    Returns:
+        A basename like ``"home-page-bps.html"`` or ``"home-page.html"``.
+    """
+    division = _PREFIX_TO_DIVISION.get(course_prefix.lower(), "hs")
+    return _DIVISION_HOME_PAGE[division]
+
+
+def _inject_home_page(
+    unpack_dir: Path,
+    template_pages: dict[str, str],
+    course_prefix: str,
+) -> str | None:
+    """Write the correct home-page variant into ``wiki_content/``.
+
+    Selects the divisional home page, adds ``front_page=true`` meta, rewrites
+    template asset URLs, and writes it to ``wiki_content/home-page.html``.
+    Also writes ``course_settings/course_settings.xml`` with
+    ``<default_view>wiki</default_view>`` so Canvas switches the course home
+    from Modules view to the front Page.
+
+    Args:
+        unpack_dir: The extracted + processed D2L package directory.
+        template_pages: Dict of ``{basename: html}`` loaded from the template.
+        course_prefix: Lower-cased course-code prefix.
+
+    Returns:
+        The basename of the variant used, or ``None`` if the template page was
+        not found.
+    """
+    variant_basename = _home_page_variant(course_prefix)
+    page_html = template_pages.get(variant_basename)
+    if not page_html:
+        # Fallback to the default home page
+        page_html = template_pages.get("home-page.html")
+        variant_basename = "home-page.html"
+    if not page_html:
+        return None
+
+    # Rewrite template asset URLs to be relative
+    page_html = _rewrite_template_asset_urls(page_html, depth=1)
+
+    # Ensure front_page meta is present and set to true
+    if "front_page" not in page_html.lower():
+        page_html = page_html.replace(
+            "</head>",
+            '<meta name="front_page" content="true"/>\n</head>',
+            1,
+        )
+    else:
+        page_html = re.sub(
+            r'(<meta\s+name=["\']front_page["\'][^>]*content=["\'])[^"\']*(["\'])',
+            r"\g<1>true\2",
+            page_html,
+            flags=re.IGNORECASE,
+        )
+
+    dest = unpack_dir / "wiki_content" / "home-page.html"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(page_html, encoding="utf-8")
+
+    # Write course_settings/course_settings.xml so Canvas sets default_view=wiki
+    _write_course_settings(unpack_dir)
+
+    return variant_basename
+
+
+def _write_course_settings(unpack_dir: Path) -> None:
+    """Write ``course_settings/course_settings.xml`` with ``default_view=wiki``.
+
+    Only writes if the file does not already exist.
+    """
+    cs_dir = unpack_dir / "course_settings"
+    cs_path = cs_dir / "course_settings.xml"
+    if cs_path.exists():
+        return
+    cs_dir.mkdir(parents=True, exist_ok=True)
+    xml = textwrap.dedent(
+        """\
+        <?xml version="1.0" encoding="UTF-8"?>
+        <course identifier="g_lms_migration_course"
+          xmlns="http://canvas.instructure.com/xsd/cccv1p0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://canvas.instructure.com/xsd/cccv1p0 https://canvas.instructure.com/xsd/cccv1p0.xsd">
+          <default_view>wiki</default_view>
+        </course>
+        """
+    )
+    cs_path.write_text(xml, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Module meta XML generation
+# ---------------------------------------------------------------------------
+
+
+def _local_name(tag: str) -> str:
+    return tag.split("}", 1)[1] if tag.startswith("{") else tag
+
+
+def _read_d2l_module_titles(unpack_dir: Path) -> list[str]:
+    """Return top-level module titles from ``imsmanifest.xml`` in order.
+
+    Each entry is the human-readable title of a top-level ``<item>`` in
+    the D2L manifest ``<organization>``.  Shell/carryover modules are
+    excluded — only the genuine course content modules are returned.
+    """
+    manifest_path = next(unpack_dir.rglob("imsmanifest.xml"), None)
+    if manifest_path is None:
+        return []
+    try:
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+    except ET.ParseError:
+        return []
+
+    org: ET.Element | None = None
+    for el in root.iter():
+        if _local_name(el.tag) == "organization":
+            org = el
+            break
+    if org is None:
+        return []
+
+    titles: list[str] = []
+    for item in org:
+        if _local_name(item.tag) != "item":
+            continue
+        title = ""
+        for child in item:
+            if _local_name(child.tag) == "title":
+                title = (child.text or "").strip()
+                break
+        if not title:
+            continue
+        # Skip D2L shell/carryover modules — they map to template positions
+        if title.lower() in _D2L_SHELL_MODULE_TITLES:
+            continue
+        titles.append(title)
+    return titles
+
+
+def _make_module_id(seed: str) -> str:
+    """Return a stable Canvas-style module identifier derived from *seed*."""
+    return "g" + hashlib.md5(f"module:{seed}".encode()).hexdigest()
+
+
+def _make_item_id(seed: str) -> str:
+    """Return a stable Canvas-style item identifier derived from *seed*."""
+    return "g" + hashlib.md5(f"item:{seed}".encode()).hexdigest()
+
+
+def _build_module_element(
+    ns: str,
+    identifier: str,
+    title: str,
+    position: int,
+    *,
+    workflow_state: str = "active",
+) -> ET.Element:
+    """Build a single ``<module>`` element for ``module_meta.xml``."""
+    m = ET.Element(f"{{{ns}}}module", attrib={"identifier": identifier})
+    ET.SubElement(m, f"{{{ns}}}title").text = title
+    ET.SubElement(m, f"{{{ns}}}workflow_state").text = workflow_state
+    ET.SubElement(m, f"{{{ns}}}position").text = str(position)
+    ET.SubElement(m, f"{{{ns}}}require_sequential_progress").text = "false"
+    ET.SubElement(m, f"{{{ns}}}locked").text = "false"
+    ET.SubElement(m, f"{{{ns}}}items")
+    return m
+
+
+def _build_module_meta_xml(
+    d2l_module_titles: list[str],
+    *,
+    ns: str = _MODULE_META_NS,
+) -> str:
+    """Build the ``module_meta.xml`` content string.
+
+    Layout:
+        position 1  — Instructor Module (Do Not Publish) [unpublished]
+        position 2  — Start Here
+        positions 3 … N  — D2L course content modules
+        position N+1  — Course Conclusion [must match template title]
+
+    Args:
+        d2l_module_titles: Ordered list of D2L content module titles
+            (shell/carryover modules already excluded).
+        ns: XML namespace string.
+
+    Returns:
+        UTF-8 XML string suitable for writing to ``module_meta.xml``.
+    """
+    # Register namespace so ET serialises without "ns0:" prefix
+    ET.register_namespace("", ns)
+    ET.register_namespace("xsi", "http://www.w3.org/2001/XMLSchema-instance")
+
+    root = ET.Element(
+        f"{{{ns}}}modules",
+        attrib={
+            "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
+            "xsi:schemaLocation": f"{ns} {_MODULE_META_XSD}",
+        },
+    )
+
+    # 1. Instructor Module
+    root.append(
+        _build_module_element(
+            ns,
+            _TEMPLATE_INSTRUCTOR_MODULE_ID,
+            _TEMPLATE_INSTRUCTOR_MODULE_TITLE,
+            position=1,
+            workflow_state="unpublished",
+        )
+    )
+
+    # 2. Start Here
+    root.append(
+        _build_module_element(
+            ns,
+            _TEMPLATE_START_HERE_ID,
+            _TEMPLATE_START_HERE_TITLE,
+            position=2,
+        )
+    )
+
+    # 3 … N. D2L content modules
+    for idx, title in enumerate(d2l_module_titles, start=3):
+        root.append(
+            _build_module_element(
+                ns,
+                _make_module_id(title),
+                title,
+                position=idx,
+            )
+        )
+
+    # N+1. Course Conclusion
+    conclusion_pos = len(d2l_module_titles) + 3
+    root.append(
+        _build_module_element(
+            ns,
+            _TEMPLATE_CONCLUSION_ID,
+            _TEMPLATE_CONCLUSION_TITLE,
+            position=conclusion_pos,
+        )
+    )
+
+    # Pretty serialisation
+    ET.indent(root, space="  ")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+        root, encoding="unicode"
+    )
+
+
+def _write_module_meta(unpack_dir: Path, d2l_module_titles: list[str]) -> None:
+    """Generate and write ``course_settings/module_meta.xml``.
+
+    Only writes if the file does not already exist (idempotent).
+    """
+    cs_dir = unpack_dir / "course_settings"
+    meta_path = cs_dir / "module_meta.xml"
+    if meta_path.exists():
+        return
+    cs_dir.mkdir(parents=True, exist_ok=True)
+    xml = _build_module_meta_xml(d2l_module_titles)
+    meta_path.write_text(xml, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -703,11 +1165,19 @@ def run_template_merge(
         dest.write_text(page_html, encoding="utf-8")
         result.added_template_pages.append(dest_rel)
 
-    # NOTE: Template pages live in CourseOverview/, not wiki_content/, so the D2L
-    # importer cannot turn them into Canvas wiki pages.  Injecting <item> entries
-    # into the manifest's <organization> block creates *empty module containers*
-    # (one per top-level item) rather than pages.  The correct approach is to use
-    # the Canvas Pages API via `run_preview(inject_template_pages=True)` AFTER
-    # import, which creates the pages directly.  Do NOT inject manifest entries.
+    # ── Home page selection ────────────────────────────────────────────────
+    # Detect the course-code prefix from the D2L manifest so we can pick the
+    # correct divisional home-page template.
+    manifest_path = next(unpack_dir.rglob("imsmanifest.xml"), None)
+    course_prefix = _course_prefix_from_manifest(manifest_path) if manifest_path else ""
+    home_variant = _inject_home_page(unpack_dir, template_pages, course_prefix)
+    if home_variant:
+        result.added_template_pages.append(f"wiki_content/home-page.html ({home_variant})")
+
+    # ── Module ordering (Canvas module_meta.xml) ───────────────────────────
+    # Read the D2L manifest to get the ordered list of content modules, then
+    # build module_meta.xml that places them between the template shell modules.
+    d2l_modules = _read_d2l_module_titles(unpack_dir)
+    _write_module_meta(unpack_dir, d2l_modules)
 
     return result
