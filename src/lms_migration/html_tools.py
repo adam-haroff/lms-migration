@@ -2751,6 +2751,61 @@ def check_template_heuristics(
     return issues
 
 
+def _suggest_alt_text(img_tag: str, content: str, match_start: int) -> str | None:
+    """Derive a best-effort alt text suggestion from available context signals.
+
+    Checks in priority order:
+    1. ``title`` attribute on the img tag itself.
+    2. ``aria-label`` attribute on the img tag.
+    3. ``<figcaption>`` element immediately following the img tag.
+    4. Nearest preceding ``<h1>``–``<h6>`` heading text.
+    5. Semantic image filename (skipped if the name is a pure timestamp/UUID).
+
+    Returns a short string suggestion, or ``None`` when no useful signal is found.
+    """
+    # 1. title attribute
+    m = re.search(r'\btitle\s*=\s*["\'](.*?)["\']', img_tag, re.IGNORECASE)
+    if m and m.group(1).strip():
+        return m.group(1).strip()[:120]
+
+    # 2. aria-label attribute
+    m = re.search(r'\baria-label\s*=\s*["\'](.*?)["\']', img_tag, re.IGNORECASE)
+    if m and m.group(1).strip():
+        return m.group(1).strip()[:120]
+
+    # 3. <figcaption> in the 500 characters immediately after the img tag
+    post = content[match_start + len(img_tag) : match_start + len(img_tag) + 500]
+    m = re.search(
+        r"<figcaption[^>]*>(.*?)</figcaption>", post, re.IGNORECASE | re.DOTALL
+    )
+    if m:
+        text = re.sub(r"<[^>]+>", " ", m.group(1)).strip()
+        if text:
+            return text[:120]
+
+    # 4. Nearest preceding heading (search backwards up to 1,500 chars)
+    pre = content[max(0, match_start - 1500) : match_start]
+    headings = list(
+        re.finditer(r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre, re.IGNORECASE | re.DOTALL)
+    )
+    if headings:
+        text = re.sub(r"<[^>]+>", " ", headings[-1].group(1)).strip()
+        if text:
+            return text[:120]
+
+    # 5. Semantic filename (skip pure timestamp / UUID names)
+    m = re.search(r'\bsrc\s*=\s*["\'](.*?)["\']', img_tag, re.IGNORECASE)
+    if m:
+        raw = m.group(1).split("/")[-1].rsplit(".", 1)[0]
+        # Skip pure digit/separator names AND names containing long digit runs (timestamps)
+        if not re.match(r"^[\d_\-]+$", raw) and not re.search(r"\d{8,}", raw):
+            suggestion = re.sub(r"[_\-]+", " ", raw).strip()
+            if suggestion:
+                return suggestion[:120]
+
+    return None
+
+
 def check_accessibility_heuristics(content: str) -> list[ManualReviewIssue]:
     issues: list[ManualReviewIssue] = []
 
@@ -2768,17 +2823,25 @@ def check_accessibility_heuristics(content: str) -> list[ManualReviewIssue]:
             )
         )
         if alt_match is None:
+            suggestion = _suggest_alt_text(img_tag, content, match.start())
+            evidence = img_tag[:120]
+            if suggestion:
+                evidence += f' | suggested alt: "{suggestion}" — verify with faculty'
             issues.append(
                 ManualReviewIssue(
                     reason="Image missing alt attribute",
-                    evidence=img_tag[:120],
+                    evidence=evidence,
                 )
             )
         elif not alt_match.group(2).strip() and not is_presentational:
+            suggestion = _suggest_alt_text(img_tag, content, match.start())
+            evidence = img_tag[:120]
+            if suggestion:
+                evidence += f' | suggested alt: "{suggestion}" — verify with faculty'
             issues.append(
                 ManualReviewIssue(
                     reason="Image alt attribute is empty",
-                    evidence=img_tag[:120],
+                    evidence=evidence,
                 )
             )
 

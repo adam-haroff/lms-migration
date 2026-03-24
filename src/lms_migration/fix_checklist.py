@@ -436,7 +436,12 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
                 "P1",
                 "a11y_alt_text",
                 "Faculty/ID",
-                "Add meaningful alt text or mark decorative images appropriately.",
+                "Add meaningful alt text or mark decorative images as presentational. "
+                "Check the evidence column — a suggested alt text is included when one "
+                "could be inferred from the surrounding heading, caption, or filename. "
+                "Verify the suggestion with the faculty member before publishing. "
+                "In Canvas: edit the page > click the image > Image Options > "
+                "enter alt text or check 'Decorative Image'.",
             )
         if "heading level jump detected" in lowered:
             return (

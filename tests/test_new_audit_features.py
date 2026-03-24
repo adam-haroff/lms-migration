@@ -20,6 +20,8 @@ from lms_migration.html_tools import (
     detect_d2l_media_library_embeds,
     detect_lti_embed_issues,
     detect_email_submission_issues,
+    check_accessibility_heuristics,
+    _suggest_alt_text,
 )
 from lms_migration.fix_checklist import _map_manual_review_group
 from lms_migration.quiz_audit import (
@@ -2231,3 +2233,138 @@ class TestFixChecklistQuizSettingsInventory:
     def test_action_references_quiz_audit_md(self):
         _, _, _, action = _map_manual_review_group("d2l_xml_audit", self._REASON)
         assert "quiz-audit.md" in action.lower()
+
+
+# ===========================================================================
+# Alt text suggestion helper — _suggest_alt_text
+# ===========================================================================
+
+
+class TestSuggestAltText:
+    """Unit tests for _suggest_alt_text() context-inference helper."""
+
+    def _suggest(self, img_tag: str, content_before: str = "", content_after: str = "") -> str | None:
+        """Build a minimal full-content string and call _suggest_alt_text."""
+        content = content_before + img_tag + content_after
+        start = len(content_before)
+        return _suggest_alt_text(img_tag, content, start)
+
+    # ---- attribute-based signals ----
+
+    def test_title_attribute_used_as_suggestion(self):
+        img = '<img src="chart.png" title="Revenue chart 2024">'
+        assert self._suggest(img) == "Revenue chart 2024"
+
+    def test_aria_label_used_when_no_title(self):
+        img = '<img src="chart.png" aria-label="Monthly sales graph">'
+        assert self._suggest(img) == "Monthly sales graph"
+
+    def test_title_takes_priority_over_aria_label(self):
+        img = '<img src="chart.png" title="Title wins" aria-label="Should lose">'
+        assert self._suggest(img) == "Title wins"
+
+    # ---- figcaption ----
+
+    def test_figcaption_in_post_context_used(self):
+        img = '<img src="photo.jpg">'
+        post = "<figcaption>Photo of the main campus</figcaption><p>Other text</p>"
+        assert self._suggest(img, content_after=post) == "Photo of the main campus"
+
+    def test_figcaption_beyond_500_chars_ignored(self):
+        img = '<img src="photo.jpg">'
+        post = "x" * 501 + "<figcaption>Too far away</figcaption>"
+        # Should not use the figcaption; may fall through to filename suggestion
+        result = self._suggest(img, content_after=post)
+        assert result != "Too far away"
+
+    # ---- nearest preceding heading ----
+
+    def test_nearest_heading_used_when_no_caption(self):
+        img = '<img src="diagram.png">'
+        pre = "<h2>Chapter 3: Cell Biology</h2><p>Some intro paragraph.</p>"
+        assert self._suggest(img, content_before=pre) == "Chapter 3: Cell Biology"
+
+    def test_nearest_heading_chosen_not_earlier_one(self):
+        img = '<img src="diagram.png">'
+        pre = "<h1>Unit 1</h1><p>text</p><h2>Section 2</h2><p>more</p>"
+        assert self._suggest(img, content_before=pre) == "Section 2"
+
+    def test_heading_beyond_1500_chars_ignored(self):
+        img = '<img src="diagram.png">'
+        # heading beyond 1500 character lookback window
+        pre = "<h2>Far away heading</h2>" + "x" * 1500
+        result = self._suggest(img, content_before=pre)
+        # Should fall through to filename, which is "diagram"
+        assert result == "diagram"
+
+    # ---- filename inference ----
+
+    def test_semantic_filename_used_as_last_resort(self):
+        img = '<img src="sales-tax-deduction-chart.png">'
+        assert self._suggest(img) == "sales tax deduction chart"
+
+    def test_underscore_filename_converted_to_spaces(self):
+        img = '<img src="path/to/revenue_growth_chart.png">'
+        assert self._suggest(img) == "revenue growth chart"
+
+    def test_pure_timestamp_filename_not_suggested(self):
+        img = '<img src="image_20251014152427000.png">'
+        assert self._suggest(img) is None
+
+    def test_all_digits_filename_not_suggested(self):
+        img = '<img src="123456.png">'
+        assert self._suggest(img) is None
+
+    def test_no_context_returns_none(self):
+        img = '<img src="image_20251014152427000.png">'
+        assert self._suggest(img) is None
+
+    # ---- suggestion length cap ----
+
+    def test_long_title_capped_at_120_chars(self):
+        long = "A" * 200
+        img = f'<img src="x.png" title="{long}">'
+        result = self._suggest(img)
+        assert result is not None
+        assert len(result) <= 120
+
+    # ---- integration: evidence field in check_accessibility_heuristics ----
+
+    def test_suggested_alt_appended_to_evidence_when_context_available(self):
+        html = (
+            "<h2>Sales Tax Deduction</h2>"
+            '<p><img src="sales-tax-chart.png"></p>'
+        )
+        issues = check_accessibility_heuristics(html)
+        assert len(issues) == 1
+        assert "suggested alt:" in issues[0].evidence
+
+    def test_no_suggestion_when_timestamp_filename_only(self):
+        html = '<img src="image_20251014152427000.png">'
+        issues = check_accessibility_heuristics(html)
+        assert len(issues) == 1
+        assert "suggested alt:" not in issues[0].evidence
+
+    def test_empty_alt_also_gets_suggestion(self):
+        html = (
+            "<h2>Quarterly results</h2>"
+            '<p><img src="results.png" alt=""></p>'
+        )
+        issues = check_accessibility_heuristics(html)
+        assert len(issues) == 1
+        assert issues[0].reason == "Image alt attribute is empty"
+        assert "suggested alt:" in issues[0].evidence
+
+    # ---- fix_checklist action text updated ----
+
+    def test_fix_checklist_action_mentions_evidence_column(self):
+        _, _, _, action = _map_manual_review_group(
+            "accessibility", "Image missing alt attribute"
+        )
+        assert "evidence" in action.lower()
+
+    def test_fix_checklist_action_mentions_verify_faculty(self):
+        _, _, _, action = _map_manual_review_group(
+            "accessibility", "Image alt attribute is empty"
+        )
+        assert "verify" in action.lower()
