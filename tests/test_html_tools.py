@@ -567,17 +567,21 @@ class TestCanonicalHeadingLabel:
 
 
 # ===========================================================================
-# _INTRO_HEADING_SPECS — section headings must get the full red h2 style
+# _INTRO_HEADING_SPECS — page-title h2 vs section h2 styles
 # ===========================================================================
 
 
 class TestIntroHeadingStyle:
-    """All intro-page h2 headings (Introduction, Module Objectives, Module
-    Checklist) must carry the full Sinclair red h2 style:
-        color: #ac1a2f; border-bottom: 10px solid #AC1A2F; padding: 10px
-    Previously _SECTION_HEADING_STYLE was color-only, causing the
-    "Learning Objectives" / "Module Objectives" headings to render without
-    the red border-bottom in output HTML."""
+    """Gold standard (ast-1111 training corpus) shows two distinct h2 styles:
+
+    * PAGE TITLE h2 (Introduction, Learning Activities — the FIRST h2 on the
+      page): ``color: #ac1a2f; border-bottom: 10px solid #AC1A2F; padding: 10px``
+    * SECTION h2 (Module Objectives, Module Checklist — SUBSEQUENT h2s on the
+      same page): bare ``<h2>`` tag, color applied only via inner content span.
+      NO border-bottom, NO padding on the h2 tag itself.
+
+    Confirmed by forensic scan of 479 gold pages across 5 training courses.
+    """
 
     def _make_intro_ctx(self) -> TemplateOverlayContext:
         return TemplateOverlayContext(
@@ -606,44 +610,154 @@ class TestIntroHeadingStyle:
         )
         return out
 
+    # --- Page-title heading (Introduction) ---
+
     def test_introduction_h1_gets_full_red_h2_style(self):
+        """Introduction is the page title — must have border-bottom + padding."""
         result = self._apply("Introduction")
         assert "border-bottom: 10px solid #ac1a2f" in result.lower()
         assert "padding: 10px" in result.lower()
         assert "color: #ac1a2f" in result.lower()
 
-    def test_learning_objectives_h1_gets_full_red_h2_style(self):
-        """Regression: _SECTION_HEADING_STYLE was color-only — must now include
-        border-bottom and padding to match gold standard."""
-        result = self._apply("Learning Objectives")
-        assert "border-bottom: 10px solid #ac1a2f" in result.lower()
-        assert "padding: 10px" in result.lower()
-        assert "color: #ac1a2f" in result.lower()
-
-    def test_module_objectives_h1_gets_full_red_h2_style(self):
-        result = self._apply("Module Objectives")
-        assert "border-bottom: 10px solid #ac1a2f" in result.lower()
-        assert "padding: 10px" in result.lower()
-
-    def test_checklist_h1_gets_full_red_h2_style(self):
-        result = self._apply("Checklist")
-        assert "border-bottom: 10px solid #ac1a2f" in result.lower()
-        assert "padding: 10px" in result.lower()
-
-    def test_module_checklist_h1_gets_full_red_h2_style(self):
-        result = self._apply("Module Checklist")
-        assert "border-bottom: 10px solid #ac1a2f" in result.lower()
-        assert "padding: 10px" in result.lower()
-
-    def test_section_heading_not_color_only(self):
-        """The partial color-only pattern must no longer appear."""
-        result = self._apply("Learning Objectives")
-        # Should not have color attribute set alone without border-bottom on the same h2
+    def test_introduction_h2_tag_has_border_bottom(self):
+        """The border-bottom must be on the h2 tag itself, not just inner content."""
+        result = self._apply("Introduction")
         h2_match = re.search(r"<h2[^>]*>", result, re.IGNORECASE)
         assert h2_match, "Expected an <h2> element"
-        h2_tag = h2_match.group(0)
-        assert "border-bottom" in h2_tag.lower(), (
-            f"h2 tag must have border-bottom, got: {h2_tag}"
+        assert "border-bottom" in h2_match.group(0).lower()
+
+    # --- Section headings (Module Objectives, Module Checklist) ---
+
+    def test_learning_objectives_is_color_only_no_border_bottom(self):
+        """Section headings must NOT have border-bottom — only the page title does."""
+        result = self._apply("Learning Objectives")
+        assert "color: #ac1a2f" in result.lower()
+        h2_match = re.search(r"<h2[^>]*>", result, re.IGNORECASE)
+        assert h2_match, "Expected an <h2> element"
+        assert "border-bottom" not in h2_match.group(0).lower(), (
+            f"Section heading h2 must not have border-bottom, got: {h2_match.group(0)}"
+        )
+
+    def test_module_objectives_is_color_only_no_border_bottom(self):
+        result = self._apply("Module Objectives")
+        h2_match = re.search(r"<h2[^>]*>", result, re.IGNORECASE)
+        assert h2_match
+        assert "border-bottom" not in h2_match.group(0).lower()
+
+    def test_checklist_is_color_only_no_border_bottom(self):
+        result = self._apply("Checklist")
+        h2_match = re.search(r"<h2[^>]*>", result, re.IGNORECASE)
+        assert h2_match
+        assert "border-bottom" not in h2_match.group(0).lower()
+
+    def test_module_checklist_is_color_only_no_border_bottom(self):
+        result = self._apply("Module Checklist")
+        h2_match = re.search(r"<h2[^>]*>", result, re.IGNORECASE)
+        assert h2_match
+        assert "border-bottom" not in h2_match.group(0).lower()
+
+
+# ===========================================================================
+# Trailing red hr — all template content pages must end with the 8px red hr
+# ===========================================================================
+
+
+class TestTrailingRedHr:
+    """Gold standard: every module content page (lesson, activities, intro,
+    review) ends with ``<hr style="border-top: 8px solid #AC1A2F;">``.
+    Home pages are excluded.  The hr is added by apply_template_overlay when
+    apply_divider_standards=True and the page doesn't already have one."""
+
+    _CANONICAL_HR = '<hr style="border-top: 8px solid #AC1A2F;">'
+
+    def _make_ctx(self) -> TemplateOverlayContext:
+        return TemplateOverlayContext(
+            template_package=Path("."),
+            alias_map_source="test",
+            alias_map={},
+            assets_by_basename={},
+            file_name_collisions={},
+            icon_label_by_basename={},
+            apply_visual_standards=False,
+            apply_color_standards=False,
+            apply_divider_standards=True,
+            image_layout_mode="safe-block",
+        )
+
+    def _apply(self, html: str, file_path: str = "module-1-lesson.html") -> str:
+        out, _, _, _ = apply_template_overlay(
+            html,
+            file_path=file_path,
+            context=self._make_ctx(),
+        )
+        return out
+
+    def test_trailing_hr_added_to_content_page(self):
+        html = "<body><div><h2>Some Content</h2><p>Text.</p></div></body>"
+        result = self._apply(html)
+        assert self._CANONICAL_HR in result
+
+    def test_trailing_hr_before_body_close(self):
+        html = "<body><p>Content.</p></body>"
+        result = self._apply(html)
+        # hr must appear before </body>
+        hr_pos = result.lower().find("border-top: 8px")
+        body_close_pos = result.lower().rfind("</body>")
+        assert hr_pos != -1, "Canonical hr not found"
+        assert hr_pos < body_close_pos
+
+    def test_trailing_hr_not_duplicated_if_already_present(self):
+        html = (
+            '<body><p>Content.</p>'
+            '<hr style="border-top: 8px solid #AC1A2F;">'
+            "</body>"
+        )
+        result = self._apply(html)
+        count = result.lower().count("border-top: 8px solid")
+        assert count == 1, f"Expected exactly 1 canonical closing hr, got {count}"
+
+    def test_home_page_excluded(self):
+        html = "<body><p>Home page content.</p></body>"
+        result = self._apply(html, file_path="home-page.html")
+        assert "border-top: 8px solid" not in result.lower()
+
+    def test_home_page_variants_excluded(self):
+        for name in ("home-page-lcs.html", "home-page-stem.html", "home page.html"):
+            html = "<body><p>Content.</p></body>"
+            result = self._apply(html, file_path=name)
+            assert "border-top: 8px solid" not in result.lower(), (
+                f"Home page {name!r} should not get trailing hr"
+            )
+
+    def test_apply_divider_standards_false_skips_trailing_hr(self):
+        ctx = TemplateOverlayContext(
+            template_package=Path("."),
+            alias_map_source="test",
+            alias_map={},
+            assets_by_basename={},
+            file_name_collisions={},
+            icon_label_by_basename={},
+            apply_visual_standards=False,
+            apply_color_standards=False,
+            apply_divider_standards=False,
+            image_layout_mode="safe-block",
+        )
+        html = "<body><p>Content.</p></body>"
+        out, _, _, _ = apply_template_overlay(
+            html, file_path="module-1-lesson.html", context=ctx
+        )
+        assert "border-top: 8px solid" not in out.lower()
+
+    def test_trailing_hr_change_logged(self):
+        html = "<body><p>Content.</p></body>"
+        _, changes, _, _ = apply_template_overlay(
+            html,
+            file_path="module-1-lesson.html",
+            context=self._make_ctx(),
+        )
+        descriptions = [c.description.lower() for c in changes]
+        assert any("closing red divider" in d for d in descriptions), (
+            f"Expected trailing-hr AppliedChange, got: {descriptions}"
         )
 
 
@@ -714,7 +828,12 @@ class TestRemoveLeadingDivider:
             "</body>"
         )
         result = self._apply(html)
-        assert "<hr" not in result.lower(), "Header <hr> should have been stripped"
+        # The D2L header hr (with background-color styling) must be stripped.
+        # The canonical closing red hr may be present at the end of the page.
+        assert "background-color: #ac1a2f" not in result.lower(), (
+            "D2L header hr should have been stripped"
+        )
+        assert "Content here" in result
 
     def test_header_div_not_present_in_output(self):
         """The first orphan div (with only spacers + hr) should be gone entirely."""
@@ -753,10 +872,14 @@ class TestRemoveLeadingDivider:
             "</body>"
         )
         result = self._apply(html)
-        assert "<hr" not in result.lower()
+        # The D2L banner hr must be gone.
+        assert "background-color: #ac1a2f" not in result.lower()
+        assert "Content." in result
 
     def test_no_header_div_not_affected(self):
-        """Pages that already have no header <hr> div must not be changed."""
+        """Pages with no D2L header div must keep their content intact.
+        A canonical trailing red hr is expected to be present (added by the
+        trailing-hr logic) but no D2L banner hr."""
         html = (
             "<body>"
             "<div>"
@@ -766,8 +889,14 @@ class TestRemoveLeadingDivider:
             "</body>"
         )
         result = self._apply(html)
-        assert "<hr" not in result.lower()
         assert "Introduction" in result
+        # Only the canonical closing hr should be present; no old D2L banner hr.
+        assert "background-color" not in result.lower()
+        import re as _re
+        hr_styles = [m.group(0) for m in _re.finditer(r'<hr[^>]*>', result, _re.IGNORECASE)]
+        assert all("border-top: 8px solid" in s.lower() for s in hr_styles), (
+            f"Only canonical closing hr expected, found: {hr_styles}"
+        )
 
     def test_content_hr_inside_body_not_stripped(self):
         """An <hr> that appears WITHIN content (not as the first div) must be kept."""
@@ -834,9 +963,10 @@ class TestRemoveLeadingDivider:
             "</body>"
         )
         result = self._apply(html)
-        assert (
-            "<hr" not in result.lower()
-        ), "Header <hr> should be stripped even with printer link present"
+        # The D2L header hr must be stripped.
+        assert "background-color: #ac1a2f" not in result.lower(), (
+            "Header <hr> should be stripped even with printer link present"
+        )
         # The printer link paragraph should also be gone (it was in the stripped header div)
         assert "Printer-friendly version" not in result
 

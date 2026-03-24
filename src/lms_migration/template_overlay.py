@@ -79,7 +79,7 @@ _PAGE_TITLE_HEADING_STYLE = (
     "border-bottom: 10px solid #AC1A2F",
     "padding: 10px",
 )
-_SECTION_HEADING_STYLE = _PAGE_TITLE_HEADING_STYLE
+_SECTION_HEADING_STYLE = ("color: #ac1a2f",)
 _INTRO_HEADING_SPECS = {
     "introduction": {
         "icon_basename": "star.png",
@@ -1640,6 +1640,32 @@ def apply_template_overlay(
                 )
                 default_banner_injected = True
 
+    # Append the canonical red closing hr to all template content pages that
+    # don't already have one.  Home pages are excluded.  This matches the gold
+    # standard where every module content page ends with the thick red divider.
+    _CANONICAL_CLOSING_HR = '<hr style="border-top: 8px solid #AC1A2F;">'
+    trailing_hr_added = False
+    if context.apply_divider_standards:
+        _nfp = file_path.replace("\\", "/").lower()
+        _is_home = bool(re.search(r"(?:^|/)home[-_ ]?page?", _nfp))
+        if not _is_home:
+            _has_canonical = bool(
+                re.search(
+                    r"<hr[^>]*border-top\s*:\s*8px\s+solid",
+                    updated,
+                    re.IGNORECASE,
+                )
+            )
+            if not _has_canonical:
+                updated = re.sub(
+                    r"(</body\s*>)",
+                    f"\n{_CANONICAL_CLOSING_HR}\n\\1",
+                    updated,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                trailing_hr_added = True
+
     applied_changes: list[AppliedChange] = []
     if direct_mapped:
         applied_changes.append(
@@ -1762,6 +1788,14 @@ def apply_template_overlay(
             AppliedChange(
                 category="template_overlay",
                 description="Injected default template banner for content page missing a banner image",
+                count=1,
+            )
+        )
+    if trailing_hr_added:
+        applied_changes.append(
+            AppliedChange(
+                category="template_overlay",
+                description="Added canonical closing red divider to template content page",
                 count=1,
             )
         )
