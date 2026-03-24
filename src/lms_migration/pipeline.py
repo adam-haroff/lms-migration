@@ -35,6 +35,7 @@ from .html_tools import (
 )
 from .fix_checklist import _map_manual_review_group
 from .policy_profiles import PolicyProfile, get_policy_profile
+from .quiz_audit import _RISK_TYPES as _QUIZ_RISK_TYPES, _parse_quiz_xml as _parse_quiz_xml_file
 from .rules import load_rules
 from .template_merger import run_template_merge
 from .template_overlay import (
@@ -1352,8 +1353,8 @@ def _audit_dropbox_folders(zip_path: Path) -> list[dict]:
                     continue
                 raw = re.sub(r"<\?xml[^>]*\?>", "", raw, count=1)
                 # Strip the d2l_2p0 namespace prefix so ET can parse cleanly
-                raw = re.sub(r'\bd2l_2p0:', '', raw)
-                raw = re.sub(r'\bxmlns:d2l_2p0="[^"]*"', '', raw)
+                raw = re.sub(r"\bd2l_2p0:", "", raw)
+                raw = re.sub(r'\bxmlns:d2l_2p0="[^"]*"', "", raw)
                 try:
                     root = ET.fromstring(raw)
                 except ET.ParseError:
@@ -1382,14 +1383,18 @@ def _audit_dropbox_folders(zip_path: Path) -> list[dict]:
 
                     # Rubric association
                     rubric_el = folder.find(".//rubric")
-                    rubric_note = f" | rubric: {rubric_el.text.strip()}" if (
-                        rubric_el is not None and rubric_el.text
-                    ) else ""
+                    rubric_note = (
+                        f" | rubric: {rubric_el.text.strip()}"
+                        if (rubric_el is not None and rubric_el.text)
+                        else ""
+                    )
 
                     # Build evidence string
                     evidence_parts = [f'folder: "{name}"']
                     if out_of:
-                        evidence_parts.append(f"points: {out_of.rstrip('0').rstrip('.')}")
+                        evidence_parts.append(
+                            f"points: {out_of.rstrip('0').rstrip('.')}"
+                        )
                     if grade_item:
                         evidence_parts.append(f"grade_item: {grade_item}")
                     if due_str:
@@ -1541,6 +1546,66 @@ def _audit_date_shift_items(zip_path: Path) -> list[dict]:
     return rows
 
 
+def _audit_quiz_question_types(zip_path: Path) -> list[dict]:
+    """Return one row per quiz that contains at-risk question types (P1/P2).
+
+    Uses the same ``_RISK_TYPES`` reference from ``quiz_audit`` so the
+    compatibility table stays in a single place.  Emits one row per affected
+    quiz listing each at-risk type, its count, and the recommended action.
+    Quizzes with only clean types are silently skipped.
+    """
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            quiz_files = [
+                n
+                for n in names
+                if re.match(r"quiz_d2l_\d+\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in sorted(quiz_files):
+                try:
+                    content = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                quiz_info = _parse_quiz_xml_file(fname, content)
+                if not quiz_info.compatibility_flags:
+                    continue
+                # Separate P1 flags from P2 flags
+                p1_flags = [
+                    f for f in quiz_info.compatibility_flags if f["level"] == "P1"
+                ]
+                p2_flags = [
+                    f for f in quiz_info.compatibility_flags if f["level"] == "P2"
+                ]
+                # Emit the highest-priority row for this quiz so the checklist
+                # properly classifies it.  Include all flag summaries in evidence.
+                level = "P1" if p1_flags else "P2"
+                flag_summaries = ", ".join(
+                    f"{f['type']} \u00d7{f['count']}"
+                    for f in quiz_info.compatibility_flags
+                )
+                reason = (
+                    f"New Quizzes question-type compatibility risk ({level}) — "
+                    "manual rebuild required for unsupported question types"
+                )
+                evidence = (
+                    f"quiz: {quiz_info.title} | at-risk types: {flag_summaries} | "
+                    f"total questions: {quiz_info.question_count}"
+                )
+                rows.append(
+                    {
+                        "file": fname,
+                        "type": "d2l_xml_audit",
+                        "reason": reason,
+                        "evidence": evidence,
+                    }
+                )
+    except Exception:
+        pass
+    return rows
+
+
 def _append_xml_audit_rows_to_csv(zip_path: Path, csv_path: Path) -> None:
     """Append D2L XML audit rows (graded discussions, availability windows,
     gradebook groups, rubrics, date-shift advisory) to the manual-review CSV."""
@@ -1551,6 +1616,7 @@ def _append_xml_audit_rows_to_csv(zip_path: Path, csv_path: Path) -> None:
     rows.extend(_audit_rubrics(zip_path))
     rows.extend(_audit_dropbox_folders(zip_path))
     rows.extend(_audit_date_shift_items(zip_path))
+    rows.extend(_audit_quiz_question_types(zip_path))
     if not rows:
         return
     with csv_path.open("a", newline="", encoding="utf-8") as fh:

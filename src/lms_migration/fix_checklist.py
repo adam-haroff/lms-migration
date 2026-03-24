@@ -222,6 +222,22 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "See `d2l-export.quiz-audit.md` for the complete per-quiz settings inventory "
             "(time limits, attempts, shuffle settings).",
         )
+    if "new quizzes question-type compatibility risk" in lowered:
+        # Determine priority from the flagged level in the reason string
+        priority = "P1" if "(p1)" in lowered else "P2"
+        return (
+            priority,
+            "new_quizzes_question_type_rebuild",
+            "Faculty/Course Coordinator",
+            "One or more question types in this quiz are not natively supported by Canvas "
+            "New Quizzes and must be manually rebuilt before the course goes live. "
+            "See the evidence column for the specific types and counts. "
+            "Recommended substitutions: Ordering → Matching or Written Response; "
+            "Arithmetic/Calculated → Formula/Calculated Numeric; "
+            "Significant Figures → Numeric/Formula; "
+            "Likert → survey tool or Written Response. "
+            "After rebuilding, verify point values, feedback, and correct-answer keys match D2L.",
+        )
     if "layout css may render differently" in lowered:
         return (
             "P2",

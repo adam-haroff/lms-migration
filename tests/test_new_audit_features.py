@@ -1395,3 +1395,217 @@ class TestDetectIframeIssues:
         )
         assert priority == "P1"
         assert category == "embedded_iframe_review"
+
+
+# ===========================================================================
+# _audit_quiz_question_types  (pipeline helper)
+# ===========================================================================
+
+# Minimal D2L QTI XML stub containing question-type declarations
+_QTI_HEADER = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<questestinterop>
+  <assessment title="{title}" ident="quiz-001">
+    <assess_procextension xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">
+      <d2l_2p0:time_limit>30</d2l_2p0:time_limit>
+      <d2l_2p0:enforce_time_limit>yes</d2l_2p0:enforce_time_limit>
+      <d2l_2p0:attempts_allowed>2</d2l_2p0:attempts_allowed>
+    </assess_procextension>
+    <section>
+{questions}
+    </section>
+  </assessment>
+</questestinterop>
+"""
+
+_QUESTION_STUB = """\
+      <item>
+        <itemmetadata>
+          <qtimetadata>
+            <qtimetadatafield>
+              <fieldlabel>qmd_questiontype</fieldlabel>
+              <fieldentry>{qtype}</fieldentry>
+            </qtimetadatafield>
+          </qtimetadata>
+        </itemmetadata>
+      </item>"""
+
+
+def _make_quiz_zip(quiz_files: dict[str, str]) -> Path:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, content in quiz_files.items():
+            zf.writestr(name, content)
+    buf.seek(0)
+    tmp = Path("/tmp/test_quiz_qt_audit.zip")
+    tmp.write_bytes(buf.read())
+    return tmp
+
+
+def _qti_xml(title: str, qtypes: list[str]) -> str:
+    questions = "\n".join(_QUESTION_STUB.format(qtype=q) for q in qtypes)
+    return _QTI_HEADER.format(title=title, questions=questions)
+
+
+class TestAuditQuizQuestionTypes:
+    """_audit_quiz_question_types() emits rows for at-risk question types."""
+
+    def test_p1_ordering_question_detected(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("Quiz 1", ["Multiple Choice", "Ordering"])
+        zp = _make_quiz_zip({"quiz_d2l_001.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        assert len(rows) == 1
+        assert "ordering" in rows[0]["evidence"].lower()
+
+    def test_p1_arithmetic_question_detected(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("Math Quiz", ["Arithmetic", "Multiple Choice"])
+        zp = _make_quiz_zip({"quiz_d2l_002.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        assert len(rows) == 1
+        assert "arithmetic" in rows[0]["evidence"].lower()
+
+    def test_p1_calculated_question_detected(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("Calc Quiz", ["Calculated", "True/False"])
+        zp = _make_quiz_zip({"quiz_d2l_003.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        assert len(rows) == 1
+        assert "calculated" in rows[0]["evidence"].lower()
+
+    def test_p2_likert_question_detected(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("Survey Quiz", ["Likert", "Multiple Choice"])
+        zp = _make_quiz_zip({"quiz_d2l_004.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        assert len(rows) == 1
+        assert "likert" in rows[0]["evidence"].lower()
+
+    def test_clean_quiz_not_flagged(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("Clean Quiz", ["Multiple Choice", "True/False", "Matching"])
+        zp = _make_quiz_zip({"quiz_d2l_005.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        assert rows == []
+
+    def test_multiple_risky_types_in_one_quiz(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("Mixed Quiz", ["Ordering", "Arithmetic", "Multiple Choice"])
+        zp = _make_quiz_zip({"quiz_d2l_006.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        # One row per quiz, not per question type
+        assert len(rows) == 1
+        evidence = rows[0]["evidence"].lower()
+        assert "ordering" in evidence
+        assert "arithmetic" in evidence
+
+    def test_multiple_quizzes_each_get_own_row(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml1 = _qti_xml("Quiz A", ["Ordering"])
+        xml2 = _qti_xml("Quiz B", ["Arithmetic"])
+        zp = _make_quiz_zip({
+            "quiz_d2l_007.xml": xml1,
+            "quiz_d2l_008.xml": xml2,
+        })
+        rows = _audit_quiz_question_types(zp)
+        assert len(rows) == 2
+
+    def test_no_quiz_files_returns_empty(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        zp = _make_quiz_zip({"imsmanifest.xml": "<manifest/>"})
+        rows = _audit_quiz_question_types(zp)
+        assert rows == []
+
+    def test_row_type_is_d2l_xml_audit(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("Q1", ["Ordering"])
+        zp = _make_quiz_zip({"quiz_d2l_009.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        assert rows[0]["type"] == "d2l_xml_audit"
+
+    def test_reason_contains_compatibility_risk(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("Q1", ["Ordering"])
+        zp = _make_quiz_zip({"quiz_d2l_010.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        assert "new quizzes" in rows[0]["reason"].lower()
+        assert "compatibility risk" in rows[0]["reason"].lower()
+
+    def test_p1_in_reason_when_p1_type_present(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("Q1", ["Ordering"])
+        zp = _make_quiz_zip({"quiz_d2l_011.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        assert "(P1)" in rows[0]["reason"] or "p1" in rows[0]["reason"].lower()
+
+    def test_significant_figures_detected(self):
+        from lms_migration.pipeline import _audit_quiz_question_types
+
+        xml = _qti_xml("SigFig Quiz", ["Significant Figures"])
+        zp = _make_quiz_zip({"quiz_d2l_012.xml": xml})
+        rows = _audit_quiz_question_types(zp)
+        assert len(rows) == 1
+        assert "significant figures" in rows[0]["evidence"].lower()
+
+
+# ===========================================================================
+# fix_checklist.py — new_quizzes_question_type_rebuild handler
+# ===========================================================================
+
+
+class TestFixChecklistNewQuizzesQuestionTypeRebuild:
+    """_map_manual_review_group handles New Quizzes question-type risk rows."""
+
+    def test_p1_category_returned_for_p1_risk(self):
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "New Quizzes question-type compatibility risk (P1) — "
+            "manual rebuild required for unsupported question types",
+        )
+        assert priority == "P1"
+        assert category == "new_quizzes_question_type_rebuild"
+
+    def test_p2_category_returned_for_p2_risk(self):
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "New Quizzes question-type compatibility risk (P2) — "
+            "manual rebuild required for unsupported question types",
+        )
+        assert priority == "P2"
+        assert category == "new_quizzes_question_type_rebuild"
+
+    def test_action_mentions_ordering_substitution(self):
+        _, _, _, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "New Quizzes question-type compatibility risk (P1) — "
+            "manual rebuild required for unsupported question types",
+        )
+        assert "ordering" in action.lower()
+
+    def test_action_mentions_arithmetic_substitution(self):
+        _, _, _, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "New Quizzes question-type compatibility risk (P1) — "
+            "manual rebuild required for unsupported question types",
+        )
+        assert "arithmetic" in action.lower() or "calculated" in action.lower()
+
+    def test_owner_is_faculty_or_coordinator(self):
+        _, _, owner, _ = _map_manual_review_group(
+            "d2l_xml_audit",
+            "New Quizzes question-type compatibility risk (P1) — "
+            "manual rebuild required for unsupported question types",
+        )
+        assert "faculty" in owner.lower() or "coordinator" in owner.lower()
