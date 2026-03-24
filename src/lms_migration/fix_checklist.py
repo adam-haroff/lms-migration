@@ -161,6 +161,22 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "due date and availability window; (4) attach any rubric listed in the evidence; "
             "(5) publish when ready. Verify that the assignment appears in the correct assignment group.",
         )
+    if "unresolvable grade item" in lowered:
+        return (
+            "P1",
+            "unresolvable_grade_item_setup",
+            "ID/Faculty",
+            "This grade item has no D2L submission object (quiz, dropbox, or discussion) "
+            "that Canvas can import automatically. After migration, this item will appear "
+            "as an orphaned grade column in Canvas with no student submission mechanism. "
+            "To fix: (1) determine the correct submission type (external tool, file upload, "
+            "online text entry, etc.) from the original D2L course; (2) create a Canvas "
+            "Assignment (or configure the relevant external tool integration) with the "
+            "point value shown in the evidence column; (3) place it in the correct Canvas "
+            "assignment group; (4) if the submission is via an external LTI tool (e.g., "
+            "Cengage, MyOpenMath, Pearson), verify that tool is installed in Canvas "
+            "Settings > Apps and that grade passback is enabled.",
+        )
     if "availability window detected in gradebook item" in lowered:
         return (
             "P2",

@@ -1611,3 +1611,264 @@ class TestFixChecklistNewQuizzesQuestionTypeRebuild:
             "manual rebuild required for unsupported question types",
         )
         assert "faculty" in owner.lower() or "coordinator" in owner.lower()
+
+
+# ===========================================================================
+# Phase 4 item 2 — Unresolvable grade item detection
+# ===========================================================================
+
+
+class TestAuditUnresolvableGradeItems:
+    """_audit_unresolvable_grade_items() flags grade items with no D2L submission object."""
+
+    def _make_zip(self, files: dict[str, str]) -> Path:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, content in files.items():
+                zf.writestr(name, content)
+        buf.seek(0)
+        tmp = Path("/tmp/test_unresolvable_grade_items.zip")
+        tmp.write_bytes(buf.read())
+        return tmp
+
+    def _grades_xml(self, categories_xml: str = "", items_xml: str = "") -> str:
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            "<grades>"
+            f"<categories>{categories_xml}</categories>"
+            f"<items>{items_xml}</items>"
+            "</grades>"
+        )
+
+    def test_grade_item_with_no_submission_object_is_flagged(self):
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            items_xml=(
+                '<item resource_code="sinclairc-999" dates_in_calendar="false">'
+                "<name>Chapter 01 Homework</name>"
+                "<scoring><out_of>10</out_of><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+            )
+        )
+        zp = self._make_zip({"grades_d2l.xml": grades})
+        rows = _audit_unresolvable_grade_items(zp)
+        assert len(rows) == 1
+        row = rows[0]
+        assert "unresolvable grade item" in row["reason"].lower()
+        assert "Chapter 01 Homework" in row["evidence"]
+        assert row["type"] == "d2l_xml_audit"
+
+    def test_points_included_in_evidence(self):
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            items_xml=(
+                '<item resource_code="sinclairc-001">'
+                "<name>Exam 1</name>"
+                "<scoring><out_of>100</out_of><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+            )
+        )
+        zp = self._make_zip({"grades_d2l.xml": grades})
+        rows = _audit_unresolvable_grade_items(zp)
+        assert "100" in rows[0]["evidence"]
+
+    def test_category_name_included_when_present(self):
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            categories_xml=(
+                '<category id="5" identifier="CAT-5">'
+                "<name>Cengage Homework</name>"
+                "</category>"
+            ),
+            items_xml=(
+                '<item resource_code="sinclairc-002">'
+                "<name>Ch01 HW</name>"
+                "<category_id>CAT-5</category_id>"
+                "<scoring><out_of>10</out_of><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+            ),
+        )
+        zp = self._make_zip({"grades_d2l.xml": grades})
+        rows = _audit_unresolvable_grade_items(zp)
+        assert len(rows) == 1
+        assert "Cengage Homework" in rows[0]["evidence"]
+
+    def test_bonus_item_is_skipped(self):
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            items_xml=(
+                '<item resource_code="sinclairc-003">'
+                "<name>Bonus Points</name>"
+                "<scoring><out_of>2</out_of><is_bonus>true</is_bonus></scoring>"
+                "</item>"
+            )
+        )
+        zp = self._make_zip({"grades_d2l.xml": grades})
+        rows = _audit_unresolvable_grade_items(zp)
+        assert rows == []
+
+    def test_item_without_resource_code_is_skipped(self):
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            items_xml=(
+                '<item dates_in_calendar="false">'
+                "<name>Final Grade</name>"
+                "<scoring><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+            )
+        )
+        zp = self._make_zip({"grades_d2l.xml": grades})
+        rows = _audit_unresolvable_grade_items(zp)
+        assert rows == []
+
+    def test_dropbox_linked_grade_item_is_skipped(self):
+        """Grade items whose resource_code appears as grade_item in dropbox XML are already audited."""
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            items_xml=(
+                '<item resource_code="sinclairc-dropbox-gi">'
+                "<name>Essay Assignment</name>"
+                "<scoring><out_of>50</out_of><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+            )
+        )
+        dropbox = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<dropbox xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">'
+            '<folder name="Essay" id="1" out_of="50" grade_item="sinclairc-dropbox-gi" '
+            'resource_code="sinclairc-folder-rc" is_hidden="false"/>'
+            "</dropbox>"
+        )
+        zp = self._make_zip({"grades_d2l.xml": grades, "dropbox_d2l.xml": dropbox})
+        rows = _audit_unresolvable_grade_items(zp)
+        assert rows == []
+
+    def test_quiz_linked_grade_item_is_skipped(self):
+        """Grade items matching a manifest quiz title are imported by Canvas QTI."""
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            items_xml=(
+                '<item resource_code="sinclairc-quiz-grade-id">'
+                "<name>Chapter 1 Quiz</name>"
+                "<scoring><out_of>20</out_of><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+            )
+        )
+        manifest_xml = (
+            '<?xml version="1.0"?>'
+            '<manifest xmlns="http://www.imsglobal.org/xsd/imscp_v1p1"'
+            ' xmlns:cp="http://www.imsglobal.org/xsd/imscp_v1p1"'
+            ' xmlns:imsmd="http://ltsc.ieee.org/xsd/LOM">'
+            "<organizations><organization>"
+            '<item identifier="i1" resource_type_key="D2L.LE.Quizzing.Quiz">'
+            "<title>Chapter 1 Quiz</title>"
+            "</item>"
+            "</organization></organizations>"
+            "<resources/>"
+            "</manifest>"
+        )
+        zp = self._make_zip(
+            {"grades_d2l.xml": grades, "imsmanifest.xml": manifest_xml}
+        )
+        rows = _audit_unresolvable_grade_items(zp)
+        assert rows == []
+
+    def test_discussion_linked_grade_item_is_skipped(self):
+        """Grade items matching a manifest discussion title are imported by Canvas."""
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            items_xml=(
+                '<item resource_code="sinclairc-disc-grade-id">'
+                "<name>Week 3 Discussion</name>"
+                "<scoring><out_of>15</out_of><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+            )
+        )
+        manifest_xml = (
+            '<?xml version="1.0"?>'
+            '<manifest xmlns="http://www.imsglobal.org/xsd/imscp_v1p1"'
+            ' xmlns:cp="http://www.imsglobal.org/xsd/imscp_v1p1">'
+            "<organizations><organization>"
+            '<item identifier="i2" resource_type_key="D2L.LE.Discussions.DiscussionTopic">'
+            "<title>Week 3 Discussion</title>"
+            "</item>"
+            "</organization></organizations>"
+            "<resources/>"
+            "</manifest>"
+        )
+        zp = self._make_zip(
+            {"grades_d2l.xml": grades, "imsmanifest.xml": manifest_xml}
+        )
+        rows = _audit_unresolvable_grade_items(zp)
+        assert rows == []
+
+    def test_multiple_unresolvable_items_all_returned(self):
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            items_xml=(
+                '<item resource_code="sinclairc-a01">'
+                "<name>Assignment A</name>"
+                "<scoring><out_of>10</out_of><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+                '<item resource_code="sinclairc-a02">'
+                "<name>Assignment B</name>"
+                "<scoring><out_of>20</out_of><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+            )
+        )
+        zp = self._make_zip({"grades_d2l.xml": grades})
+        rows = _audit_unresolvable_grade_items(zp)
+        assert len(rows) == 2
+
+    def test_no_grades_file_returns_empty(self):
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        zp = self._make_zip({"imsmanifest.xml": "<manifest/>"})
+        rows = _audit_unresolvable_grade_items(zp)
+        assert rows == []
+
+
+class TestFixChecklistUnresolvableGradeItem:
+    """_map_manual_review_group handles unresolvable grade item rows."""
+
+    def test_correct_category_returned(self):
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "Unresolvable grade item — no D2L submission object "
+            "found; create Canvas Assignment and connect to gradebook after import",
+        )
+        assert priority == "P1"
+        assert category == "unresolvable_grade_item_setup"
+
+    def test_action_mentions_external_tool(self):
+        _, _, _, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "Unresolvable grade item — no D2L submission object "
+            "found; create Canvas Assignment and connect to gradebook after import",
+        )
+        assert "external" in action.lower() or "lti" in action.lower()
+
+    def test_action_mentions_assignment_group(self):
+        _, _, _, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "Unresolvable grade item — no D2L submission object "
+            "found; create Canvas Assignment and connect to gradebook after import",
+        )
+        assert "assignment group" in action.lower()
+
+    def test_owner_includes_faculty_or_id(self):
+        _, _, owner, _ = _map_manual_review_group(
+            "d2l_xml_audit",
+            "Unresolvable grade item — no D2L submission object "
+            "found; create Canvas Assignment and connect to gradebook after import",
+        )
+        assert "id" in owner.lower() or "faculty" in owner.lower()

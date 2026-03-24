@@ -1425,6 +1425,167 @@ def _audit_dropbox_folders(zip_path: Path) -> list[dict]:
     return rows
 
 
+def _audit_unresolvable_grade_items(zip_path: Path) -> list[dict]:
+    """Return one row per grade item that has no corresponding Canvas-importable D2L object.
+
+    When D2L is exported as IMSCC, Canvas natively imports quizzes (QTI), discussions,
+    and HTML pages — but NOT D2L Dropbox folders, and NOT external-tool grade items
+    (e.g. Cengage, MyOpenMath, Respondus).  Any grade item whose ``resource_code``
+    cannot be resolved to a known submission object will appear as an orphaned grade
+    column in Canvas with no associated assignment for students to submit work.
+
+    Skips:
+    - Bonus items (already audited by ``_audit_gradebook_groups``).
+    - Items whose resource_code matches a dropbox folder's ``grade_item`` attr
+      (already audited by ``_audit_dropbox_folders``).
+    - Items whose name (case-insensitive) matches a manifest quiz or discussion
+      title — Canvas imports those objects and auto-creates connected grade columns.
+    - Items without a ``resource_code`` (calculated/formula grade items).
+    """
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            names = zf.namelist()
+
+            # ── Resolved set 1: Dropbox grade_item attribute refs ──────────
+            # folder[@grade_item] value IS the grade item's resource_code
+            resolved_grade_rcs: set[str] = set()
+            dropbox_files = [
+                n for n in names if re.match(r"dropbox_d2l\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in dropbox_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                raw = re.sub(r"<\?xml[^>]*\?>", "", raw, count=1)
+                raw = re.sub(r"\bd2l_2p0:", "", raw)
+                raw = re.sub(r'\bxmlns:d2l_2p0="[^"]*"', "", raw)
+                try:
+                    root = ET.fromstring(raw)
+                except ET.ParseError:
+                    continue
+                for folder in root.iter("folder"):
+                    gi = folder.get("grade_item", "").strip()
+                    if gi:
+                        resolved_grade_rcs.add(gi)
+
+            # ── Resolved set 2: Manifest quiz / discussion titles ───────────
+            # Grade item resource_codes use a DIFFERENT internal ID space than
+            # manifest item resource_codes, so direct RC matching is not possible
+            # for quizzes and discussions.  Instead, match by (case-insensitive)
+            # item title — Canvas QTI import and discussion import both auto-create
+            # linked grade columns, so these items are already handled.
+            _CANVAS_IMPORTED_TYPES = frozenset(
+                {
+                    "D2L.LE.Quizzing.Quiz",
+                    "D2L.LE.Discussions.DiscussionTopic",
+                }
+            )
+            manifest_resolved_names: set[str] = set()
+            manifest_files = [
+                n for n in names if re.match(r"imsmanifest\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            _imscp_ns = "http://www.imsglobal.org/xsd/imscp_v1p1"
+            for fname in manifest_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                raw = re.sub(r"<\?xml[^>]*\?>", "", raw, count=1)
+                try:
+                    mroot = ET.fromstring(raw)
+                except ET.ParseError:
+                    continue
+                for mitem in mroot.iter(f"{{{_imscp_ns}}}item"):
+                    rtk = mitem.get("resource_type_key", "")
+                    if rtk not in _CANVAS_IMPORTED_TYPES:
+                        continue
+                    # Title is a child <title> element
+                    title_el = mitem.find(f"{{{_imscp_ns}}}title")
+                    if title_el is None:
+                        title_el = mitem.find("title")
+                    title = (
+                        (title_el.text or "").strip() if title_el is not None else ""
+                    )
+                    if title:
+                        manifest_resolved_names.add(title.lower())
+
+            # ── Parse grades_d2l.xml ────────────────────────────────────────
+            grades_files = [
+                n for n in names if re.match(r"grades_d2l\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in grades_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                raw = re.sub(r"<\?xml[^>]*\?>", "", raw, count=1)
+                try:
+                    root = ET.fromstring(raw)
+                except ET.ParseError:
+                    continue
+
+                # Build category id → name map
+                cat_names: dict[str, str] = {}
+                for cat in root.iter("category"):
+                    cid = cat.get("identifier", "").strip() or cat.get("id", "").strip()
+                    cname = (cat.findtext("name") or "").strip()
+                    if cid:
+                        cat_names[cid] = cname
+
+                for item in root.iter("item"):
+                    rc = item.get("resource_code", "").strip()
+                    if not rc:
+                        continue  # calculated / formula items — skip
+                    is_bonus = (item.findtext("scoring/is_bonus") or "false").strip()
+                    if is_bonus.lower() == "true":
+                        continue  # handled by _audit_gradebook_groups
+                    if rc in resolved_grade_rcs:
+                        continue  # dropbox-linked — already in dropbox audit
+
+                    name = (item.findtext("name") or "").strip() or rc
+                    if name.lower() in manifest_resolved_names:
+                        continue  # quiz or discussion Canvas imports automatically
+
+                    cat_id = (item.findtext("category_id") or "").strip()
+                    cat_name = cat_names.get(cat_id, "").strip()
+                    # Points value
+                    out_of = (item.findtext("scoring/out_of") or "").strip()
+                    if out_of:
+                        try:
+                            pts = float(out_of)
+                            out_of_str = (
+                                str(int(pts)) if pts == int(pts) else f"{pts:.1f}"
+                            )
+                        except ValueError:
+                            out_of_str = out_of
+                    else:
+                        out_of_str = ""
+
+                    evidence_parts = [f'grade item: "{name}"']
+                    if out_of_str:
+                        evidence_parts.append(f"points: {out_of_str}")
+                    if cat_name:
+                        evidence_parts.append(f"category: {cat_name}")
+
+                    rows.append(
+                        {
+                            "file": fname,
+                            "type": "d2l_xml_audit",
+                            "reason": (
+                                "Unresolvable grade item — no D2L submission object "
+                                "found; create Canvas Assignment and connect to "
+                                "gradebook after import"
+                            ),
+                            "evidence": " | ".join(evidence_parts),
+                        }
+                    )
+    except Exception:
+        pass
+    return rows
+
+
 def _audit_date_shift_items(zip_path: Path) -> list[dict]:
     """Inventory date-bearing D2L items to support Canvas date-shift planning.
 
@@ -1618,6 +1779,7 @@ def _append_xml_audit_rows_to_csv(zip_path: Path, csv_path: Path) -> None:
     rows.extend(_audit_gradebook_groups(zip_path))
     rows.extend(_audit_rubrics(zip_path))
     rows.extend(_audit_dropbox_folders(zip_path))
+    rows.extend(_audit_unresolvable_grade_items(zip_path))
     rows.extend(_audit_date_shift_items(zip_path))
     rows.extend(_audit_quiz_question_types(zip_path))
     if not rows:
