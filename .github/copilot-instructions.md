@@ -53,6 +53,7 @@ lms-migrate resources/incoming/acc-2321/before/d2l-export.zip \
   --best-practice-enforcer \
   --template-package resources/examples/template/elearn-standard-template-export-20260316.imscc \
   --template-alias-map-json rules/template_asset_aliases.json \
+  --template-merge \
   --output-dir output/acc-2321
 ```
 
@@ -60,7 +61,8 @@ Run tests:
 
 ```bash
 .venv/bin/python -m pytest tests/ -v
-# 257 tests across tests/test_html_tools.py and tests/test_new_audit_features.py
+# 558 tests across tests/test_html_tools.py, tests/test_new_audit_features.py,
+# tests/test_template_merger_module_ordering.py, and others
 ```
 
 ---
@@ -235,10 +237,24 @@ From scanning all 9 course zip exports:
 
 ---
 
-## What needs doing next (Phase 2)
+## Completed phases (as of 2026-03-23)
 
-1. **`src/lms_migration/css_parser.py`** — Parse inline styles to detect layout intent
-   (float, multi-column, positioned elements) and preserve them through Canvas import.
-2. **`src/lms_migration/canvas_preview.py`** — Canvas Preview API integration:
-   upload converted zip to a test Canvas sandbox and render pages for visual review
-   before the instructor sees anything.
+- **Phase 1** — Checklist quality, divider fix, quiz/rubric audits, LTI/iframe detection (76b25a1)
+- **Phase 2** — `canvas_preview.py` Canvas Preview API, `canvas_api.py`, Canvas live audit (21dc339)
+- **Phase 3** — `style_inference.py`, dropbox folder audit, `canvas_a11y_audit.py`, `blueprint_audit.py`
+- **Template merger additions** — Module ordering (`course_settings/module_meta.xml`), home page
+  auto-selection (divisional variant + `front_page=true` meta + `course_settings/course_settings.xml`).
+  558 tests. Committed 10614b9. `--template-merge` flag required to activate.
+
+## What needs doing next (Phase 4 items not yet implemented)
+
+Phase 4 is defined in `docs/app-roadmap.md`. Items below are **not yet in the codebase**:
+
+1. **New Quizzes compatibility review on question type** — `quiz_audit.py` already parses QTI and has
+   `_RISK_TYPES`. Wire the per-question-type risk flags through to the preflight checklist as P1 items
+   (currently only per-quiz settings emit checklist rows; question-type risks do not).
+2. **Discussion / assignment submission type detection** — Detect D2L graded content pages (pages
+   with a grade category in the manifest) and surface them as P1 checklist items prompting the ID
+   to create a Canvas Assignment for the gradeable deliverable.
+3. **Canvas post-import sync** — `canvas_post_import.py` exists; confirm whether the Canvas API
+   integration for auto-relinking / post-import checks is fully wired into the CLI.
