@@ -11,7 +11,6 @@ the copilot-test session (2026-03-18):
 
 import re
 from pathlib import Path
-import pytest
 from lms_migration.html_tools import (
     CanvasSanitizerPolicy,
     apply_canvas_sanitizer,
@@ -568,6 +567,87 @@ class TestCanonicalHeadingLabel:
 
 
 # ===========================================================================
+# _INTRO_HEADING_SPECS — section headings must get the full red h2 style
+# ===========================================================================
+
+
+class TestIntroHeadingStyle:
+    """All intro-page h2 headings (Introduction, Module Objectives, Module
+    Checklist) must carry the full Sinclair red h2 style:
+        color: #ac1a2f; border-bottom: 10px solid #AC1A2F; padding: 10px
+    Previously _SECTION_HEADING_STYLE was color-only, causing the
+    "Learning Objectives" / "Module Objectives" headings to render without
+    the red border-bottom in output HTML."""
+
+    def _make_intro_ctx(self) -> TemplateOverlayContext:
+        return TemplateOverlayContext(
+            template_package=Path("."),
+            alias_map_source="test",
+            alias_map={},
+            assets_by_basename={
+                "star.png": ["TemplateAssets/star.png"],
+                "bullseye.png": ["TemplateAssets/bullseye.png"],
+                "checkmark.png": ["TemplateAssets/checkmark.png"],
+            },
+            file_name_collisions={},
+            icon_label_by_basename={},
+            apply_visual_standards=True,
+            apply_color_standards=True,
+            apply_divider_standards=True,
+            image_layout_mode="safe-block",
+        )
+
+    def _apply(self, source_h1_text: str) -> str:
+        html = f"<body><div><h1>{source_h1_text}</h1><p>Content.</p></div></body>"
+        out, _, _, _ = apply_template_overlay(
+            html,
+            file_path="Introduction and Objectives.html",
+            context=self._make_intro_ctx(),
+        )
+        return out
+
+    def test_introduction_h1_gets_full_red_h2_style(self):
+        result = self._apply("Introduction")
+        assert "border-bottom: 10px solid #ac1a2f" in result.lower()
+        assert "padding: 10px" in result.lower()
+        assert "color: #ac1a2f" in result.lower()
+
+    def test_learning_objectives_h1_gets_full_red_h2_style(self):
+        """Regression: _SECTION_HEADING_STYLE was color-only — must now include
+        border-bottom and padding to match gold standard."""
+        result = self._apply("Learning Objectives")
+        assert "border-bottom: 10px solid #ac1a2f" in result.lower()
+        assert "padding: 10px" in result.lower()
+        assert "color: #ac1a2f" in result.lower()
+
+    def test_module_objectives_h1_gets_full_red_h2_style(self):
+        result = self._apply("Module Objectives")
+        assert "border-bottom: 10px solid #ac1a2f" in result.lower()
+        assert "padding: 10px" in result.lower()
+
+    def test_checklist_h1_gets_full_red_h2_style(self):
+        result = self._apply("Checklist")
+        assert "border-bottom: 10px solid #ac1a2f" in result.lower()
+        assert "padding: 10px" in result.lower()
+
+    def test_module_checklist_h1_gets_full_red_h2_style(self):
+        result = self._apply("Module Checklist")
+        assert "border-bottom: 10px solid #ac1a2f" in result.lower()
+        assert "padding: 10px" in result.lower()
+
+    def test_section_heading_not_color_only(self):
+        """The partial color-only pattern must no longer appear."""
+        result = self._apply("Learning Objectives")
+        # Should not have color attribute set alone without border-bottom on the same h2
+        h2_match = re.search(r"<h2[^>]*>", result, re.IGNORECASE)
+        assert h2_match, "Expected an <h2> element"
+        h2_tag = h2_match.group(0)
+        assert "border-bottom" in h2_tag.lower(), (
+            f"h2 tag must have border-bottom, got: {h2_tag}"
+        )
+
+
+# ===========================================================================
 # remove_leading_divider — regression tests for the D2L template header strip
 # ===========================================================================
 
@@ -798,9 +878,7 @@ _COURSE_OUTLINE_TABLE = (
 def _sanitize_syllabus(html: str) -> str:
     """Run sanitizer in syllabus mode (all default flags, file recognised as syllabus)."""
     policy = CanvasSanitizerPolicy()
-    result, _ = apply_canvas_sanitizer(
-        html, policy, file_path="course-syllabus.html"
-    )
+    result, _ = apply_canvas_sanitizer(html, policy, file_path="course-syllabus.html")
     return result
 
 
@@ -882,7 +960,8 @@ class TestCourseOutlineColumnNormalisation:
         assert "TOPICS" not in result
         assert "Modules" in result
 
-    def test_assignments_renamed_to_activities(self):
+    def test_assignments_label_preserved(self):
+        """ASSIGNMENTS column header is case-normalised to Assignments, not renamed."""
         inner = (
             "<tr>"
             '<th scope="col">ASSIGNMENTS</th>'
@@ -891,14 +970,44 @@ class TestCourseOutlineColumnNormalisation:
         )
         result = self._run(inner)
         assert "ASSIGNMENTS" not in result
+        assert "Assignments" in result
+        # No TOPICS col → no Activities column should be injected
+        assert "Activities" not in result
+
+    def test_activities_column_inserted_after_modules(self):
+        """A blank Activities column is inserted after Modules when none exists."""
+        inner = (
+            "<tr>"
+            '<th scope="col">TOPICS</th>'
+            '<th scope="col">ASSIGNMENTS</th>'
+            "</tr>"
+            "<tr><td>Topic 1: Intro</td><td>Quiz 1</td></tr>"
+        )
+        result = self._run(inner)
+        # Activities header inserted
         assert "Activities" in result
+        # Assignments label preserved
+        assert "Assignments" in result
+        assert "ASSIGNMENTS" not in result
+        # Activities column appears BEFORE Assignments column
+        assert result.index("Activities") < result.index("Assignments")
+
+    def test_activities_column_not_duplicated(self):
+        """No Activities column is inserted when the source already has one."""
+        inner = (
+            "<tr>"
+            '<th scope="col">TOPICS</th>'
+            '<th scope="col">Activities</th>'
+            '<th scope="col">ASSIGNMENTS</th>'
+            "</tr>"
+            "<tr><td>Topic 1</td><td>Watch video</td><td>Quiz 1</td></tr>"
+        )
+        result = self._run(inner)
+        assert result.count("Activities") == 1
 
     def test_chapter_renamed_canonical(self):
         inner = (
-            "<tr>"
-            '<th scope="col">CHAPTERS</th>'
-            "</tr>"
-            "<tr><td>Chapter 1</td></tr>"
+            "<tr>" '<th scope="col">CHAPTERS</th>' "</tr>" "<tr><td>Chapter 1</td></tr>"
         )
         result = self._run(inner)
         assert "CHAPTERS" not in result
@@ -928,10 +1037,13 @@ class TestCourseOutlineColumnNormalisation:
         # Dropped column headers
         assert "16-WEEK" not in result
         assert "DUE DATE" not in result
-        # Renamed headers present
+        # Renamed / inserted headers present
         assert "Modules" in result
-        assert "Activities" in result
+        assert "Activities" in result  # blank column inserted by tool for faculty
         assert "Chapter" in result
+        assert "Assignments" in result  # preserved from D2L source (not renamed)
+        # Activities appears before Assignments in column order
+        assert result.index("Activities") < result.index("Assignments")
         # Week data cells (just numbers) are gone
         assert "<td>1</td>" not in result
         assert "<td>2</td>" not in result
@@ -949,7 +1061,7 @@ class TestCourseOutlineColumnNormalisation:
 
 
 class TestDividerNormalisation:
-    """normalize_hr_tag: bare <hr> stays grey; D2L red banner → grey; canonical red preserved."""
+    """normalize_hr_tag: bare <hr> stays as-is; D2L/styled <hr> → bare <hr>; canonical red preserved."""
 
     def _run(self, html: str) -> str:
         return _sanitize(html, normalize_divider_styling=True)
@@ -965,25 +1077,27 @@ class TestDividerNormalisation:
         result = self._run("<div><hr/></div>")
         assert "#ac1a2f" not in result.lower()
 
-    def test_d2l_banner_hr_converted_to_grey(self):
-        """The D2L top-banner <hr style="...background-color: #ac1a2f;"> → grey."""
+    def test_d2l_banner_hr_converted_to_bare_hr(self):
+        """The D2L top-banner <hr style="...background-color: #ac1a2f;"> → bare <hr>."""
         hr = '<hr style="width: 100%; height: 4px; color: #ac1a2f; background-color: #ac1a2f;" row="">'
         result = self._run(f"<div>{hr}</div>")
         assert "#ac1a2f" not in result.lower()
-        assert "#cccccc" in result.lower()
+        assert "background-color" not in result.lower()
+        assert "style=" not in result.lower() or "border-top" in result.lower()
+        assert "<hr>" in result.lower()
 
     def test_canonical_red_closing_divider_preserved(self):
         """<hr style="border-top: 8px solid #AC1A2F; ..."> must not change."""
         hr = '<hr style="border-top: 8px solid #AC1A2F; border-bottom: 0; height: 0; margin: 16px 0;">'
         result = self._run(f"<div>{hr}</div>")
         assert "border-top" in result
-        assert ("AC1A2F" in result or "ac1a2f" in result.lower())
+        assert "AC1A2F" in result or "ac1a2f" in result.lower()
 
     def test_canonical_minimal_red_closing_divider_preserved(self):
         hr = '<hr style="border-top: 8px solid #AC1A2F;">'
         result = self._run(f"<div>{hr}</div>")
         assert "border-top" in result
-        assert ("AC1A2F" in result or "ac1a2f" in result.lower())
+        assert "AC1A2F" in result or "ac1a2f" in result.lower()
 
 
 # ===========================================================================

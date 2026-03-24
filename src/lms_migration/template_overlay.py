@@ -79,7 +79,7 @@ _PAGE_TITLE_HEADING_STYLE = (
     "border-bottom: 10px solid #AC1A2F",
     "padding: 10px",
 )
-_SECTION_HEADING_STYLE = ("color: #ac1a2f",)
+_SECTION_HEADING_STYLE = _PAGE_TITLE_HEADING_STYLE
 _INTRO_HEADING_SPECS = {
     "introduction": {
         "icon_basename": "star.png",

@@ -559,8 +559,10 @@ def _convert_syllabus_row_header_table_to_list(
 
 def _normalize_course_outline_columns(inner_html: str) -> str:
     """For course-outline tables: drop WEEK-number and DUE-DATE columns; rename
-    TOPICS→Modules, ASSIGNMENTS→Activities, CHAPTER/CHAPTERS→Chapter in header
-    cells; replace ``Topic N`` prefix with ``Module N`` in the Modules data column.
+    TOPICS→Modules, CHAPTER/CHAPTERS→Chapter, ASSIGNMENTS/ASSIGNMENT→Assignments
+    in header cells; insert a blank Activities column after Modules when none
+    already exists (faculty fills it in post-migration); replace ``Topic N``
+    prefix with ``Module N`` in the Modules data column.
     """
     # Patterns to find rows and the cells within each row.
     row_re = re.compile(r"(<tr\b[^>]*>)(.*?)(</tr>)", re.IGNORECASE | re.DOTALL)
@@ -572,6 +574,7 @@ def _normalize_course_outline_columns(inner_html: str) -> str:
     drop_cols: set[int] = set()
     rename_cols: dict[int, str] = {}
     modules_col: int | None = None
+    insert_activities_after: int | None = None
 
     header_row_idx: int | None = None
     rows_list = list(row_re.finditer(inner_html))
@@ -584,6 +587,7 @@ def _normalize_course_outline_columns(inner_html: str) -> str:
         if not has_col_header:
             continue
         header_row_idx = row_idx
+        has_activities_col = False
         for col_idx, c in enumerate(cells):
             text = re.sub(r"<[^>]+>", "", c.group(2)).strip().lower()
             text = re.sub(r"\s+", " ", text)
@@ -599,10 +603,24 @@ def _normalize_course_outline_columns(inner_html: str) -> str:
             elif re.match(r"^chapters?$", text):
                 rename_cols[col_idx] = "Chapter"
             elif re.match(r"^assignments?$", text):
-                rename_cols[col_idx] = "Activities"
+                # Normalise case only — keep semantics (Assignments stays Assignments)
+                rename_cols[col_idx] = (
+                    "Assignments" if text.endswith("s") else "Assignment"
+                )
+            elif re.match(
+                r"^(?:(?:learning|before\s+class|post[- ]class|pre[- ]class)\s+)?activities?$",
+                text,
+            ):
+                has_activities_col = True
+        # Insert a blank Activities column after Modules only when the table
+        # does not already contain one (faculty fills it in post-migration).
+        if modules_col is not None and not has_activities_col:
+            insert_activities_after = modules_col
         break
 
-    if header_row_idx is None or (not drop_cols and not rename_cols):
+    if header_row_idx is None or (
+        not drop_cols and not rename_cols and insert_activities_after is None
+    ):
         return inner_html
 
     # ---- Rebuild inner HTML, processing every row ----
@@ -641,6 +659,17 @@ def _normalize_course_outline_columns(inner_html: str) -> str:
                 )
 
             new_inner_parts.append(cell_open + cell_content + cell_close)
+
+            # Insert the blank Activities column immediately after the Modules
+            # column so faculty can fill it in post-migration.
+            if (
+                insert_activities_after is not None
+                and col_idx == insert_activities_after
+            ):
+                if is_header_row:
+                    new_inner_parts.append('<th scope="col">Activities</th>')
+                else:
+                    new_inner_parts.append("<td></td>")
 
         new_inner_parts.append(row_inner[prev_cell_end:])
         parts.append(row_open + "".join(new_inner_parts) + row_close)
@@ -2153,20 +2182,13 @@ def apply_canvas_sanitizer(
             ):
                 return tag
             # All other styled <hr> tags (e.g. D2L's flat background-color red
-            # banner bar) are converted to a neutral thin grey separator so that
-            # no D2L template colouring bleeds into the Canvas page.
-            normalized_style = (
-                "border: 0; height: 1px; background-color: #cccccc;"
-                " width: 100%; margin: 16px 0;"
-            )
-            rebuilt = (
-                tag[: style_match.start("style")]
-                + normalized_style
-                + tag[style_match.end("style") :]
-            )
-            if rebuilt != tag:
+            # banner bar, or any arbitrary inline styling) are stripped to a
+            # plain bare <hr> which Canvas renders as a thin grey separator —
+            # the correct look for inter-section dividers and matching the gold
+            # standard Canvas templates.
+            if tag != "<hr>":
                 normalized_hr_count += 1
-            return rebuilt
+            return "<hr>"
 
         updated = hr_pattern.sub(normalize_hr_tag, updated)
         if normalized_hr_count:
