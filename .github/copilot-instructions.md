@@ -91,15 +91,16 @@ Converts Bootstrap card accordions. Pattern: `card > card-header + collapse > ca
 - **details mode**: emits `<details><summary>…</summary><div>…</div></details>`
 - **smart mode**: chooses based on page hints (syllabus/policy → flatten, lesson/FAQ → details)
 
-### LTI and media detection (in html_tools.py)
+### LTI, media, and submission detection (in html_tools.py)
 
 These run on **pre-sanitized** content in the pipeline (critical: the sanitizer neutralises
 `/d2l/` hrefs to `#` before detection would find them):
 
-| Function                                   | What it detects                                                                                    |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| `detect_lti_embed_issues(content)`         | Panopto/Kaltura/YuJa iframes AND D2L quickLink LTI iframes/hrefs (`quickLink.d2l?type=lti`)        |
-| `detect_d2l_media_library_embeds(content)` | `ouFileId=`, `/d2l/lp/media/`, `/d2l/tools/mediaLibrary/` — files that will be missing post-import |
+| Function                                     | What it detects                                                                                     |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `detect_lti_embed_issues(content)`           | Panopto/Kaltura/YuJa iframes AND D2L quickLink LTI iframes/hrefs (`quickLink.d2l?type=lti`)         |
+| `detect_d2l_media_library_embeds(content)`   | `ouFileId=`, `/d2l/lp/media/`, `/d2l/tools/mediaLibrary/` — files that will be missing post-import |
+| `detect_email_submission_issues(content)`    | `mailto:` links near submission keywords AND phrases like "email your assignment" / "submit via email" |
 
 **quickLink LTI pattern**: `/d2l/common/dialogs/quickLink/quickLink.d2l?ou=…&type=lti&rCode=sinclairc-…`
 — appears as both `<iframe src>` and `<a href>` tags. Detected by `detect_lti_embed_issues`.
@@ -132,13 +133,16 @@ Emits reason: `"LTI tool embed (D2L QuickLink) — reconfigure as Canvas LTI ext
 These functions run inside `_append_xml_audit_rows_to_csv()` and emit rows to the
 `d2l-export.manual-review.csv` with `type="d2l_xml_audit"`. Each row feeds `fix_checklist.py`.
 
-| Function                        | Source file(s)          | What it audits                                                                        |
-| ------------------------------- | ----------------------- | ------------------------------------------------------------------------------------- |
-| `_audit_graded_discussions()`   | `*_discussions_d2l.xml` | Discussions with grade-category associations — may silently lose gradebook connection |
-| `_audit_availability_windows()` | `*_grades_d2l.xml`      | Grade items with start/end date windows — need manual re-entry in Canvas              |
-| `_audit_gradebook_groups()`     | `*_grades_d2l.xml`      | Assignment groups with drop-lowest/drop-highest rules and extra-credit (bonus) items  |
-| `_audit_rubrics()`              | `rubrics_d2l.xml`       | Per-rubric inventory: name, criteria count, level count, scoring method, Range hint   |
-| `_audit_date_shift_items()`     | course XML + grades XML | Course start-date advisory + items with explicit availability windows                 |
+| Function                              | Source file(s)          | What it audits                                                                        |
+| ------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------- |
+| `_audit_graded_discussions()`         | `*_discussions_d2l.xml` | Discussions with grade-category associations — may silently lose gradebook connection |
+| `_audit_availability_windows()`       | `*_grades_d2l.xml`      | Grade items with start/end date windows — need manual re-entry in Canvas              |
+| `_audit_gradebook_groups()`           | `*_grades_d2l.xml`      | Assignment groups with drop-lowest/drop-highest rules and extra-credit (bonus) items  |
+| `_audit_rubrics()`                    | `rubrics_d2l.xml`       | Per-rubric inventory: name, criteria count, level count, scoring method, Range hint   |
+| `_audit_date_shift_items()`           | course XML + grades XML | Course start-date advisory + items with explicit availability windows                 |
+| `_audit_dropbox_folders()`            | `dropbox_d2l.xml`       | D2L Dropbox folders (not auto-imported by Canvas) — one P1 item per folder            |
+| `_audit_unresolvable_grade_items()`   | grades XML + manifest   | Grade items with no Canvas-importable submission object (e.g., Cengage columns)       |
+| `_audit_quiz_settings_inventory()`    | `quiz_d2l_*.xml`        | One P1 row per quiz with time limit/attempts/shuffle/window for manual re-entry       |
 
 ### `_audit_rubrics()` — details
 
@@ -157,21 +161,28 @@ D2L rubrics are NOT migrated by Canvas IMSCC import and must be recreated manual
 `_map_manual_review_group(issue_type, reason)` is the central dispatch. Returns
 `(priority, category, owner, action)`. Key categories:
 
-| Category                        | Priority | Trigger (in lowered reason)                                           |
-| ------------------------------- | -------- | --------------------------------------------------------------------- |
-| `lti_quicklink_reconfiguration` | P1       | `"d2l quicklink"` AND `"lti tool embed"` (checked BEFORE generic LTI) |
-| `lti_embed_reconfiguration`     | P1       | `"lti tool embed"` (generic fallback for Panopto, Kaltura, etc.)      |
-| `rubric_import_setup`           | P1       | `"d2l rubric detected"`                                               |
-| `d2l_media_library_file`        | P1       | `"d2l media library"`                                                 |
-| `graded_discussion_reconnect`   | P1       | `"graded discussion"`                                                 |
-| `availability_window_reentry`   | P1       | `"availability window"`                                               |
-| `gradebook_group_drop_rules`    | P1       | `"gradebook group"`                                                   |
-| `extra_credit_setup`            | P1       | `"extra credit"` OR `"bonus"`                                         |
-| `date_shift_planning`           | P1       | `"course start date"`                                                 |
-| `quiz_settings_inventory`       | P1       | `"quiz settings"`                                                     |
+| Category                          | Priority | Trigger (in lowered reason)                                             |
+| --------------------------------- | -------- | ----------------------------------------------------------------------- |
+| `lti_quicklink_reconfiguration`   | P1       | `"d2l quicklink"` AND `"lti tool embed"` (checked BEFORE generic LTI)   |
+| `lti_embed_reconfiguration`       | P1       | `"lti tool embed"` (generic fallback for Panopto, Kaltura, etc.)        |
+| `rubric_import_setup`             | P1       | `"d2l rubric detected"`                                                 |
+| `d2l_media_library_migration`     | P1       | `"d2l media library content detected"`                                  |
+| `email_submission_workflow`       | P1       | `"email-based submission workflow detected"`                            |
+| `graded_discussion_setup`         | P1       | `"graded discussion detected"`                                          |
+| `dropbox_assignment_setup`        | P1       | `"d2l dropbox assignment detected"`                                     |
+| `unresolvable_grade_item_setup`   | P1       | `"unresolvable grade item"`                                             |
+| `assignment_availability_window`  | P1       | `"availability window"`                                                 |
+| `gradebook_drop_rule_setup`       | P1       | `"gradebook group"`                                                     |
+| `extra_credit_setup`              | P1       | `"extra credit"` OR `"bonus"`                                           |
+| `canvas_date_shift_setup`         | P1       | `"course start date"`                                                   |
+| `quiz_date_window_verification`   | P1       | `"quiz availability window detected"`                                   |
+| `quiz_settings_inventory`         | P1       | `"quiz settings inventory"`                                             |
+| `new_quizzes_question_type_rebuild` | P1/P2  | `"new quizzes question-type compatibility risk"`                        |
 
 **Handler order matters**: `lti_quicklink_reconfiguration` is checked before `lti_embed_reconfiguration`
 so the D2L quickLink reason string doesn't fall through to the generic handler.
+`quiz_settings_inventory` triggers on `"quiz settings inventory"` (exact phrase) — not `"quiz settings"`
+alone, to avoid matching quiz availability window text.
 
 ---
 
@@ -179,11 +190,18 @@ so the D2L quickLink reason string doesn't fall through to the generic handler.
 
 `audit_quizzes(zip_path)` → `QuizAuditReport` with list of `QuizInfo`.
 
-Each `QuizInfo` contains: `name`, `time_limit_minutes`, `time_limit_enforced`,
-`attempts_allowed`, `shuffle_questions`, `shuffle_answers`, `start_date`, `end_date`.
+Key `QuizInfo` fields: `title`, `quiz_file`, `time_limit_minutes`, `enforce_time_limit`,
+`attempts_allowed` (0 = unlimited), `shuffle_type` (`"none"`, `"answers"`, `"questions"`, `"both"`),
+`has_availability_window`, `date_start`, `date_end`, `date_due`, `compatibility_flags`.
 
-Generates `d2l-export.quiz-audit.json` and `d2l-export.quiz-audit.md` reports.
-Feeds into the pipeline's fix checklist as a P1 item with per-quiz settings inventory.
+`audit_quizzes()` is now called automatically by `run_migration()` in `pipeline.py`.
+Outputs `d2l-export.quiz-audit.json` and `d2l-export.quiz-audit.md` alongside the
+migration report. Also feeds `_audit_quiz_settings_inventory()` which emits one
+`d2l_xml_audit` P1 row per quiz into `d2l-export.manual-review.csv`.
+
+`_RISK_TYPES` in quiz_audit.py maps question type strings → `(level, note)` for
+at-risk types (Ordering → P1, Written Response → P2, etc.). One P1 checklist item
+is emitted per quiz that contains at-risk question types.
 
 ---
 
@@ -228,8 +246,8 @@ From scanning all 9 course zip exports:
 
 - Virtual environment: `.venv/` (Python 3.12). Always activate before running.
 - Package installed editable: `pip install -e .`
-- Tests: `pytest` via `pyproject.toml` config. **257 tests** in `tests/test_html_tools.py`
-  and `tests/test_new_audit_features.py`.
+- Tests: `pytest` via `pyproject.toml` config. **620 tests** across `tests/test_html_tools.py`,
+  `tests/test_new_audit_features.py`, `tests/test_template_merger_module_ordering.py`, and others.
 - Branch model: `main` is stable.
 - No AI API calls at runtime — all transforms are local regex/rules.
 - Output reports land in `output/<course-id>/`. Don't commit outputs.
@@ -254,9 +272,22 @@ From scanning all 9 course zip exports:
   for quiz/discussion XML files). 589 tests. Committed 3480d72.
 - **Phase 4 item 3** — `canvas_post_import.py` confirmed fully wired as `lms-canvas-auto-relink` CLI
   entry point in `pyproject.toml`. `build_parser()` and `main()` both present and functional.
+- **Phase 4 item 4** — `_audit_quiz_settings_inventory()` added to `pipeline.py`; emits one P1 row per
+  quiz (time limit, attempts, shuffle, window). `run_migration()` now also auto-writes
+  `quiz-audit.json` and `quiz-audit.md` alongside the migration report. `_CATEGORY_LABELS` stale keys
+  corrected (5 keys renamed to match actual fix_checklist.py category codes; 3 new entries added).
+  606 tests. Committed c041cb1.
+- **Phase 4 item 5** — `detect_email_submission_issues()` added to `html_tools.py`; detects `mailto:`
+  links with submission context AND explicit phrases ("email your assignment", "submit via email").
+  Wired into all 4 HTML processing loops in `pipeline.py`. New `email_submission_workflow` P1 category
+  added to `fix_checklist.py` and `_CATEGORY_LABELS`. 620 tests. Committed 2137f06.
 
 ## What needs doing next
 
-Phase 4 roadmap items above are complete. See `docs/app-roadmap.md` for the full list of remaining
-Phase 4 ideas (many are marked feasibility-limited: `not_in_gradebook` is not in IMSCC exports,
-role-restriction data is not in exports, rubric-to-assignment correlation is not feasible from exports).
+All Phase 4 roadmap items are complete. Remaining feasibility-limited items (not actionable from
+IMSCC exports): `not_in_gradebook` prerequisite gating, faculty-only role-restricted content,
+rubric-to-assignment correlation. See `docs/app-roadmap.md` for full list.
+
+Item bank API auto-share is the only remaining Phase 4 stretch item — would call Canvas New Quizzes
+`/api/quiz/v1/` endpoint from `canvas_post_import.py` to auto-share banks after quiz rebuild. Low
+priority; the current P2 checklist reminder covers the manual step adequately.
