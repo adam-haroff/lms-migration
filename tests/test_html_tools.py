@@ -14,6 +14,8 @@ from pathlib import Path
 from lms_migration.html_tools import (
     CanvasSanitizerPolicy,
     apply_canvas_sanitizer,
+    BestPracticeEnforcerPolicy,
+    apply_best_practice_enforcer,
     _convert_bootstrap_accordion_cards,
     _merge_inline_style,
     _extract_attr_value,
@@ -634,9 +636,9 @@ class TestIntroHeadingStyle:
         assert "color: #ac1a2f" in result.lower()
         h2_match = re.search(r"<h2[^>]*>", result, re.IGNORECASE)
         assert h2_match, "Expected an <h2> element"
-        assert "border-bottom" not in h2_match.group(0).lower(), (
-            f"Section heading h2 must not have border-bottom, got: {h2_match.group(0)}"
-        )
+        assert (
+            "border-bottom" not in h2_match.group(0).lower()
+        ), f"Section heading h2 must not have border-bottom, got: {h2_match.group(0)}"
 
     def test_module_objectives_is_color_only_no_border_bottom(self):
         result = self._apply("Module Objectives")
@@ -708,7 +710,7 @@ class TestTrailingRedHr:
 
     def test_trailing_hr_not_duplicated_if_already_present(self):
         html = (
-            '<body><p>Content.</p>'
+            "<body><p>Content.</p>"
             '<hr style="border-top: 8px solid #AC1A2F;">'
             "</body>"
         )
@@ -725,9 +727,9 @@ class TestTrailingRedHr:
         for name in ("home-page-lcs.html", "home-page-stem.html", "home page.html"):
             html = "<body><p>Content.</p></body>"
             result = self._apply(html, file_path=name)
-            assert "border-top: 8px solid" not in result.lower(), (
-                f"Home page {name!r} should not get trailing hr"
-            )
+            assert (
+                "border-top: 8px solid" not in result.lower()
+            ), f"Home page {name!r} should not get trailing hr"
 
     def test_apply_divider_standards_false_skips_trailing_hr(self):
         ctx = TemplateOverlayContext(
@@ -756,9 +758,9 @@ class TestTrailingRedHr:
             context=self._make_ctx(),
         )
         descriptions = [c.description.lower() for c in changes]
-        assert any("closing red divider" in d for d in descriptions), (
-            f"Expected trailing-hr AppliedChange, got: {descriptions}"
-        )
+        assert any(
+            "closing red divider" in d for d in descriptions
+        ), f"Expected trailing-hr AppliedChange, got: {descriptions}"
 
 
 # ===========================================================================
@@ -830,9 +832,9 @@ class TestRemoveLeadingDivider:
         result = self._apply(html)
         # The D2L header hr (with background-color styling) must be stripped.
         # The canonical closing red hr may be present at the end of the page.
-        assert "background-color: #ac1a2f" not in result.lower(), (
-            "D2L header hr should have been stripped"
-        )
+        assert (
+            "background-color: #ac1a2f" not in result.lower()
+        ), "D2L header hr should have been stripped"
         assert "Content here" in result
 
     def test_header_div_not_present_in_output(self):
@@ -893,10 +895,13 @@ class TestRemoveLeadingDivider:
         # Only the canonical closing hr should be present; no old D2L banner hr.
         assert "background-color" not in result.lower()
         import re as _re
-        hr_styles = [m.group(0) for m in _re.finditer(r'<hr[^>]*>', result, _re.IGNORECASE)]
-        assert all("border-top: 8px solid" in s.lower() for s in hr_styles), (
-            f"Only canonical closing hr expected, found: {hr_styles}"
-        )
+
+        hr_styles = [
+            m.group(0) for m in _re.finditer(r"<hr[^>]*>", result, _re.IGNORECASE)
+        ]
+        assert all(
+            "border-top: 8px solid" in s.lower() for s in hr_styles
+        ), f"Only canonical closing hr expected, found: {hr_styles}"
 
     def test_content_hr_inside_body_not_stripped(self):
         """An <hr> that appears WITHIN content (not as the first div) must be kept."""
@@ -964,9 +969,9 @@ class TestRemoveLeadingDivider:
         )
         result = self._apply(html)
         # The D2L header hr must be stripped.
-        assert "background-color: #ac1a2f" not in result.lower(), (
-            "Header <hr> should be stripped even with printer link present"
-        )
+        assert (
+            "background-color: #ac1a2f" not in result.lower()
+        ), "Header <hr> should be stripped even with printer link present"
         # The printer link paragraph should also be gone (it was in the stripped header div)
         assert "Printer-friendly version" not in result
 
@@ -1284,3 +1289,113 @@ class TestRuleImageReplacement:
         result = self._run(body)
         assert "logo.png" not in result
         assert "<hr>" not in result.lower()
+
+
+# ===========================================================================
+# Module Checklist closer — flags as ManualReviewIssue, no HTML injection
+# ===========================================================================
+
+
+class TestModuleChecklistCloserFlaggedNotInjected:
+    """apply_best_practice_enforcer must emit a ManualReviewIssue (not inject HTML)
+    when the Module Checklist closer is absent from an intro/checklist page.
+    """
+
+    _INTRO_PATH = "course_data/Introduction and Objectives.html"
+    _CHECKLIST_PATH = "course_data/Introduction and Checklist.html"
+
+    _PAGE_WITHOUT_CLOSER = """<html><body>
+<h2>Module Checklist</h2>
+<ul>
+  <li>Read chapter 1</li>
+  <li>Complete quiz</li>
+</ul>
+</body></html>"""
+
+    _PAGE_WITH_CLOSER = """<html><body>
+<h2>Module Checklist</h2>
+<ul>
+  <li>Read chapter 1</li>
+  <li>Contact your instructor with any questions or post in the Course Q&amp;A.</li>
+</ul>
+</body></html>"""
+
+    _PAGE_WITH_LOCAL_CLOSER = """<html><body>
+<h2>Module Checklist</h2>
+<ul>
+  <li>Read chapter 1</li>
+  <li>Contact your instructor with any course questions.</li>
+</ul>
+</body></html>"""
+
+    def _run(self, html: str, file_path: str = _INTRO_PATH):
+        policy = BestPracticeEnforcerPolicy(
+            enabled=True,
+            enforce_module_checklist_closer=True,
+            ensure_external_links_new_tab=False,
+        )
+        return apply_best_practice_enforcer(html, file_path=file_path, policy=policy)
+
+    def test_returns_three_tuple(self):
+        updated, changes, issues = self._run(self._PAGE_WITHOUT_CLOSER)
+        assert isinstance(updated, str)
+        assert isinstance(changes, list)
+        assert isinstance(issues, list)
+
+    def test_missing_closer_emits_manual_review_issue(self):
+        _, _, issues = self._run(self._PAGE_WITHOUT_CLOSER)
+        assert len(issues) == 1
+        assert "module checklist" in issues[0].reason.lower()
+        assert "instructor contact" in issues[0].reason.lower()
+
+    def test_missing_closer_does_not_inject_html(self):
+        updated, _, _ = self._run(self._PAGE_WITHOUT_CLOSER)
+        assert "migration-checklist-closer" not in updated
+        assert "Module Checklist Reminder" not in updated
+        assert "Contact your instructor" not in updated
+
+    def test_page_with_q_and_a_closer_no_issue(self):
+        _, _, issues = self._run(self._PAGE_WITH_CLOSER)
+        checklist_issues = [i for i in issues if "module checklist" in i.reason.lower()]
+        assert checklist_issues == []
+
+    def test_page_with_local_closer_no_issue(self):
+        _, _, issues = self._run(self._PAGE_WITH_LOCAL_CLOSER)
+        checklist_issues = [i for i in issues if "module checklist" in i.reason.lower()]
+        assert checklist_issues == []
+
+    def test_checklist_path_triggers_detection(self):
+        _, _, issues = self._run(self._PAGE_WITHOUT_CLOSER, file_path=self._CHECKLIST_PATH)
+        assert any("module checklist" in i.reason.lower() for i in issues)
+
+    def test_stale_migration_closer_paragraph_stripped(self):
+        """Old migration-checklist-closer <p> from prior runs is stripped from the page."""
+        html_with_stale = self._PAGE_WITHOUT_CLOSER.replace(
+            "</body>",
+            '<p class="migration-checklist-closer"><strong>Module Checklist Reminder:</strong>'
+            " Contact your instructor with any course questions.</p></body>",
+        )
+        updated, _, _ = self._run(html_with_stale)
+        assert "migration-checklist-closer" not in updated
+
+    def test_disabled_enforcer_returns_empty_issues(self):
+        policy = BestPracticeEnforcerPolicy(enabled=False)
+        updated, changes, issues = apply_best_practice_enforcer(
+            self._PAGE_WITHOUT_CLOSER, file_path=self._INTRO_PATH, policy=policy
+        )
+        assert issues == []
+        assert changes == []
+        assert updated == self._PAGE_WITHOUT_CLOSER
+
+    def test_issue_category_is_content(self):
+        _, _, issues = self._run(self._PAGE_WITHOUT_CLOSER)
+        assert issues[0].category == "content"
+
+    def test_non_intro_page_no_issue(self):
+        """Pages not matching intro/checklist patterns should not get flagged."""
+        _, _, issues = self._run(
+            "<html><body><h1>Assignment 1</h1><p>Do the readings.</p></body></html>",
+            file_path="course_data/Assignment 1.html",
+        )
+        checklist_issues = [i for i in issues if "module checklist" in i.reason.lower()]
+        assert checklist_issues == []

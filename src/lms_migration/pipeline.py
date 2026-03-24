@@ -1988,6 +1988,7 @@ def _write_preflight_checklist(
         "instructor_note_cleanup": "Instructor note",
         "template_placeholder_cleanup": "Template placeholder",
         "broken_link_review": "Broken link",
+        "module_checklist_closer_missing": "Module Checklist closer",
     }
 
     def _top_reasons_summary(counter: Counter, limit: int = 3) -> str:
@@ -2314,8 +2315,9 @@ def run_migration(
                 )
                 applied_changes.extend(repaired_ref_changes)
 
+            best_practice_issues: list[ManualReviewIssue] = []
             if best_practice_enforcer:
-                updated, best_practice_changes = apply_best_practice_enforcer(
+                updated, best_practice_changes, best_practice_issues = apply_best_practice_enforcer(
                     updated,
                     file_path=relative_html_path,
                     policy=BestPracticeEnforcerPolicy(
@@ -2347,6 +2349,7 @@ def run_migration(
                 updated, rules.manual_review_triggers
             )
             manual_issues.extend(overlay_issues)
+            manual_issues.extend(best_practice_issues)
             if policy_profile.template_checks_enabled:
                 manual_issues.extend(
                     check_template_heuristics(
@@ -2507,8 +2510,9 @@ def run_migration(
                     )
                     applied_changes.extend(repaired_ref_changes)
 
+                manifest_best_practice_issues: list[ManualReviewIssue] = []
                 if best_practice_enforcer:
-                    updated, best_practice_changes = apply_best_practice_enforcer(
+                    updated, best_practice_changes, manifest_best_practice_issues = apply_best_practice_enforcer(
                         updated,
                         file_path=relative_manifest_path,
                         policy=BestPracticeEnforcerPolicy(
@@ -2523,6 +2527,7 @@ def run_migration(
                     updated, rules.manual_review_triggers
                 )
                 manual_issues.extend(overlay_issues)
+                manual_issues.extend(manifest_best_practice_issues)
                 if policy_profile.template_checks_enabled:
                     manual_issues.extend(
                         check_template_heuristics(
@@ -2688,8 +2693,9 @@ def run_migration(
                         )
                         intro_applied_changes.extend(intro_repaired_ref_changes)
 
+                    intro_best_practice_issues: list[ManualReviewIssue] = []
                     if best_practice_enforcer:
-                        intro_updated, intro_best_practice_changes = (
+                        intro_updated, intro_best_practice_changes, intro_best_practice_issues = (
                             apply_best_practice_enforcer(
                                 intro_updated,
                                 file_path=intro_relative_path,
@@ -2712,6 +2718,7 @@ def run_migration(
                         rules.manual_review_triggers,
                     )
                     intro_manual_issues.extend(intro_overlay_issues)
+                    intro_manual_issues.extend(intro_best_practice_issues)
                     if policy_profile.template_checks_enabled:
                         intro_manual_issues.extend(
                             check_template_heuristics(
@@ -2904,7 +2911,7 @@ def run_migration(
             for html_file in html_files:
                 relative_html_path = str(html_file.relative_to(unpack_dir).as_posix())
                 original = _read_text(html_file)
-                updated, final_best_practice_changes = apply_best_practice_enforcer(
+                updated, final_best_practice_changes, final_best_practice_issues = apply_best_practice_enforcer(
                     original,
                     file_path=relative_html_path,
                     policy=BestPracticeEnforcerPolicy(
@@ -2913,7 +2920,7 @@ def run_migration(
                         ensure_external_links_new_tab=True,
                     ),
                 )
-                if not final_best_practice_changes and updated == original:
+                if not final_best_practice_changes and not final_best_practice_issues and updated == original:
                     continue
 
                 if updated != original:
@@ -2923,6 +2930,7 @@ def run_migration(
                     updated,
                     rules.manual_review_triggers,
                 )
+                final_manual_issues.extend(final_best_practice_issues)
                 if policy_profile.template_checks_enabled:
                     final_manual_issues.extend(
                         check_template_heuristics(

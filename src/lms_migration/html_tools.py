@@ -2567,16 +2567,17 @@ def apply_best_practice_enforcer(
     *,
     file_path: str = "",
     policy: BestPracticeEnforcerPolicy | None = None,
-) -> tuple[str, list[AppliedChange]]:
+) -> tuple[str, list[AppliedChange], list[ManualReviewIssue]]:
     """
     Apply a safe subset of best-practice enforcement rules.
     """
     applied_policy = policy or BestPracticeEnforcerPolicy()
     if not applied_policy.enabled:
-        return content, []
+        return content, [], []
 
     updated = content
     applied: list[AppliedChange] = []
+    manual_issues: list[ManualReviewIssue] = []
     normalized_file = file_path.lower()
     lowered = html.unescape(updated).lower()
 
@@ -2589,12 +2590,7 @@ def apply_best_practice_enforcer(
         required_closer_plain = (
             "contact your instructor with any questions or post in the course q&a."
         )
-        required_closer_html = (
-            "Contact your instructor with any questions or post in the Course Q&amp;A."
-        )
         local_contact_plain = "contact your instructor with any course questions."
-        local_contact_html = "Contact your instructor with any course questions."
-        local_contact_activity_html = "Contact your instructor with any course questions or use the Activity Feed on the Home Page."
         has_local_contact_guidance = local_contact_plain in lowered
         has_activity_feed_guidance = "activity feed on the home page" in lowered
         checklist_support_present = (
@@ -2614,68 +2610,25 @@ def apply_best_practice_enforcer(
                 required_closer_plain in lowered or has_local_contact_guidance
             )
         if is_intro_or_checklist and not checklist_support_present:
-            closer_added = False
-
-            heading_match = re.search(
-                r"<h[1-6][^>]*>.*?module checklist.*?</h[1-6]>",
-                updated,
-                flags=re.IGNORECASE,
-                # Headings can include template icons/strong tags after visual normalization.
+            applied.append(
+                AppliedChange(
+                    category="best_practice",
+                    description="Module Checklist missing instructor contact reminder — flagged for manual review",
+                    count=1,
+                )
             )
-            if heading_match:
-                remainder = updated[heading_match.end() :]
-                ul_open_match = re.search(
-                    r"<ul\b[^>]*>", remainder, flags=re.IGNORECASE
+            manual_issues.append(
+                ManualReviewIssue(
+                    reason=(
+                        "Module Checklist is missing an instructor contact reminder"
+                        " — add \u2018Contact your instructor with any questions or"
+                        " post in the Course Q\u0026A.\u2019 as the final checklist"
+                        " bullet before publishing"
+                    ),
+                    evidence="No instructor contact guidance found under Module Checklist section",
+                    category="content",
                 )
-                if ul_open_match:
-                    after_ul = remainder[ul_open_match.end() :]
-                    ul_close_match = re.search(r"</ul>", after_ul, flags=re.IGNORECASE)
-                    if ul_close_match:
-                        insert_at = (
-                            heading_match.end()
-                            + ul_open_match.end()
-                            + ul_close_match.start()
-                        )
-                        updated = (
-                            updated[:insert_at]
-                            + f"\n  <li>{required_closer_html}</li>"
-                            + updated[insert_at:]
-                        )
-                        closer_added = True
-
-            if not closer_added:
-                fallback_closer_html = (
-                    local_contact_activity_html
-                    if has_activity_feed_guidance
-                    else local_contact_html
-                )
-                fallback_block = (
-                    '<p class="migration-checklist-closer">'
-                    "<strong>Module Checklist Reminder:</strong> "
-                    f"{fallback_closer_html}"
-                    "</p>"
-                )
-                body_close_match = re.search(r"</body>", updated, flags=re.IGNORECASE)
-                if body_close_match:
-                    updated = (
-                        updated[: body_close_match.start()]
-                        + fallback_block
-                        + "\n"
-                        + updated[body_close_match.start() :]
-                    )
-                else:
-                    updated = updated + "\n" + fallback_block
-                closer_added = True
-
-            if closer_added:
-                lowered = updated.lower()
-                applied.append(
-                    AppliedChange(
-                        category="best_practice",
-                        description="Added required Module Checklist closing reminder",
-                        count=1,
-                    )
-                )
+            )
 
         # Some courses already include local support guidance and end up with a stale
         # template-only "Course Q&A" reminder duplicated at the end of the checklist.
@@ -2799,7 +2752,7 @@ def apply_best_practice_enforcer(
                 )
             )
 
-    return updated, applied
+    return updated, applied, manual_issues
 
 
 def detect_manual_review_issues(
@@ -2866,28 +2819,6 @@ def check_template_heuristics(
             ManualReviewIssue(
                 reason='Legacy quiz instructions detected ("Take the Quiz")',
                 evidence='Click the "Take the Quiz" button',
-            )
-        )
-
-    # IC pages should retain checklist closing reminder based on templates.
-    is_intro_checklist_page = (
-        "introduction and checklist" in lowered
-        or "introduction-and-checklist" in normalized_file
-    )
-    required_mc_closer = (
-        "contact your instructor with any questions or post in the course q&a"
-    )
-    acceptable_local_closer = "contact your instructor with any course questions."
-    if (
-        applied_policy.require_mc_closing_bullet
-        and is_intro_checklist_page
-        and required_mc_closer not in lowered
-        and acceptable_local_closer not in lowered
-    ):
-        issues.append(
-            ManualReviewIssue(
-                reason="Module Checklist closing reminder appears to be missing",
-                evidence="Contact your instructor with any questions or post in the Course Q&A.",
             )
         )
 

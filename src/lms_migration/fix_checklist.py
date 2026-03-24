@@ -427,6 +427,16 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "needs to be rebuilt or re-authored.",
         )
 
+    if "module checklist is missing an instructor contact reminder" in lowered:
+        return (
+            "P2",
+            "module_checklist_closer_missing",
+            "Faculty/ID",
+            "Add the required closing reminder as the final item in the Module Checklist. "
+            "Open the page in Canvas, scroll to the Module Checklist section, and add: "
+            "\u2018Contact your instructor with any questions or post in the Course Q&A.\u2019 "
+            "as the last list entry before publishing.",
+        )
     if issue_type == "accessibility":
         if (
             "image missing alt attribute" in lowered

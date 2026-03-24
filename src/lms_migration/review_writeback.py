@@ -213,8 +213,9 @@ def apply_review_draft(
             applied_changes.extend(sanitizer_changes)
             sanitizer_change_total += sum(change.count for change in sanitizer_changes)
 
+            writeback_bp_issues: list = []
             if best_practice_enforcer:
-                updated_document, best_practice_changes = apply_best_practice_enforcer(
+                updated_document, best_practice_changes, writeback_bp_issues = apply_best_practice_enforcer(
                     updated_document,
                     file_path=relative_path,
                     policy=BestPracticeEnforcerPolicy(
@@ -235,6 +236,7 @@ def apply_review_draft(
                 if rules is not None
                 else []
             )
+            manual_issues.extend(writeback_bp_issues)
             manual_issues.extend(detect_lti_embed_issues(updated_document))
             accessibility_issues = check_accessibility_heuristics(updated_document)
 
