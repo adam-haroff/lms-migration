@@ -1049,9 +1049,12 @@ def _audit_graded_discussions(zip_path: Path) -> list[dict]:
                         else forum.get("id", "unknown")
                     )
                     for topic in forum.iter("topic"):
-                        # Graded topics have a <grade> child element
+                        # Graded topics have a <grade> child element (common), or
+                        # a <properties><grade_item_id> element (some D2L versions
+                        # store the link there instead of a <grade> wrapper).
                         grade_el = topic.find("grade")
-                        if grade_el is None:
+                        props_grade_id_el = topic.find("properties/grade_item_id")
+                        if grade_el is None and props_grade_id_el is None:
                             # Also check for score-related attributes
                             if not (
                                 topic.get("gradeid")
@@ -1438,6 +1441,9 @@ def _audit_unresolvable_grade_items(zip_path: Path) -> list[dict]:
     - Bonus items (already audited by ``_audit_gradebook_groups``).
     - Items whose resource_code matches a dropbox folder's ``grade_item`` attr
       (already audited by ``_audit_dropbox_folders``).
+    - Items whose resource_code matches a discussion topic's ``grade_item_id``
+      text (Canvas imports these discussions automatically; ``_audit_graded_discussions``
+      handles the grading-setup reminder for them).
     - Items whose name (case-insensitive) matches a manifest quiz or discussion
       title — Canvas imports those objects and auto-creates connected grade columns.
     - Items without a ``resource_code`` (calculated/formula grade items).
@@ -1470,7 +1476,36 @@ def _audit_unresolvable_grade_items(zip_path: Path) -> list[dict]:
                     if gi:
                         resolved_grade_rcs.add(gi)
 
-            # ── Resolved set 2: Manifest quiz / discussion titles ───────────
+            # ── Resolved set 2: Discussion topic grade_item_id refs ────────
+            # Some D2L exports store the grade item RC directly in
+            # <topic><properties><grade_item_id>RC</grade_item_id></properties>
+            # instead of a <grade> child element.  The text IS the grade item
+            # resource_code.  Canvas imports these discussions automatically;
+            # _audit_graded_discussions emits the grading-setup reminder.
+            disc_files = [
+                n
+                for n in names
+                if re.match(r"discussion_d2l_\d+\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in disc_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                raw = re.sub(r"<\?xml[^>]*\?>", "", raw, count=1)
+                try:
+                    root = ET.fromstring(raw)
+                except ET.ParseError:
+                    continue
+                for topic in root.iter("topic"):
+                    props = topic.find("properties")
+                    if props is None:
+                        continue
+                    gi = (props.findtext("grade_item_id") or "").strip()
+                    if gi:
+                        resolved_grade_rcs.add(gi)
+
+            # ── Resolved set 3: Manifest quiz / discussion titles ───────────
             # Grade item resource_codes use a DIFFERENT internal ID space than
             # manifest item resource_codes, so direct RC matching is not possible
             # for quizzes and discussions.  Instead, match by (case-insensitive)

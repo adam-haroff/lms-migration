@@ -372,6 +372,31 @@ class TestPipelineXmlAuditHelpers:
         rows = _audit_graded_discussions(zp)
         assert rows == []
 
+    def test_graded_discussion_via_properties_grade_item_id_detected(self):
+        """Topics storing grade link in <properties><grade_item_id> are caught."""
+        from lms_migration.pipeline import _audit_graded_discussions
+
+        disc_xml = """\
+<discussion xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">
+  <forum id="1" resource_code="Sinclair-2088946">
+    <content><title>Course Discussions</title></content>
+    <topics>
+      <topic id="750" resource_code="sinclairc-3580022">
+        <properties>
+          <score_out_of>20</score_out_of>
+          <grade_item_id>sinclairc-3654439</grade_item_id>
+        </properties>
+        <content><title>Discussion Assignment 1.3</title></content>
+      </topic>
+    </topics>
+  </forum>
+</discussion>
+"""
+        zp = self._make_zip({"discussion_d2l_1.xml": disc_xml})
+        rows = _audit_graded_discussions(zp)
+        assert len(rows) == 1
+        assert "Discussion Assignment 1.3" in rows[0]["evidence"]
+
     def test_availability_window_detected(self):
         from lms_migration.pipeline import _audit_availability_windows
 
@@ -1774,9 +1799,7 @@ class TestAuditUnresolvableGradeItems:
             "<resources/>"
             "</manifest>"
         )
-        zp = self._make_zip(
-            {"grades_d2l.xml": grades, "imsmanifest.xml": manifest_xml}
-        )
+        zp = self._make_zip({"grades_d2l.xml": grades, "imsmanifest.xml": manifest_xml})
         rows = _audit_unresolvable_grade_items(zp)
         assert rows == []
 
@@ -1804,8 +1827,39 @@ class TestAuditUnresolvableGradeItems:
             "<resources/>"
             "</manifest>"
         )
+        zp = self._make_zip({"grades_d2l.xml": grades, "imsmanifest.xml": manifest_xml})
+        rows = _audit_unresolvable_grade_items(zp)
+        assert rows == []
+
+    def test_discussion_grade_item_id_link_is_skipped(self):
+        """Grade items linked via discussion <properties><grade_item_id> are skipped."""
+        from lms_migration.pipeline import _audit_unresolvable_grade_items
+
+        grades = self._grades_xml(
+            items_xml=(
+                '<item resource_code="sinclairc-3654439">'
+                "<name>Discussion 1.3</name>"
+                "<scoring><out_of>20</out_of><is_bonus>false</is_bonus></scoring>"
+                "</item>"
+            )
+        )
+        disc_xml = (
+            '<discussion xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">'
+            '<forum id="1" resource_code="Sinclair-2088946">'
+            "<topics>"
+            '<topic id="750" resource_code="sinclairc-3580022">'
+            "<properties>"
+            "<score_out_of>20</score_out_of>"
+            "<grade_item_id>sinclairc-3654439</grade_item_id>"
+            "</properties>"
+            "<content><title>Discussion Assignment 1.3</title></content>"
+            "</topic>"
+            "</topics>"
+            "</forum>"
+            "</discussion>"
+        )
         zp = self._make_zip(
-            {"grades_d2l.xml": grades, "imsmanifest.xml": manifest_xml}
+            {"grades_d2l.xml": grades, "discussion_d2l_1.xml": disc_xml}
         )
         rows = _audit_unresolvable_grade_items(zp)
         assert rows == []
