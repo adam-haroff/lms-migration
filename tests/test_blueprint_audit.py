@@ -30,7 +30,11 @@ BP_PAGES = [
 CHILD_PAGES = [
     {"url": "module-1-intro", "title": "Module 1 Intro", "published": True},
     {"url": "syllabus", "title": "Syllabus", "published": False},  # mismatch
-    {"url": "instructor-bio", "title": "Instructor Bio", "published": True},  # child-only
+    {
+        "url": "instructor-bio",
+        "title": "Instructor Bio",
+        "published": True,
+    },  # child-only
 ]
 
 BP_ASSIGNMENTS = [
@@ -44,7 +48,12 @@ CHILD_ASSIGNMENTS = [
 ]
 
 BP_DISCUSSIONS = [
-    {"id": 1, "title": "Week 1 Discussion", "published": True, "discussion_subentry_count": 0},
+    {
+        "id": 1,
+        "title": "Week 1 Discussion",
+        "published": True,
+        "discussion_subentry_count": 0,
+    },
 ]
 
 CHILD_DISCUSSIONS = [
@@ -107,8 +116,13 @@ def _run_audit(
         bp_pages, child_pages, bp_asgn, child_asgn, bp_disc, child_disc
     )
     with (
-        patch("lms_migration.blueprint_audit.fetch_course_pages", side_effect=fake_pages),
-        patch("lms_migration.blueprint_audit.fetch_course_assignments", side_effect=fake_asgn),
+        patch(
+            "lms_migration.blueprint_audit.fetch_course_pages", side_effect=fake_pages
+        ),
+        patch(
+            "lms_migration.blueprint_audit.fetch_course_assignments",
+            side_effect=fake_asgn,
+        ),
         patch(
             "lms_migration.blueprint_audit.fetch_course_discussion_topics",
             side_effect=fake_disc,
@@ -181,7 +195,9 @@ class TestPublishMismatch:
 
     def test_mismatch_direction_bp_published_child_not(self):
         result = _run_audit()
-        mismatch = next(m for m in result.publish_mismatches if m.page_url == "syllabus")
+        mismatch = next(
+            m for m in result.publish_mismatches if m.page_url == "syllabus"
+        )
         assert mismatch.blueprint_published is True
         assert mismatch.child_published is False
         assert "auto-publish" in mismatch.risk_description.lower()
@@ -218,12 +234,16 @@ class TestDiscussionReplies:
 
     def test_reply_count_recorded(self):
         result = _run_audit()
-        d = next(x for x in result.discussions_with_replies if x.title == "Week 1 Discussion")
+        d = next(
+            x for x in result.discussions_with_replies if x.title == "Week 1 Discussion"
+        )
         assert d.reply_count == 5
 
     def test_blueprint_has_topic_flag_true_when_present(self):
         result = _run_audit()
-        d = next(x for x in result.discussions_with_replies if x.title == "Week 1 Discussion")
+        d = next(
+            x for x in result.discussions_with_replies if x.title == "Week 1 Discussion"
+        )
         assert d.blueprint_has_topic is True
 
     def test_blueprint_has_topic_flag_false_when_absent(self):
@@ -236,7 +256,11 @@ class TestDiscussionReplies:
             }
         ]
         result = _run_audit(child_disc=child_disc)
-        d = next(x for x in result.discussions_with_replies if x.title == "Child-Only Discussion")
+        d = next(
+            x
+            for x in result.discussions_with_replies
+            if x.title == "Child-Only Discussion"
+        )
         assert d.blueprint_has_topic is False
 
     def test_zero_subentry_count_not_flagged(self):
@@ -296,7 +320,9 @@ class TestTotalRisks:
 
     def test_total_risks_zero_when_clean(self):
         pages = [{"url": "page", "title": "Page", "published": True}]
-        disc = [{"id": 1, "title": "D", "published": True, "discussion_subentry_count": 0}]
+        disc = [
+            {"id": 1, "title": "D", "published": True, "discussion_subentry_count": 0}
+        ]
         asgn = [{"name": "HW1", "points_possible": 10}]
         result = _run_audit(
             bp_pages=pages,
@@ -386,7 +412,9 @@ class TestWriteReports:
 
     def test_clean_result_shows_no_risks_message(self, tmp_path):
         pages = [{"url": "page", "title": "Page", "published": True}]
-        disc = [{"id": 1, "title": "D", "published": True, "discussion_subentry_count": 0}]
+        disc = [
+            {"id": 1, "title": "D", "published": True, "discussion_subentry_count": 0}
+        ]
         asgn = [{"name": "HW1", "points_possible": 10}]
         result = _run_audit(
             bp_pages=pages,

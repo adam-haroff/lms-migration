@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -171,7 +170,10 @@ class TestEncodeMultipart:
 class TestCreateSandboxCourse:
     def test_success(self):
         with patch("lms_migration.canvas_preview._api_post_form") as mock_post:
-            mock_post.return_value = {"id": 12345, "name": "LMS-Migration Preview 20260101-000000"}
+            mock_post.return_value = {
+                "id": 12345,
+                "name": "LMS-Migration Preview 20260101-000000",
+            }
             result = create_sandbox_course(
                 base_url="https://canvas.example.com",
                 account_id="1",
@@ -283,7 +285,9 @@ class TestUploadMigrationFile:
     def test_calls_post_multipart(self, tmp_path: Path):
         zip_file = tmp_path / "course.zip"
         zip_file.write_bytes(b"fake zip")
-        with patch("lms_migration.canvas_preview._post_multipart_no_auth") as mock_upload:
+        with patch(
+            "lms_migration.canvas_preview._post_multipart_no_auth"
+        ) as mock_upload:
             mock_upload.return_value = {}
             upload_migration_file(
                 upload_url="https://s3.amazonaws.com/bucket",
@@ -369,9 +373,9 @@ class TestPollMigration:
                 {"workflow_state": "completed"},
             ]
             mock_time.monotonic.side_effect = [
-                1000.0,   # initial deadline
-                999.0,    # first timeout check: 999 < 1300 → continue
-                1000.0,   # still before deadline
+                1000.0,  # initial deadline
+                999.0,  # first timeout check: 999 < 1300 → continue
+                1000.0,  # still before deadline
             ]
             poll_migration(
                 base_url="https://canvas.example.com",
@@ -507,7 +511,9 @@ class TestRunPreview:
 
         assert isinstance(result, PreviewResult)
         assert result.course_id == "42"
-        assert result.page_urls == ["https://canvas.example.com/courses/42/pages/week-1"]
+        assert result.page_urls == [
+            "https://canvas.example.com/courses/42/pages/week-1"
+        ]
         assert result.migration_issues == []
         assert result.kept_sandbox is True  # primary mode always keeps
 
@@ -649,10 +655,12 @@ class TestRunPreview:
         zip_file = tmp_path / "course.zip"
         zip_file.write_bytes(b"data")
 
-        with (
-            patch(_PATCH_API_GET) as mock_get,
-        ):
-            mock_get.return_value = {"id": "42", "name": "Course", "workflow_state": "available"}
+        with (patch(_PATCH_API_GET) as mock_get,):
+            mock_get.return_value = {
+                "id": "42",
+                "name": "Course",
+                "workflow_state": "available",
+            }
             with pytest.raises(CanvasPreviewError, match="[Tt]emplate"):
                 run_preview(
                     zip_file,

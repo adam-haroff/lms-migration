@@ -128,11 +128,7 @@ class BlueprintAuditResult:
 
 def _page_index(pages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Return a dict keyed by lowercase page URL slug."""
-    return {
-        (p.get("url") or "").lower(): p
-        for p in pages
-        if p.get("url")
-    }
+    return {(p.get("url") or "").lower(): p for p in pages if p.get("url")}
 
 
 def _assignment_title_set(assignments: list[dict[str, Any]]) -> set[str]:
@@ -297,7 +293,9 @@ def write_blueprint_reports(
         "assignments_only_in_child": result.assignments_only_in_child,
         "assignments_only_in_blueprint": result.assignments_only_in_blueprint,
     }
-    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     # ── Markdown ─────────────────────────────────────────────────────────
     lines: list[str] = [

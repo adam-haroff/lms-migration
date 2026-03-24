@@ -35,7 +35,10 @@ from .html_tools import (
 )
 from .fix_checklist import _map_manual_review_group
 from .policy_profiles import PolicyProfile, get_policy_profile
-from .quiz_audit import _RISK_TYPES as _QUIZ_RISK_TYPES, _parse_quiz_xml as _parse_quiz_xml_file
+from .quiz_audit import (
+    _RISK_TYPES as _QUIZ_RISK_TYPES,
+    _parse_quiz_xml as _parse_quiz_xml_file,
+)
 from .rules import load_rules
 from .template_merger import run_template_merge
 from .template_overlay import (

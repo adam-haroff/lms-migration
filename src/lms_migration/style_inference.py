@@ -49,18 +49,176 @@ class StyleInferenceError(RuntimeError):
 # ORDER MATTERS — checked top-to-bottom; first match above threshold wins.
 
 _SEMANTIC_ICON_PATTERNS: list[tuple[frozenset[str], str]] = [
-    (frozenset({"practice", "try this", "apply", "hands-on", "do this", "exercise", "activity"}), "practice"),
-    (frozenset({"objective", "learning objective", "goal", "outcome", "competency", "what you will learn", "by the end", "learning target"}), "objectives"),
-    (frozenset({"resource", "reading", "reference", "further reading", "explore resources", "materials", "explore this"}), "resources"),
-    (frozenset({"quiz", "self-check", "knowledge check", "check your knowledge", "exam", "test yourself", "assessment"}), "quiz"),
-    (frozenset({"important", "note", "tip", "remember", "key point", "heads up", "warning", "caution", "critical step"}), "note"),
-    (frozenset({"checklist", "to-do", "to do", "action item", "complete by", "due", "assignment checklist"}), "checklist"),
-    (frozenset({"video", "watch", "lecture", "view", "media", "presentation", "screencast"}), "video"),
-    (frozenset({"discussion", "forum", "post", "reply", "respond", "discuss", "share your response"}), "discussion"),
-    (frozenset({"assignment", "submit", "turn in", "upload", "homework", "project", "paper due"}), "assignment"),
-    (frozenset({"overview", "introduction", "intro", "welcome", "module overview", "course overview", "agenda", "faculty", "instructor", "about this", "course info"}), "overview"),
-    (frozenset({"syllabus", "policy", "policies", "guidelines", "expectations", "schedule", "course schedule", "grading", "require", "grade breakdown"}), "syllabus"),
-    (frozenset({"announcement", "news", "update", "notice", "alert", "reminder", "coming up"}), "announcement"),
+    (
+        frozenset(
+            {
+                "practice",
+                "try this",
+                "apply",
+                "hands-on",
+                "do this",
+                "exercise",
+                "activity",
+            }
+        ),
+        "practice",
+    ),
+    (
+        frozenset(
+            {
+                "objective",
+                "learning objective",
+                "goal",
+                "outcome",
+                "competency",
+                "what you will learn",
+                "by the end",
+                "learning target",
+            }
+        ),
+        "objectives",
+    ),
+    (
+        frozenset(
+            {
+                "resource",
+                "reading",
+                "reference",
+                "further reading",
+                "explore resources",
+                "materials",
+                "explore this",
+            }
+        ),
+        "resources",
+    ),
+    (
+        frozenset(
+            {
+                "quiz",
+                "self-check",
+                "knowledge check",
+                "check your knowledge",
+                "exam",
+                "test yourself",
+                "assessment",
+            }
+        ),
+        "quiz",
+    ),
+    (
+        frozenset(
+            {
+                "important",
+                "note",
+                "tip",
+                "remember",
+                "key point",
+                "heads up",
+                "warning",
+                "caution",
+                "critical step",
+            }
+        ),
+        "note",
+    ),
+    (
+        frozenset(
+            {
+                "checklist",
+                "to-do",
+                "to do",
+                "action item",
+                "complete by",
+                "due",
+                "assignment checklist",
+            }
+        ),
+        "checklist",
+    ),
+    (
+        frozenset(
+            {"video", "watch", "lecture", "view", "media", "presentation", "screencast"}
+        ),
+        "video",
+    ),
+    (
+        frozenset(
+            {
+                "discussion",
+                "forum",
+                "post",
+                "reply",
+                "respond",
+                "discuss",
+                "share your response",
+            }
+        ),
+        "discussion",
+    ),
+    (
+        frozenset(
+            {
+                "assignment",
+                "submit",
+                "turn in",
+                "upload",
+                "homework",
+                "project",
+                "paper due",
+            }
+        ),
+        "assignment",
+    ),
+    (
+        frozenset(
+            {
+                "overview",
+                "introduction",
+                "intro",
+                "welcome",
+                "module overview",
+                "course overview",
+                "agenda",
+                "faculty",
+                "instructor",
+                "about this",
+                "course info",
+            }
+        ),
+        "overview",
+    ),
+    (
+        frozenset(
+            {
+                "syllabus",
+                "policy",
+                "policies",
+                "guidelines",
+                "expectations",
+                "schedule",
+                "course schedule",
+                "grading",
+                "require",
+                "grade breakdown",
+            }
+        ),
+        "syllabus",
+    ),
+    (
+        frozenset(
+            {
+                "announcement",
+                "news",
+                "update",
+                "notice",
+                "alert",
+                "reminder",
+                "coming up",
+            }
+        ),
+        "announcement",
+    ),
 ]
 
 # Canvas icon candidates per semantic type (ordered by confidence, best first).
@@ -110,18 +268,48 @@ _SKIP_BASENAME_PATTERNS: tuple[str, ...] = (
 # Alt text values that carry no semantic meaning.
 _DECORATIVE_ALTS: frozenset[str] = frozenset(
     {
-        "", "logo", "image", "icon", "decoration", "decorative", "spacer",
-        "graphic", "banner", "header", "footer", " ",
+        "",
+        "logo",
+        "image",
+        "icon",
+        "decoration",
+        "decorative",
+        "spacer",
+        "graphic",
+        "banner",
+        "header",
+        "footer",
+        " ",
     }
 )
 
 # Colors that are standard defaults — filtered when detecting brand palette.
 _DEFAULT_COLORS: frozenset[str] = frozenset(
     {
-        "000000", "111111", "222222", "333333", "444444", "555555",
-        "666666", "777777", "888888", "999999", "aaaaaa", "bbbbbb",
-        "cccccc", "cdcdcd", "dddddd", "e5e5e5", "ebebeb", "eeeeee",
-        "f0f0f0", "f5f5f5", "f9f9f9", "fafafa", "fcfcfc", "ffffff",
+        "000000",
+        "111111",
+        "222222",
+        "333333",
+        "444444",
+        "555555",
+        "666666",
+        "777777",
+        "888888",
+        "999999",
+        "aaaaaa",
+        "bbbbbb",
+        "cccccc",
+        "cdcdcd",
+        "dddddd",
+        "e5e5e5",
+        "ebebeb",
+        "eeeeee",
+        "f0f0f0",
+        "f5f5f5",
+        "f9f9f9",
+        "fafafa",
+        "fcfcfc",
+        "ffffff",
     }
 )
 
@@ -133,13 +321,13 @@ _STYLE_ATTR_RE = re.compile(
 )
 
 # Matches a CSS property: value; pair inside a style string.
-_CSS_PROP_RE = re.compile(r'([\w-]+)\s*:\s*([^;]+?)(?:;|$)', re.IGNORECASE)
+_CSS_PROP_RE = re.compile(r"([\w-]+)\s*:\s*([^;]+?)(?:;|$)", re.IGNORECASE)
 
 # Six-digit and three-digit hex colors.
-_HEX_COLOR_RE = re.compile(r'#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b')
+_HEX_COLOR_RE = re.compile(r"#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b")
 
 # rgb/rgba colors.
-_RGB_COLOR_RE = re.compile(r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', re.IGNORECASE)
+_RGB_COLOR_RE = re.compile(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", re.IGNORECASE)
 
 # CSS font-family value — the full value after font-family:
 _FONT_FAMILY_RE = re.compile(r'font-family\s*:\s*([^;"\']+)', re.IGNORECASE)
@@ -147,7 +335,7 @@ _FONT_FAMILY_RE = re.compile(r'font-family\s*:\s*([^;"\']+)', re.IGNORECASE)
 # D2L template icon references (both URL casings, any depth after the marker).
 _D2L_ICON_REF_RE = re.compile(
     r'<img[^>]+src=["\'][^"\']*?'
-    r'(?:brightspace_html_template|Brightspace_HTML_Template)'
+    r"(?:brightspace_html_template|Brightspace_HTML_Template)"
     r'[^"\']*?/([^/"\']+\.(?:png|jpg|jpeg|gif|svg))["\'][^>]*>',
     re.IGNORECASE,
 )
@@ -156,14 +344,10 @@ _D2L_ICON_REF_RE = re.compile(
 _ALT_ATTR_RE = re.compile(r'\balt=["\']([^"\']*)["\']', re.IGNORECASE)
 
 # Heading tags (h1–h6).
-_HEADING_RE = re.compile(
-    r'<h[1-6][^>]*>(.*?)</h[1-6]>', re.DOTALL | re.IGNORECASE
-)
+_HEADING_RE = re.compile(r"<h[1-6][^>]*>(.*?)</h[1-6]>", re.DOTALL | re.IGNORECASE)
 
 # Linked CSS href paths.
-_CSS_LINK_RE = re.compile(
-    r'<link[^>]+href=["\']([^"\']+\.css)["\']', re.IGNORECASE
-)
+_CSS_LINK_RE = re.compile(r'<link[^>]+href=["\']([^"\']+\.css)["\']', re.IGNORECASE)
 
 
 # ─── Dataclasses ─────────────────────────────────────────────────────────────
@@ -241,7 +425,7 @@ class StyleInferenceResult:
 
 def _strip_html_tags(text: str) -> str:
     """Remove HTML tags and decode basic entities from *text*."""
-    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r"<[^>]+>", "", text)
     text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
     text = text.replace("&nbsp;", " ").replace("&#160;", " ")
     return text.strip()
@@ -307,9 +491,16 @@ def _extract_theme_colors(
             # Extract hex colors from color / background-color properties.
             for m in _HEX_COLOR_RE.finditer(style_val):
                 hex6 = _normalise_hex(m.group(1))
-                if hex6 and hex6 not in _DEFAULT_COLORS and not _is_near_white_or_black(hex6):
+                if (
+                    hex6
+                    and hex6 not in _DEFAULT_COLORS
+                    and not _is_near_white_or_black(hex6)
+                ):
                     color_counts[hex6] += 1
-                    if tag_lower in ("h1", "h2", "h3", "h4") and hex6 not in heading_colors:
+                    if (
+                        tag_lower in ("h1", "h2", "h3", "h4")
+                        and hex6 not in heading_colors
+                    ):
                         heading_colors.append(hex6)
 
             for m in _RGB_COLOR_RE.finditer(style_val):
@@ -340,9 +531,9 @@ def _extract_font_stacks(html_files: list[tuple[str, str]]) -> FontStacks:
         for m in _FONT_FAMILY_RE.finditer(content):
             raw = m.group(1).strip().rstrip(";").strip()
             # Normalise: lowercase, strip surrounding quotes.
-            normalised = re.sub(r'\s+', ' ', raw.strip("'\"").lower())
+            normalised = re.sub(r"\s+", " ", raw.strip("'\"").lower())
             # Skip values that are HTML entities or clearly not font names.
-            if normalised and len(normalised) < 120 and '&' not in normalised:
+            if normalised and len(normalised) < 120 and "&" not in normalised:
                 family_counts[normalised] += 1
 
     ordered = [fam for fam, _ in family_counts.most_common()]
@@ -366,7 +557,14 @@ def _score_icon_type(
     """
     # Include a humanised form of the basename as a synthetic text signal so
     # icons like "gradinginformation.png" are self-classifying.
-    basename_words = re.sub(r'[_\-]', ' ', basename.replace('.png', '').replace('.jpg', '').replace('.gif', '').replace('.svg', ''))
+    basename_words = re.sub(
+        r"[_\-]",
+        " ",
+        basename.replace(".png", "")
+        .replace(".jpg", "")
+        .replace(".gif", "")
+        .replace(".svg", ""),
+    )
     combined_lower = " ".join(heading_texts + alt_texts + [basename_words]).lower()
     if not combined_lower.strip():
         return "generic", 0.0, []
@@ -379,7 +577,11 @@ def _score_icon_type(
             if kw in combined_lower:
                 scores[icon_type] += 1
                 # collect which source text matched (prefer real heading/alt text)
-                for txt in heading_texts + alt_texts + ([basename_words] if basename_words else []):
+                for txt in (
+                    heading_texts
+                    + alt_texts
+                    + ([basename_words] if basename_words else [])
+                ):
                     if kw in txt.lower() and txt not in matched_texts[icon_type]:
                         matched_texts[icon_type].append(txt)
 
@@ -433,7 +635,7 @@ def _scan_icon_contexts(
                 ctx["alt_texts"].append(cleaned_alt)
 
             # Nearest heading BEFORE the image (within 600 chars).
-            pre_window = content[max(0, img_pos - 600): img_pos]
+            pre_window = content[max(0, img_pos - 600) : img_pos]
             heading_matches = list(_HEADING_RE.finditer(pre_window))
             if heading_matches:
                 raw_h = heading_matches[-1].group(1)
@@ -442,7 +644,7 @@ def _scan_icon_contexts(
                     ctx["heading_texts"].append(h_text)
 
             # Nearest heading AFTER the image (within 400 chars).
-            post_window = content[img_pos: img_pos + 400]
+            post_window = content[img_pos : img_pos + 400]
             post_headings = list(_HEADING_RE.finditer(post_window))
             if post_headings:
                 raw_h = post_headings[0].group(1)
@@ -603,11 +805,15 @@ def write_inference_reports(
         ],
         "unresolved_icons": result.unresolved_icons,
     }
-    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     # ── Alias JSON ───────────────────────────────────────────────────────────
     alias_dict = build_alias_dict(result)
-    alias_path.write_text(json.dumps(alias_dict, indent=2, ensure_ascii=False), encoding="utf-8")
+    alias_path.write_text(
+        json.dumps(alias_dict, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     # ── Markdown report ──────────────────────────────────────────────────────
     lines: list[str] = []
@@ -641,7 +847,9 @@ def write_inference_reports(
         lines.append("")
 
     if tc.css_link_paths:
-        lines.append("**External CSS files referenced** (server-side; not included in export):")
+        lines.append(
+            "**External CSS files referenced** (server-side; not included in export):"
+        )
         lines.append("")
         for p in tc.css_link_paths[:8]:
             lines.append(f"- `{p}`")
@@ -668,12 +876,8 @@ def write_inference_reports(
     lines.append("## Icon Alias Suggestions")
     lines.append("")
     if result.icon_aliases:
-        lines.append(
-            "| D2L Icon | Type | Confidence | Canvas Candidates | Context |"
-        )
-        lines.append(
-            "|----------|------|------------|-------------------|---------|"
-        )
+        lines.append("| D2L Icon | Type | Confidence | Canvas Candidates | Context |")
+        lines.append("|----------|------|------------|-------------------|---------|")
         for e in sorted(result.icon_aliases, key=lambda x: -x.confidence):
             cands = ", ".join(f"`{c}`" for c in e.canvas_candidates)
             ctx_snippet = "; ".join(e.supporting_texts)[:80]
@@ -783,8 +987,10 @@ def main() -> None:
     print(f"  HTML files analysed : {result.html_files_analyzed}")
     print(f"  Brand primary color : {result.theme_colors.primary or '(none)'}")
     print(f"  Primary font        : {result.font_stacks.primary or '(none)'}")
-    print(f"  Icon aliases        : {len(result.icon_aliases)} resolved, "
-          f"{len(result.unresolved_icons)} unresolved")
+    print(
+        f"  Icon aliases        : {len(result.icon_aliases)} resolved, "
+        f"{len(result.unresolved_icons)} unresolved"
+    )
     print(f"")
     print(f"  Reports written to {output_dir}/")
     print(f"    {json_p.name}")

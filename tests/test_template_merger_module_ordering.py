@@ -9,6 +9,7 @@ Covers:
   _write_module_meta
   _write_course_settings
 """
+
 from __future__ import annotations
 
 import textwrap
@@ -111,7 +112,7 @@ class TestCoursePrefixFromManifest:
     def test_extracts_mat_prefix(self, tmp_path: Path):
         manifest = tmp_path / "imsmanifest.xml"
         manifest.write_text(
-            '<root><langstring>MAT 1450 Trigonometry</langstring></root>',
+            "<root><langstring>MAT 1450 Trigonometry</langstring></root>",
             encoding="utf-8",
         )
         assert _course_prefix_from_manifest(manifest) == "mat"
@@ -122,7 +123,9 @@ class TestCoursePrefixFromManifest:
 
     def test_returns_empty_when_no_langstring_matches(self, tmp_path: Path):
         manifest = tmp_path / "imsmanifest.xml"
-        manifest.write_text("<root><title>No prefix here</title></root>", encoding="utf-8")
+        manifest.write_text(
+            "<root><title>No prefix here</title></root>", encoding="utf-8"
+        )
         assert _course_prefix_from_manifest(manifest) == ""
 
 
@@ -413,7 +416,9 @@ class TestWriteModuleMeta:
         meta = tmp_path / "course_settings" / "module_meta.xml"
         first_mtime = meta.stat().st_mtime_ns
         _write_module_meta(tmp_path, ["Module 1", "Module 2"])
-        assert meta.stat().st_mtime_ns == first_mtime, "Should not overwrite existing file"
+        assert (
+            meta.stat().st_mtime_ns == first_mtime
+        ), "Should not overwrite existing file"
 
     def test_contains_course_conclusion(self, tmp_path: Path):
         _write_module_meta(tmp_path, [])

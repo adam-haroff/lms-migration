@@ -1172,7 +1172,9 @@ def run_template_merge(
     course_prefix = _course_prefix_from_manifest(manifest_path) if manifest_path else ""
     home_variant = _inject_home_page(unpack_dir, template_pages, course_prefix)
     if home_variant:
-        result.added_template_pages.append(f"wiki_content/home-page.html ({home_variant})")
+        result.added_template_pages.append(
+            f"wiki_content/home-page.html ({home_variant})"
+        )
 
     # ── Module ordering (Canvas module_meta.xml) ───────────────────────────
     # Read the D2L manifest to get the ordered list of content modules, then

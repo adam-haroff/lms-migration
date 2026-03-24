@@ -1511,10 +1511,12 @@ class TestAuditQuizQuestionTypes:
 
         xml1 = _qti_xml("Quiz A", ["Ordering"])
         xml2 = _qti_xml("Quiz B", ["Arithmetic"])
-        zp = _make_quiz_zip({
-            "quiz_d2l_007.xml": xml1,
-            "quiz_d2l_008.xml": xml2,
-        })
+        zp = _make_quiz_zip(
+            {
+                "quiz_d2l_007.xml": xml1,
+                "quiz_d2l_008.xml": xml2,
+            }
+        )
         rows = _audit_quiz_question_types(zp)
         assert len(rows) == 2
 

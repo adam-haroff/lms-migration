@@ -29,7 +29,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from lms_migration.canvas_api import CanvasAPIError, fetch_course_page, fetch_course_pages
+from lms_migration.canvas_api import (
+    CanvasAPIError,
+    fetch_course_page,
+    fetch_course_pages,
+)
 from lms_migration.html_tools import check_accessibility_heuristics
 
 
@@ -198,7 +202,9 @@ def compute_regressions(
         for entry in raw:
             page_identifier = Path(entry.get("file", "")).stem.lower()
             for issue in entry.get("accessibility_issues", []):
-                reason = issue.get("reason", "") if isinstance(issue, dict) else str(issue)
+                reason = (
+                    issue.get("reason", "") if isinstance(issue, dict) else str(issue)
+                )
                 pre_issues.add((page_identifier, reason.lower()))
 
     regressions: list[dict[str, Any]] = []
@@ -265,7 +271,9 @@ def write_a11y_reports(
             for r in result.results
         ],
     }
-    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     # ── Markdown ─────────────────────────────────────────────────────────────
     lines: list[str] = [
@@ -293,7 +301,7 @@ def write_a11y_reports(
             title = reg["page_title"].replace("|", "\\|")
             reason = reg["reason"].replace("|", "\\|")
             evidence = reg["evidence"][:80].replace("|", "\\|")
-            lines.append(f'| {title} | {reason} | `{evidence}` |')
+            lines.append(f"| {title} | {reason} | `{evidence}` |")
         lines.append("")
 
     if result.pages_with_issues:
@@ -390,7 +398,9 @@ def main() -> None:
             sys.exit(1)
 
     output_dir = args.output_dir or Path(".")
-    print(f"Auditing accessibility for Canvas course {args.course_id} …", file=sys.stderr)
+    print(
+        f"Auditing accessibility for Canvas course {args.course_id} …", file=sys.stderr
+    )
 
     try:
         result = audit_course_pages(

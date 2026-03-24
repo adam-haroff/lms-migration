@@ -45,13 +45,22 @@ def _make_page_data(title: str, body: str) -> dict:
 class TestAuditCoursePages:
     def test_no_issues_on_clean_page(self):
         pages = [_make_page_meta("intro", "Introduction")]
-        page_data = _make_page_data("Introduction", "<h1>Introduction</h1><p>Hello.</p>")
+        page_data = _make_page_data(
+            "Introduction", "<h1>Introduction</h1><p>Hello.</p>"
+        )
 
         with (
-            patch("lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages),
-            patch("lms_migration.canvas_a11y_audit.fetch_course_page", return_value=page_data),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages
+            ),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_page",
+                return_value=page_data,
+            ),
         ):
-            result = audit_course_pages(base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN)
+            result = audit_course_pages(
+                base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN
+            )
 
         assert result.pages_audited == 1
         assert result.pages_with_issues == 0
@@ -64,10 +73,17 @@ class TestAuditCoursePages:
         )
 
         with (
-            patch("lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages),
-            patch("lms_migration.canvas_a11y_audit.fetch_course_page", return_value=page_data),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages
+            ),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_page",
+                return_value=page_data,
+            ),
         ):
-            result = audit_course_pages(base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN)
+            result = audit_course_pages(
+                base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN
+            )
 
         assert result.pages_with_issues == 1
         assert result.total_issues >= 1
@@ -79,10 +95,17 @@ class TestAuditCoursePages:
         page_data = _make_page_data("Headers", "<h1>Title</h1><h3>Skip</h3>")
 
         with (
-            patch("lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages),
-            patch("lms_migration.canvas_a11y_audit.fetch_course_page", return_value=page_data),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages
+            ),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_page",
+                return_value=page_data,
+            ),
         ):
-            result = audit_course_pages(base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN)
+            result = audit_course_pages(
+                base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN
+            )
 
         reasons = [i["reason"] for r in result.results for i in r.issues]
         assert any("heading" in r.lower() for r in reasons)
@@ -99,10 +122,17 @@ class TestAuditCoursePages:
             return p1_data if page_url == "p1" else p2_data
 
         with (
-            patch("lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages),
-            patch("lms_migration.canvas_a11y_audit.fetch_course_page", side_effect=_fetch_page),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages
+            ),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_page",
+                side_effect=_fetch_page,
+            ),
         ):
-            result = audit_course_pages(base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN)
+            result = audit_course_pages(
+                base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN
+            )
 
         assert result.pages_audited == 2
         assert result.pages_with_issues == 1
@@ -118,38 +148,56 @@ class TestAuditCoursePages:
     def test_page_fetch_failure_skips_body(self):
         pages = [_make_page_meta("bad", "Bad Page")]
         with (
-            patch("lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages
+            ),
             patch(
                 "lms_migration.canvas_a11y_audit.fetch_course_page",
                 side_effect=CanvasAPIError("forbidden"),
             ),
         ):
-            result = audit_course_pages(base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN)
+            result = audit_course_pages(
+                base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN
+            )
 
         assert result.pages_audited == 1
         assert result.results[0].issue_count == 0  # skipped, not crashed
 
     def test_empty_course(self):
-        with patch("lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=[]):
-            result = audit_course_pages(base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN)
+        with patch(
+            "lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=[]
+        ):
+            result = audit_course_pages(
+                base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN
+            )
 
         assert result.pages_audited == 0
         assert result.total_issues == 0
 
     def test_page_without_url_skipped(self):
         pages = [{"title": "Orphan", "html_url": ""}]  # no "url" key
-        with patch("lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages):
-            result = audit_course_pages(base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN)
+        with patch(
+            "lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages
+        ):
+            result = audit_course_pages(
+                base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN
+            )
         assert result.pages_audited == 0
 
     def test_result_fields_populated(self):
         pages = [_make_page_meta("intro", "Intro")]
         data = _make_page_data("Intro", "<p>ok</p>")
         with (
-            patch("lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages),
-            patch("lms_migration.canvas_a11y_audit.fetch_course_page", return_value=data),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_pages", return_value=pages
+            ),
+            patch(
+                "lms_migration.canvas_a11y_audit.fetch_course_page", return_value=data
+            ),
         ):
-            result = audit_course_pages(base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN)
+            result = audit_course_pages(
+                base_url=BASE_URL, course_id=COURSE_ID, token=TOKEN
+            )
 
         assert result.course_id == COURSE_ID
         assert result.base_url == BASE_URL
@@ -183,12 +231,16 @@ class TestComputeRegressions:
             results=results,
         )
 
-    def _make_pre_import_json(self, tmp_path: Path, files: dict[str, list[str]]) -> Path:
+    def _make_pre_import_json(
+        self, tmp_path: Path, files: dict[str, list[str]]
+    ) -> Path:
         data = {
             "files": [
                 {
                     "file": f"{stem}.html",
-                    "accessibility_issues": [{"reason": r, "evidence": "..."} for r in reasons],
+                    "accessibility_issues": [
+                        {"reason": r, "evidence": "..."} for r in reasons
+                    ],
                 }
                 for stem, reasons in files.items()
             ]
@@ -199,13 +251,19 @@ class TestComputeRegressions:
 
     def test_no_regressions_when_same_issues(self, tmp_path):
         result = self._make_result({"intro": ["Image missing alt attribute"]})
-        pre = self._make_pre_import_json(tmp_path, {"intro": ["Image missing alt attribute"]})
+        pre = self._make_pre_import_json(
+            tmp_path, {"intro": ["Image missing alt attribute"]}
+        )
         regressions = compute_regressions(result, pre)
         assert regressions == []
 
     def test_new_issue_is_regression(self, tmp_path):
-        result = self._make_result({"intro": ["Image missing alt attribute", "Heading level jump detected"]})
-        pre = self._make_pre_import_json(tmp_path, {"intro": ["Image missing alt attribute"]})
+        result = self._make_result(
+            {"intro": ["Image missing alt attribute", "Heading level jump detected"]}
+        )
+        pre = self._make_pre_import_json(
+            tmp_path, {"intro": ["Image missing alt attribute"]}
+        )
         regressions = compute_regressions(result, pre)
         reasons = [r["reason"] for r in regressions]
         assert "Heading level jump detected" in reasons
@@ -252,7 +310,10 @@ class TestWriteA11yReports:
                     page_title="Introduction",
                     canvas_url=f"{BASE_URL}/pages/intro",
                     issues=[
-                        {"reason": "Image missing alt attribute", "evidence": "<img src=x>"},
+                        {
+                            "reason": "Image missing alt attribute",
+                            "evidence": "<img src=x>",
+                        },
                         {"reason": "Table missing caption", "evidence": "<table>"},
                     ],
                 ),
@@ -283,8 +344,16 @@ class TestWriteA11yReports:
         result = self._simple_result()
         json_p, _ = write_a11y_reports(result, tmp_path, "d2l-export")
         data = json.loads(json_p.read_text())
-        for key in ("course_id", "base_url", "pages_audited", "pages_with_issues",
-                    "total_issues", "regressions_count", "regressions", "results"):
+        for key in (
+            "course_id",
+            "base_url",
+            "pages_audited",
+            "pages_with_issues",
+            "total_issues",
+            "regressions_count",
+            "regressions",
+            "results",
+        ):
             assert key in data
 
     def test_json_contains_issues(self, tmp_path):

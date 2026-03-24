@@ -138,14 +138,21 @@ class TestExtractThemeColors:
 
     def test_most_frequent_is_primary(self):
         files = [
-            _make_html_file(styles=["color: #ac1a2f", "color: #ac1a2f", "color: #cf2a27"]),
+            _make_html_file(
+                styles=["color: #ac1a2f", "color: #ac1a2f", "color: #cf2a27"]
+            ),
         ]
         result = _extract_theme_colors(files)
         assert result.primary == "#ac1a2f"
         assert result.accent == "#cf2a27"
 
     def test_heading_colors_captured(self):
-        files = [("page.html", '<html><body><h2 style="color: #ac1a2f">Title</h2></body></html>')]
+        files = [
+            (
+                "page.html",
+                '<html><body><h2 style="color: #ac1a2f">Title</h2></body></html>',
+            )
+        ]
         result = _extract_theme_colors(files)
         assert "#ac1a2f" in result.heading_colors
 
@@ -192,7 +199,9 @@ class TestExtractFontStacks:
         assert result.primary is None or "&" not in result.primary
 
     def test_most_frequent_is_primary(self):
-        styles = ["font-family: Lato, sans-serif"] * 3 + ["font-family: Arial, sans-serif"]
+        styles = ["font-family: Lato, sans-serif"] * 3 + [
+            "font-family: Arial, sans-serif"
+        ]
         files = [_make_html_file(styles=styles)]
         result = _extract_font_stacks(files)
         assert result.primary == "lato, sans-serif"
@@ -246,7 +255,9 @@ class TestScoreIconType:
     def test_basename_fallback_courseinformation(self):
         # "course info" is in "Course Information" heading — basename alone
         # doesn't have a separator so heading context is needed for this one.
-        itype, conf, _ = _score_icon_type(["Course Information"], [], "courseinformation.png")
+        itype, conf, _ = _score_icon_type(
+            ["Course Information"], [], "courseinformation.png"
+        )
         assert itype == "overview"
         assert conf >= 0.3
 
@@ -347,7 +358,11 @@ class TestScanIconContexts:
 
 class TestBuildIconAliases:
     def _ctx(self, headings: list[str], alts: list[str], occurrences: int = 1):
-        return {"heading_texts": headings, "alt_texts": alts, "occurrences": occurrences}
+        return {
+            "heading_texts": headings,
+            "alt_texts": alts,
+            "occurrences": occurrences,
+        }
 
     def test_high_confidence_goes_to_resolved(self):
         contexts = {"explore.png": self._ctx(["Explore Resources"], ["Explore This"])}
@@ -431,11 +446,11 @@ class TestInferStyles:
 
     def test_basic_integration(self, tmp_path):
         html = (
-            '<html><body>'
-            '<h3>Explore Resources</h3>'
+            "<html><body>"
+            "<h3>Explore Resources</h3>"
             f'{_icon_img("explore.png", "Explore This")}'
             '<p style="color: #ac1a2f; font-family: Lato, sans-serif">text</p>'
-            '</body></html>'
+            "</body></html>"
         )
         zip_path = self._make_zip({"page.html": html}, tmp_path)
         result = infer_styles(zip_path)
@@ -468,13 +483,17 @@ class TestInferStyles:
         zip_path = self._make_zip({"page.html": html}, tmp_path)
         result = infer_styles(zip_path)
         alias_names = {e.source_basename for e in result.icon_aliases}
-        assert "mystery.png" not in alias_names or "mystery.png" in result.unresolved_icons
+        assert (
+            "mystery.png" not in alias_names or "mystery.png" in result.unresolved_icons
+        )
 
     def test_skip_icons_not_in_output(self, tmp_path):
         html = f'<html><body>{_icon_img("rule_brown_gradient.png")}</body></html>'
         zip_path = self._make_zip({"page.html": html}, tmp_path)
         result = infer_styles(zip_path)
-        all_names = {e.source_basename for e in result.icon_aliases} | set(result.unresolved_icons)
+        all_names = {e.source_basename for e in result.icon_aliases} | set(
+            result.unresolved_icons
+        )
         assert "rule_brown_gradient.png" not in all_names
 
 
@@ -516,8 +535,14 @@ class TestWriteInferenceReports:
         result = self._simple_result()
         json_p, _, _ = write_inference_reports(result, tmp_path, "d2l-export")
         data = json.loads(json_p.read_text())
-        for key in ("source_zip", "html_files_analyzed", "theme_colors", "font_stacks",
-                    "icon_aliases", "unresolved_icons"):
+        for key in (
+            "source_zip",
+            "html_files_analyzed",
+            "theme_colors",
+            "font_stacks",
+            "icon_aliases",
+            "unresolved_icons",
+        ):
             assert key in data, f"Missing key: {key}"
 
     def test_json_icon_alias_content(self, tmp_path):

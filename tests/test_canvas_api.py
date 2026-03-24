@@ -36,7 +36,15 @@ def _fake_response(body: bytes, headers: dict | None = None) -> MagicMock:
 
 
 def _http_error(code: int, body: bytes) -> HTTPError:
-    return HTTPError("https://canvas.example.com/api/v1/test", code, "Error", {}, io.BytesIO(body))
+    from http.client import HTTPMessage
+
+    return HTTPError(
+        "https://canvas.example.com/api/v1/test",
+        code,
+        "Error",
+        HTTPMessage(),
+        io.BytesIO(body),
+    )
 
 
 # ─── normalize_base_url ───────────────────────────────────────────────────────
@@ -44,10 +52,16 @@ def _http_error(code: int, body: bytes) -> HTTPError:
 
 class TestNormalizeBaseUrl:
     def test_strips_path(self):
-        assert normalize_base_url("https://canvas.example.com/courses/123") == "https://canvas.example.com"
+        assert (
+            normalize_base_url("https://canvas.example.com/courses/123")
+            == "https://canvas.example.com"
+        )
 
     def test_strips_trailing_slash(self):
-        assert normalize_base_url("https://canvas.example.com/") == "https://canvas.example.com"
+        assert (
+            normalize_base_url("https://canvas.example.com/")
+            == "https://canvas.example.com"
+        )
 
     def test_adds_https_when_no_scheme(self):
         assert normalize_base_url("canvas.example.com") == "https://canvas.example.com"
@@ -65,7 +79,10 @@ class TestNormalizeBaseUrl:
             normalize_base_url("   ")
 
     def test_valid_https_unchanged(self):
-        assert normalize_base_url("https://canvas.example.com") == "https://canvas.example.com"
+        assert (
+            normalize_base_url("https://canvas.example.com")
+            == "https://canvas.example.com"
+        )
 
     def test_strips_port_path(self):
         result = normalize_base_url("https://canvas.example.com:443/api/v1/test")
@@ -119,7 +136,9 @@ class TestBuildUrl:
         assert result == "https://canvas.example.com/api/v1/courses"
 
     def test_with_params(self):
-        result = _build_url("https://canvas.example.com", "/api/v1/courses", {"per_page": 100})
+        result = _build_url(
+            "https://canvas.example.com", "/api/v1/courses", {"per_page": 100}
+        )
         assert result == "https://canvas.example.com/api/v1/courses?per_page=100"
 
     def test_none_params(self):
@@ -131,7 +150,9 @@ class TestBuildUrl:
         assert result == "https://canvas.example.com/api/v1/courses"
 
     def test_list_param_doseq(self):
-        result = _build_url("https://canvas.example.com", "/path", {"include[]": ["items", "details"]})
+        result = _build_url(
+            "https://canvas.example.com", "/path", {"include[]": ["items", "details"]}
+        )
         assert "include" in result
         assert "items" in result
         assert "details" in result
@@ -145,20 +166,26 @@ class TestRequestJson:
         body = json.dumps([{"id": 1}, {"id": 2}]).encode()
         with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
             mock_open.return_value = _fake_response(body)
-            result, _ = _request_json(url="https://canvas.example.com/api/v1/test", token="tok")
+            result, _ = _request_json(
+                url="https://canvas.example.com/api/v1/test", token="tok"
+            )
         assert result == [{"id": 1}, {"id": 2}]
 
     def test_get_returns_dict(self):
         body = json.dumps({"id": 42, "name": "Course"}).encode()
         with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
             mock_open.return_value = _fake_response(body)
-            result, _ = _request_json(url="https://canvas.example.com/api/v1/course/1", token="tok")
+            result, _ = _request_json(
+                url="https://canvas.example.com/api/v1/course/1", token="tok"
+            )
         assert result == {"id": 42, "name": "Course"}
 
     def test_empty_body_returns_empty_list(self):
         with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
             mock_open.return_value = _fake_response(b"   ")
-            result, _ = _request_json(url="https://canvas.example.com/api/v1/test", token="tok")
+            result, _ = _request_json(
+                url="https://canvas.example.com/api/v1/test", token="tok"
+            )
         assert result == []
 
     def test_http_error_404_raises(self):
@@ -169,7 +196,12 @@ class TestRequestJson:
                 _request_json(url="https://canvas.example.com/api/v1/test", token="tok")
 
     def test_http_error_unauthenticated_body(self):
-        body = json.dumps({"status": "unauthenticated", "errors": [{"message": "Invalid access token."}]}).encode()
+        body = json.dumps(
+            {
+                "status": "unauthenticated",
+                "errors": [{"message": "Invalid access token."}],
+            }
+        ).encode()
         exc = _http_error(401, body)
         with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
             mock_open.side_effect = exc
@@ -209,7 +241,9 @@ class TestRequestJson:
         body = json.dumps([]).encode()
         with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
             mock_open.return_value = _fake_response(body)
-            _request_json(url="https://canvas.example.com/api/v1/test", token="mytoken123")
+            _request_json(
+                url="https://canvas.example.com/api/v1/test", token="mytoken123"
+            )
         req = mock_open.call_args[0][0]
         assert req.get_header("Authorization") == "Bearer mytoken123"
 
@@ -220,7 +254,9 @@ class TestRequestJson:
 class TestFetchPaginatedList:
     def test_empty_token_raises(self):
         with pytest.raises(CanvasAPIError, match="[Tt]oken"):
-            _fetch_paginated_list(first_url="https://canvas.example.com/api/v1/test", token="  ")
+            _fetch_paginated_list(
+                first_url="https://canvas.example.com/api/v1/test", token="  "
+            )
 
     def test_single_page_no_link_header(self):
         body = json.dumps([{"id": 1}, {"id": 2}]).encode()
@@ -234,7 +270,9 @@ class TestFetchPaginatedList:
     def test_follows_pagination(self):
         page1 = json.dumps([{"id": 1}, {"id": 2}]).encode()
         page2 = json.dumps([{"id": 3}]).encode()
-        headers1 = {"Link": '<https://canvas.example.com/api/v1/test?page=2>; rel="next"'}
+        headers1 = {
+            "Link": '<https://canvas.example.com/api/v1/test?page=2>; rel="next"'
+        }
         headers2 = {}
 
         with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
