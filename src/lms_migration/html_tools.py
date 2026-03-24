@@ -3124,3 +3124,93 @@ def detect_d2l_media_library_embeds(content: str) -> list[ManualReviewIssue]:
             )
         ]
     return []
+
+
+_EMAIL_SUBMISSION_KEYWORDS_RE = re.compile(
+    r"\b(submit(?:ting)?|submission|turn\s+in|assignment|homework|project|paper|essay)\b",
+    re.IGNORECASE,
+)
+
+_EMAIL_SUBMISSION_PHRASE_RE = re.compile(
+    r"(?:"
+    r"email\s+your\s+(?:assignment|submission|work|project|homework|paper|essay|file)"
+    r"|submit\s+(?:it\s+)?(?:via|by|through|using)\s+email"
+    r"|send\s+your\s+(?:assignment|submission|work|project|homework)\s+(?:to|via)\s+email"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def detect_email_submission_issues(content: str) -> list[ManualReviewIssue]:
+    """Detect email-based assignment submission workflows.
+
+    D2L course pages sometimes instruct students to submit work by emailing
+    their instructor.  Canvas does not support this natively — the correct
+    approach is a Canvas Assignment with submission type "Online" (File Uploads
+    or Text Entry).  This function surfaces two patterns:
+
+    1. A ``mailto:`` link whose visible text or immediately preceding text
+       contains submission keywords (submit, assignment, homework, etc.).
+    2. Explicit text phrases such as "email your assignment" or "submit via
+       email", even when no ``mailto:`` link is present.
+
+    One issue is reported per unique email address found, plus one issue for a
+    phrase-only detection when no ``mailto:`` link was flagged.
+
+    Args:
+        content: Full HTML document string.
+
+    Returns:
+        A list of :class:`ManualReviewIssue` objects.
+    """
+    issues: list[ManualReviewIssue] = []
+    seen_addresses: set[str] = set()
+
+    # Pattern 1: mailto: link with submission keywords in link text or
+    # immediately preceding text (80 characters before the opening <a> tag).
+    for tag_match in re.finditer(
+        r"<a\b[^>]*href\s*=\s*[\"']mailto:([^\"\'?\s]+)[^\"']*[\"'][^>]*>(.*?)</a>",
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        address = tag_match.group(1).strip().lower()
+        if address in seen_addresses:
+            continue
+
+        visible_text = re.sub(r"<[^>]+>", " ", tag_match.group(2))
+        pre_start = max(0, tag_match.start() - 80)
+        pre_context = re.sub(r"<[^>]+>", " ", content[pre_start : tag_match.start()])
+        check_text = visible_text + " " + pre_context
+
+        if _EMAIL_SUBMISSION_KEYWORDS_RE.search(check_text):
+            seen_addresses.add(address)
+            issues.append(
+                ManualReviewIssue(
+                    reason=(
+                        "Email-based submission workflow detected "
+                        "— convert to Canvas online submission assignment"
+                    ),
+                    evidence=tag_match.group(0)[:240],
+                )
+            )
+
+    # Pattern 2: Explicit phrases in plain text (reported only when no
+    # mailto: issues were found, to avoid double-reporting).
+    if not issues:
+        plain_text = re.sub(r"<[^>]+>", " ", content)
+        phrase_match = _EMAIL_SUBMISSION_PHRASE_RE.search(plain_text)
+        if phrase_match:
+            snippet = plain_text[
+                max(0, phrase_match.start() - 50) : phrase_match.end() + 50
+            ].strip()
+            issues.append(
+                ManualReviewIssue(
+                    reason=(
+                        "Email-based submission workflow detected "
+                        "— convert to Canvas online submission assignment"
+                    ),
+                    evidence=snippet[:240],
+                )
+            )
+
+    return issues

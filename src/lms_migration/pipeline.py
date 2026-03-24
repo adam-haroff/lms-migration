@@ -29,6 +29,7 @@ from .html_tools import (
     detect_lti_embed_issues,
     detect_iframe_issues,
     detect_d2l_media_library_embeds,
+    detect_email_submission_issues,
     detect_manual_review_issues,
     neutralize_legacy_d2l_hrefs_in_markup,
     repair_missing_local_references,
@@ -1969,6 +1970,7 @@ def _write_preflight_checklist(
         "lti_embed_reconfiguration": "LTI embed",
         "rubric_import_setup": "D2L rubric",
         "d2l_media_library_migration": "D2L media library",
+        "email_submission_workflow": "Email submission",
         "graded_discussion_setup": "Graded discussion",
         "assignment_availability_window": "Availability window",
         "gradebook_drop_rule_setup": "Gradebook drop rule",
@@ -2364,6 +2366,7 @@ def run_migration(
             manual_issues.extend(detect_lti_embed_issues(original))
             manual_issues.extend(detect_iframe_issues(updated))
             manual_issues.extend(detect_d2l_media_library_embeds(original))
+            manual_issues.extend(detect_email_submission_issues(original))
             a11y_issues = check_accessibility_heuristics(updated)
 
             changed = updated != original
@@ -2538,6 +2541,7 @@ def run_migration(
                 manual_issues.extend(detect_lti_embed_issues(original))
                 manual_issues.extend(detect_iframe_issues(updated))
                 manual_issues.extend(detect_d2l_media_library_embeds(original))
+                manual_issues.extend(detect_email_submission_issues(original))
                 a11y_issues = check_accessibility_heuristics(updated)
 
                 changed = updated != original
@@ -2727,6 +2731,9 @@ def run_migration(
                     # Detect on original: sanitizer neutralises quickLink hrefs.
                     intro_manual_issues.extend(detect_lti_embed_issues(intro_original))
                     intro_manual_issues.extend(detect_iframe_issues(intro_updated))
+                    intro_manual_issues.extend(
+                        detect_email_submission_issues(intro_original)
+                    )
                     intro_a11y_issues = check_accessibility_heuristics(intro_updated)
 
                     _upsert_file_result(
@@ -2933,6 +2940,7 @@ def run_migration(
                 # Detect on original: sanitizer neutralises quickLink hrefs.
                 final_manual_issues.extend(detect_lti_embed_issues(original))
                 final_manual_issues.extend(detect_iframe_issues(updated))
+                final_manual_issues.extend(detect_email_submission_issues(original))
                 final_a11y_issues = check_accessibility_heuristics(updated)
                 _upsert_file_result(
                     file_results,

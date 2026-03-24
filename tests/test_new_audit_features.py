@@ -19,6 +19,7 @@ import pytest
 from lms_migration.html_tools import (
     detect_d2l_media_library_embeds,
     detect_lti_embed_issues,
+    detect_email_submission_issues,
 )
 from lms_migration.fix_checklist import _map_manual_review_group
 from lms_migration.quiz_audit import (
@@ -88,6 +89,104 @@ class TestDetectD2LMediaLibraryEmbeds:
         )
         assert priority == "P1"
         assert category == "d2l_media_library_migration"
+
+
+# ===========================================================================
+# Email-based submission detection
+# ===========================================================================
+
+
+class TestDetectEmailSubmissionIssues:
+    """detect_email_submission_issues() flags mailto: links used for assignment
+    submission and explicit 'email your assignment'-style phrases."""
+
+    def test_mailto_link_with_submit_in_text_flagged(self):
+        html = '<p>Submit your assignment: <a href="mailto:prof@college.edu">Email me</a></p>'
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+        assert "email-based submission" in issues[0].reason.lower()
+
+    def test_mailto_link_with_assignment_link_text(self):
+        html = '<a href="mailto:prof@college.edu">Submit your assignment here</a>'
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+
+    def test_mailto_link_with_homework_link_text(self):
+        html = '<a href="mailto:prof@college.edu">Email your homework</a>'
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+
+    def test_mailto_link_with_preceding_submission_text(self):
+        html = '<p>Turn in your assignment by </p><a href="mailto:prof@college.edu">clicking here</a>'
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+
+    def test_mailto_link_no_submission_context_not_flagged(self):
+        html = '<p>Contact the library: <a href="mailto:library@college.edu">Email library</a></p>'
+        issues = detect_email_submission_issues(html)
+        assert issues == []
+
+    def test_one_issue_per_unique_address(self):
+        html = (
+            '<p>Submit here: <a href="mailto:prof@college.edu">Email prof</a></p>'
+            '<p>Also submit: <a href="mailto:prof@college.edu">Email prof again</a></p>'
+        )
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+
+    def test_phrase_email_your_assignment_detected(self):
+        html = "<p>Email your assignment to your instructor before midnight.</p>"
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+        assert "email-based submission" in issues[0].reason.lower()
+
+    def test_phrase_submit_via_email_detected(self):
+        html = "<p>You must submit via email using the address provided.</p>"
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+
+    def test_phrase_submit_by_email_detected(self):
+        html = "<p>Submit by email before the due date.</p>"
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+
+    def test_phrase_email_your_homework_detected(self):
+        html = "<p>Email your homework to the instructor.</p>"
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+
+    def test_clean_page_returns_empty(self):
+        html = "<p>Complete the quiz in Canvas. No email submissions.</p>"
+        issues = detect_email_submission_issues(html)
+        assert issues == []
+
+    def test_phrase_only_one_issue_when_mailto_present(self):
+        # When a mailto: link already fired, the phrase detector should not add a second issue.
+        html = (
+            "<p>Submit your assignment here: "
+            '<a href="mailto:prof@college.edu">Email my homework</a>. '
+            "Email your homework before midnight.</p>"
+        )
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+
+    def test_reason_string_routes_to_correct_checklist_category(self):
+        html = "<p>Submit by email before Friday.</p>"
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+        priority, category, _owner, action = _map_manual_review_group(
+            "manual_review", issues[0].reason
+        )
+        assert priority == "P1"
+        assert category == "email_submission_workflow"
+        assert "canvas" in action.lower()
+
+    def test_action_mentions_submission_type(self):
+        html = "<p>Email your assignment.</p>"
+        issues = detect_email_submission_issues(html)
+        assert len(issues) == 1
+        _, _, _, action = _map_manual_review_group("manual_review", issues[0].reason)
+        assert "submission type" in action.lower() or "online" in action.lower()
 
 
 # ===========================================================================

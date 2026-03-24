@@ -141,6 +141,17 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "then update each embed/link to point to the new Canvas location. "
             "D2L ouFileId and /d2l/lp/media/ URLs will not resolve after migration.",
         )
+    if "email-based submission workflow detected" in lowered:
+        return (
+            "P1",
+            "email_submission_workflow",
+            "Faculty/ID",
+            "Replace the email submission instruction with a Canvas Assignment. "
+            "In Canvas: Assignments > + Assignment > set Submission Type = Online > "
+            "check File Uploads and/or Text Entry. Remove or replace the mailto: link "
+            "in the page content so students are directed to the Canvas assignment "
+            "instead of emailing their work. Set the correct point value and due date.",
+        )
     if "graded discussion detected" in lowered:
         return (
             "P1",
