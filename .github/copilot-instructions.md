@@ -96,11 +96,11 @@ Converts Bootstrap card accordions. Pattern: `card > card-header + collapse > ca
 These run on **pre-sanitized** content in the pipeline (critical: the sanitizer neutralises
 `/d2l/` hrefs to `#` before detection would find them):
 
-| Function                                     | What it detects                                                                                     |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `detect_lti_embed_issues(content)`           | Panopto/Kaltura/YuJa iframes AND D2L quickLink LTI iframes/hrefs (`quickLink.d2l?type=lti`)         |
-| `detect_d2l_media_library_embeds(content)`   | `ouFileId=`, `/d2l/lp/media/`, `/d2l/tools/mediaLibrary/` — files that will be missing post-import |
-| `detect_email_submission_issues(content)`    | `mailto:` links near submission keywords AND phrases like "email your assignment" / "submit via email" |
+| Function                                   | What it detects                                                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `detect_lti_embed_issues(content)`         | Panopto/Kaltura/YuJa iframes AND D2L quickLink LTI iframes/hrefs (`quickLink.d2l?type=lti`)            |
+| `detect_d2l_media_library_embeds(content)` | `ouFileId=`, `/d2l/lp/media/`, `/d2l/tools/mediaLibrary/` — files that will be missing post-import     |
+| `detect_email_submission_issues(content)`  | `mailto:` links near submission keywords AND phrases like "email your assignment" / "submit via email" |
 
 **quickLink LTI pattern**: `/d2l/common/dialogs/quickLink/quickLink.d2l?ou=…&type=lti&rCode=sinclairc-…`
 — appears as both `<iframe src>` and `<a href>` tags. Detected by `detect_lti_embed_issues`.
@@ -133,16 +133,16 @@ Emits reason: `"LTI tool embed (D2L QuickLink) — reconfigure as Canvas LTI ext
 These functions run inside `_append_xml_audit_rows_to_csv()` and emit rows to the
 `d2l-export.manual-review.csv` with `type="d2l_xml_audit"`. Each row feeds `fix_checklist.py`.
 
-| Function                              | Source file(s)          | What it audits                                                                        |
-| ------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------- |
-| `_audit_graded_discussions()`         | `*_discussions_d2l.xml` | Discussions with grade-category associations — may silently lose gradebook connection |
-| `_audit_availability_windows()`       | `*_grades_d2l.xml`      | Grade items with start/end date windows — need manual re-entry in Canvas              |
-| `_audit_gradebook_groups()`           | `*_grades_d2l.xml`      | Assignment groups with drop-lowest/drop-highest rules and extra-credit (bonus) items  |
-| `_audit_rubrics()`                    | `rubrics_d2l.xml`       | Per-rubric inventory: name, criteria count, level count, scoring method, Range hint   |
-| `_audit_date_shift_items()`           | course XML + grades XML | Course start-date advisory + items with explicit availability windows                 |
-| `_audit_dropbox_folders()`            | `dropbox_d2l.xml`       | D2L Dropbox folders (not auto-imported by Canvas) — one P1 item per folder            |
-| `_audit_unresolvable_grade_items()`   | grades XML + manifest   | Grade items with no Canvas-importable submission object (e.g., Cengage columns)       |
-| `_audit_quiz_settings_inventory()`    | `quiz_d2l_*.xml`        | One P1 row per quiz with time limit/attempts/shuffle/window for manual re-entry       |
+| Function                            | Source file(s)          | What it audits                                                                        |
+| ----------------------------------- | ----------------------- | ------------------------------------------------------------------------------------- |
+| `_audit_graded_discussions()`       | `*_discussions_d2l.xml` | Discussions with grade-category associations — may silently lose gradebook connection |
+| `_audit_availability_windows()`     | `*_grades_d2l.xml`      | Grade items with start/end date windows — need manual re-entry in Canvas              |
+| `_audit_gradebook_groups()`         | `*_grades_d2l.xml`      | Assignment groups with drop-lowest/drop-highest rules and extra-credit (bonus) items  |
+| `_audit_rubrics()`                  | `rubrics_d2l.xml`       | Per-rubric inventory: name, criteria count, level count, scoring method, Range hint   |
+| `_audit_date_shift_items()`         | course XML + grades XML | Course start-date advisory + items with explicit availability windows                 |
+| `_audit_dropbox_folders()`          | `dropbox_d2l.xml`       | D2L Dropbox folders (not auto-imported by Canvas) — one P1 item per folder            |
+| `_audit_unresolvable_grade_items()` | grades XML + manifest   | Grade items with no Canvas-importable submission object (e.g., Cengage columns)       |
+| `_audit_quiz_settings_inventory()`  | `quiz_d2l_*.xml`        | One P1 row per quiz with time limit/attempts/shuffle/window for manual re-entry       |
 
 ### `_audit_rubrics()` — details
 
@@ -161,23 +161,23 @@ D2L rubrics are NOT migrated by Canvas IMSCC import and must be recreated manual
 `_map_manual_review_group(issue_type, reason)` is the central dispatch. Returns
 `(priority, category, owner, action)`. Key categories:
 
-| Category                          | Priority | Trigger (in lowered reason)                                             |
-| --------------------------------- | -------- | ----------------------------------------------------------------------- |
-| `lti_quicklink_reconfiguration`   | P1       | `"d2l quicklink"` AND `"lti tool embed"` (checked BEFORE generic LTI)   |
-| `lti_embed_reconfiguration`       | P1       | `"lti tool embed"` (generic fallback for Panopto, Kaltura, etc.)        |
-| `rubric_import_setup`             | P1       | `"d2l rubric detected"`                                                 |
-| `d2l_media_library_migration`     | P1       | `"d2l media library content detected"`                                  |
-| `email_submission_workflow`       | P1       | `"email-based submission workflow detected"`                            |
-| `graded_discussion_setup`         | P1       | `"graded discussion detected"`                                          |
-| `dropbox_assignment_setup`        | P1       | `"d2l dropbox assignment detected"`                                     |
-| `unresolvable_grade_item_setup`   | P1       | `"unresolvable grade item"`                                             |
-| `assignment_availability_window`  | P1       | `"availability window"`                                                 |
-| `gradebook_drop_rule_setup`       | P1       | `"gradebook group"`                                                     |
-| `extra_credit_setup`              | P1       | `"extra credit"` OR `"bonus"`                                           |
-| `canvas_date_shift_setup`         | P1       | `"course start date"`                                                   |
-| `quiz_date_window_verification`   | P1       | `"quiz availability window detected"`                                   |
-| `quiz_settings_inventory`         | P1       | `"quiz settings inventory"`                                             |
-| `new_quizzes_question_type_rebuild` | P1/P2  | `"new quizzes question-type compatibility risk"`                        |
+| Category                            | Priority | Trigger (in lowered reason)                                           |
+| ----------------------------------- | -------- | --------------------------------------------------------------------- |
+| `lti_quicklink_reconfiguration`     | P1       | `"d2l quicklink"` AND `"lti tool embed"` (checked BEFORE generic LTI) |
+| `lti_embed_reconfiguration`         | P1       | `"lti tool embed"` (generic fallback for Panopto, Kaltura, etc.)      |
+| `rubric_import_setup`               | P1       | `"d2l rubric detected"`                                               |
+| `d2l_media_library_migration`       | P1       | `"d2l media library content detected"`                                |
+| `email_submission_workflow`         | P1       | `"email-based submission workflow detected"`                          |
+| `graded_discussion_setup`           | P1       | `"graded discussion detected"`                                        |
+| `dropbox_assignment_setup`          | P1       | `"d2l dropbox assignment detected"`                                   |
+| `unresolvable_grade_item_setup`     | P1       | `"unresolvable grade item"`                                           |
+| `assignment_availability_window`    | P1       | `"availability window"`                                               |
+| `gradebook_drop_rule_setup`         | P1       | `"gradebook group"`                                                   |
+| `extra_credit_setup`                | P1       | `"extra credit"` OR `"bonus"`                                         |
+| `canvas_date_shift_setup`           | P1       | `"course start date"`                                                 |
+| `quiz_date_window_verification`     | P1       | `"quiz availability window detected"`                                 |
+| `quiz_settings_inventory`           | P1       | `"quiz settings inventory"`                                           |
+| `new_quizzes_question_type_rebuild` | P1/P2    | `"new quizzes question-type compatibility risk"`                      |
 
 **Handler order matters**: `lti_quicklink_reconfiguration` is checked before `lti_embed_reconfiguration`
 so the D2L quickLink reason string doesn't fall through to the generic handler.

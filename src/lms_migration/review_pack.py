@@ -1735,8 +1735,11 @@ def _write_html(
         const surface = getSurface(shell);
         if (!surface) return;
         pushUndo(shell);
-        surface.focus();
+        // Read saved range BEFORE surface.focus() — calling focus() fires
+        // selectionchange which would overwrite savedRanges with the post-focus
+        // cursor position, discarding the user's text selection.
         const saved = savedRanges.get(shell);
+        surface.focus();
         if (saved) {{
           const s = window.getSelection();
           s.removeAllRanges();
@@ -1774,8 +1777,11 @@ def _write_html(
         const surface = getSurface(shell);
         if (!surface) return;
         pushUndo(shell);
-        surface.focus();
+        // Read saved range BEFORE surface.focus() — calling focus() fires
+        // selectionchange which would overwrite savedRanges with the post-focus
+        // cursor position, discarding the user's text selection.
         const saved = savedRanges.get(shell);
+        surface.focus();
         if (saved) {{
           const sel = window.getSelection();
           sel.removeAllRanges();

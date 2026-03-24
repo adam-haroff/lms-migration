@@ -32,7 +32,7 @@ import json
 import re
 import zipfile
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -817,19 +817,19 @@ def write_inference_reports(
 
     # ── Markdown report ──────────────────────────────────────────────────────
     lines: list[str] = []
-    lines.append(f"# Style Inference Report")
-    lines.append(f"")
+    lines.append("# Style Inference Report")
+    lines.append("")
     lines.append(f"**Source:** `{result.source_zip}`  ")
     lines.append(f"**HTML files analyzed:** {result.html_files_analyzed}")
-    lines.append(f"")
+    lines.append("")
 
     # Colors
     lines.append("## Brand Color Palette")
     lines.append("")
     tc = result.theme_colors
     if tc.primary:
-        lines.append(f"| Role | Hex |")
-        lines.append(f"|------|-----|")
+        lines.append("| Role | Hex |")
+        lines.append("|------|-----|")
         lines.append(f"| Primary | `{tc.primary}` |")
         if tc.accent:
             lines.append(f"| Accent | `{tc.accent}` |")
@@ -991,7 +991,7 @@ def main() -> None:
         f"  Icon aliases        : {len(result.icon_aliases)} resolved, "
         f"{len(result.unresolved_icons)} unresolved"
     )
-    print(f"")
+    print("")
     print(f"  Reports written to {output_dir}/")
     print(f"    {json_p.name}")
     print(f"    {md_p.name}")

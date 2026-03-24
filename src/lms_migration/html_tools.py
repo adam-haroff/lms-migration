@@ -557,6 +557,98 @@ def _convert_syllabus_row_header_table_to_list(
     )
 
 
+def _normalize_course_outline_columns(inner_html: str) -> str:
+    """For course-outline tables: drop WEEK-number and DUE-DATE columns; rename
+    TOPICS→Modules, ASSIGNMENTS→Activities, CHAPTER/CHAPTERS→Chapter in header
+    cells; replace ``Topic N`` prefix with ``Module N`` in the Modules data column.
+    """
+    # Patterns to find rows and the cells within each row.
+    row_re = re.compile(r"(<tr\b[^>]*>)(.*?)(</tr>)", re.IGNORECASE | re.DOTALL)
+    cell_re = re.compile(
+        r"(<(?:th|td)\b[^>]*>)(.*?)(</(?:th|td)>)", re.IGNORECASE | re.DOTALL
+    )
+
+    # ---- Locate the header row and decide what to do per column ----
+    drop_cols: set[int] = set()
+    rename_cols: dict[int, str] = {}
+    modules_col: int | None = None
+
+    header_row_idx: int | None = None
+    rows_list = list(row_re.finditer(inner_html))
+    for row_idx, row_m in enumerate(rows_list):
+        cells = list(cell_re.finditer(row_m.group(2)))
+        has_col_header = any(
+            re.search(r'\bscope\s*=\s*["\']col["\']', c.group(1), re.IGNORECASE)
+            for c in cells
+        )
+        if not has_col_header:
+            continue
+        header_row_idx = row_idx
+        for col_idx, c in enumerate(cells):
+            text = re.sub(r"<[^>]+>", "", c.group(2)).strip().lower()
+            text = re.sub(r"\s+", " ", text)
+            if re.match(
+                r"^(?:\d{1,2}[-\s]?week|week(?:\s+(?:#|no\.?|number))?)$", text
+            ):
+                drop_cols.add(col_idx)
+            elif re.match(r"^due\s*dates?$", text):
+                drop_cols.add(col_idx)
+            elif re.match(r"^topics?$", text):
+                rename_cols[col_idx] = "Modules"
+                modules_col = col_idx
+            elif re.match(r"^chapters?$", text):
+                rename_cols[col_idx] = "Chapter"
+            elif re.match(r"^assignments?$", text):
+                rename_cols[col_idx] = "Activities"
+        break
+
+    if header_row_idx is None or (not drop_cols and not rename_cols):
+        return inner_html
+
+    # ---- Rebuild inner HTML, processing every row ----
+    parts: list[str] = []
+    last = 0
+    for row_idx, row_m in enumerate(rows_list):
+        parts.append(inner_html[last : row_m.start()])
+        last = row_m.end()
+
+        row_open = row_m.group(1)
+        row_inner = row_m.group(2)
+        row_close = row_m.group(3)
+
+        cells = list(cell_re.finditer(row_inner))
+        is_header_row = row_idx == header_row_idx
+
+        new_inner_parts: list[str] = []
+        prev_cell_end = 0
+        for col_idx, c in enumerate(cells):
+            new_inner_parts.append(row_inner[prev_cell_end : c.start()])
+            prev_cell_end = c.end()
+
+            if col_idx in drop_cols:
+                continue  # skip this column entirely
+
+            cell_open = c.group(1)
+            cell_content = c.group(2)
+            cell_close = c.group(3)
+
+            if is_header_row and col_idx in rename_cols:
+                cell_content = html.escape(rename_cols[col_idx])
+            elif not is_header_row and col_idx == modules_col:
+                # Replace "Topic N:" / "Topic N" prefix with "Module N:" / "Module N"
+                cell_content = re.sub(
+                    r"\bTopic\b", "Module", cell_content, flags=re.IGNORECASE
+                )
+
+            new_inner_parts.append(cell_open + cell_content + cell_close)
+
+        new_inner_parts.append(row_inner[prev_cell_end:])
+        parts.append(row_open + "".join(new_inner_parts) + row_close)
+
+    parts.append(inner_html[last:])
+    return "".join(parts)
+
+
 def _normalize_single_syllabus_table(table_html: str) -> tuple[str, int, str]:
     opening_match = re.match(
         r"<table\b[^>]*>", table_html, flags=re.IGNORECASE | re.DOTALL
@@ -616,16 +708,13 @@ def _normalize_single_syllabus_table(table_html: str) -> tuple[str, int, str]:
         role = "office-hours"
 
     caption_text = existing_caption_text
-    if not caption_text:
-        normalized_summary = summary_text.lower()
-        if role == "course-outline":
-            if "16-week" in text_snapshot:
-                caption_text = "Course Outline (16-Week)"
-            elif "12-week" in text_snapshot:
-                caption_text = "Course Outline (12-Week)"
-            else:
-                caption_text = "Course Outline"
-        elif role == "class-meeting-schedule":
+    normalized_summary = summary_text.lower()
+    if role == "course-outline":
+        # Always use the canonical caption, stripping any schedule-variant suffix
+        # (e.g. "(16-Week)") that may have been in the source or a prior migration run.
+        caption_text = "Course Outline"
+    elif not caption_text:
+        if role == "class-meeting-schedule":
             caption_text = "Class Meeting Schedule"
         elif role == "assignment-weights":
             caption_text = "Assignment Weights"
@@ -695,6 +784,9 @@ def _normalize_single_syllabus_table(table_html: str) -> tuple[str, int, str]:
         )
         if list_markup is not None:
             return list_markup, nested_updates + 1, caption_text
+
+    if role == "course-outline":
+        normalized_inner = _normalize_course_outline_columns(normalized_inner)
 
     row_tag_pattern = re.compile(r"<tr\b[^>]*>", flags=re.IGNORECASE | re.DOTALL)
     normalized_rows = 0
@@ -1444,6 +1536,35 @@ def apply_canvas_sanitizer(
                 )
             )
 
+        # Pre-pass: Replace D2L horizontal-rule separator images with <hr>.
+        # Brightspace uses images like "Rule_brown_gradient.png" (in standardImages/)
+        # as section dividers.  They are typically wrapped in a lone <p> (optionally
+        # inside a <span>) and should become plain grey Canvas section separators.
+        _d2l_rule_img_para_re = re.compile(
+            r"<p\b[^>]*>"
+            r"(?:\s*<span\b[^>]*>)?"
+            r"\s*<img\b[^>]*\bsrc\s*=\s*([\"'])[^\"']*standardImages/Rule[^\"']*\1[^>]*>"
+            r"\s*(?:</span>)?"
+            r"\s*</p>",
+            flags=re.IGNORECASE,
+        )
+        replaced_rule_imgs = 0
+
+        def _replace_rule_img_para(m: re.Match[str]) -> str:
+            nonlocal replaced_rule_imgs
+            replaced_rule_imgs += 1
+            return "<hr>"
+
+        updated = _d2l_rule_img_para_re.sub(_replace_rule_img_para, updated)
+        if replaced_rule_imgs:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Replaced D2L horizontal-rule images with <hr> section separators",
+                    count=replaced_rule_imgs,
+                )
+            )
+
         img_pattern = re.compile(
             r"<img\b[^>]*\bsrc\s*=\s*([\"'])(?P<src>[^\"']+)\1[^>]*>",
             flags=re.IGNORECASE,
@@ -2020,24 +2141,24 @@ def apply_canvas_sanitizer(
                 flags=re.IGNORECASE,
             )
             if style_match is None:
-                normalized_style = "border: 0; height: 2px; background-color: #ac1a2f; width: 100%; margin: 16px 0;"
-                if tag.endswith("/>"):
-                    rebuilt = f'{tag[:-2].rstrip()} style="{normalized_style}" />'
-                else:
-                    rebuilt = f'{tag[:-1].rstrip()} style="{normalized_style}">'
-                if rebuilt != tag:
-                    normalized_hr_count += 1
-                return rebuilt
+                # Bare <hr> — leave as-is.  In Canvas this renders as a thin
+                # grey browser-default separator line, which is the correct look
+                # for inter-section dividers on module pages.
+                return tag
             style_text = style_match.group("style")
-            color_match = re.search(
-                r"(?:background-color|color|border(?:-top)?(?:-color)?)\s*:\s*(?P<color>#[0-9a-f]{3,8}|[a-z]+)",
+            # Already in canonical Sinclair thick-closing-divider format — preserve.
+            if re.search(
+                r"border-top\s*:\s*\d+px\s+solid\s+#[aA][cC]1[aA]2[fF]",
                 style_text,
-                flags=re.IGNORECASE,
+            ):
+                return tag
+            # All other styled <hr> tags (e.g. D2L's flat background-color red
+            # banner bar) are converted to a neutral thin grey separator so that
+            # no D2L template colouring bleeds into the Canvas page.
+            normalized_style = (
+                "border: 0; height: 1px; background-color: #cccccc;"
+                " width: 100%; margin: 16px 0;"
             )
-            color_value = (
-                color_match.group("color") if color_match is not None else "#ac1a2f"
-            )
-            normalized_style = f"border: 0; height: 2px; background-color: {color_value}; width: 100%; margin: 16px 0;"
             rebuilt = (
                 tag[: style_match.start("style")]
                 + normalized_style

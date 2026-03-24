@@ -2243,7 +2243,9 @@ class TestFixChecklistQuizSettingsInventory:
 class TestSuggestAltText:
     """Unit tests for _suggest_alt_text() context-inference helper."""
 
-    def _suggest(self, img_tag: str, content_before: str = "", content_after: str = "") -> str | None:
+    def _suggest(
+        self, img_tag: str, content_before: str = "", content_after: str = ""
+    ) -> str | None:
         """Build a minimal full-content string and call _suggest_alt_text."""
         content = content_before + img_tag + content_after
         start = len(content_before)
@@ -2331,10 +2333,7 @@ class TestSuggestAltText:
     # ---- integration: evidence field in check_accessibility_heuristics ----
 
     def test_suggested_alt_appended_to_evidence_when_context_available(self):
-        html = (
-            "<h2>Sales Tax Deduction</h2>"
-            '<p><img src="sales-tax-chart.png"></p>'
-        )
+        html = "<h2>Sales Tax Deduction</h2>" '<p><img src="sales-tax-chart.png"></p>'
         issues = check_accessibility_heuristics(html)
         assert len(issues) == 1
         assert "suggested alt:" in issues[0].evidence
@@ -2346,10 +2345,7 @@ class TestSuggestAltText:
         assert "suggested alt:" not in issues[0].evidence
 
     def test_empty_alt_also_gets_suggestion(self):
-        html = (
-            "<h2>Quarterly results</h2>"
-            '<p><img src="results.png" alt=""></p>'
-        )
+        html = "<h2>Quarterly results</h2>" '<p><img src="results.png" alt=""></p>'
         issues = check_accessibility_heuristics(html)
         assert len(issues) == 1
         assert issues[0].reason == "Image alt attribute is empty"

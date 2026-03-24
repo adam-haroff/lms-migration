@@ -20,6 +20,7 @@ from lms_migration.html_tools import (
     _extract_attr_value,
     _BOOTSTRAP_UTILITY_CSS_MAP,
     _ACCORDION_PLACEHOLDER_TITLES,
+    _normalize_course_outline_columns,
 )
 from lms_migration.template_overlay import (
     TemplateOverlayContext,
@@ -758,3 +759,284 @@ class TestRemoveLeadingDivider:
         ), "Header <hr> should be stripped even with printer link present"
         # The printer link paragraph should also be gone (it was in the stripped header div)
         assert "Printer-friendly version" not in result
+
+
+# ===========================================================================
+# Course-outline table normalisation
+# ===========================================================================
+
+# Minimal wrapper that triggers the syllabus-table normalisation path.
+_SYLLABUS_WRAP = "<html><head></head><body><h1>Syllabus</h1>{}</body></html>"
+
+_COURSE_OUTLINE_TABLE = (
+    '<table summary="Course Outline">'
+    "<tr>"
+    '<th scope="col">16-WEEK</th>'
+    '<th scope="col">TOPICS</th>'
+    '<th scope="col">CHAPTER</th>'
+    '<th scope="col">ASSIGNMENTS</th>'
+    '<th scope="col">DUE DATE</th>'
+    "</tr>"
+    "<tr>"
+    "<td>1</td>"
+    "<td>Topic 1: Introduction to Taxation</td>"
+    "<td>Chapter 1</td>"
+    "<td>Read Chapter 1; Complete Quiz 1</td>"
+    "<td>Jan 15</td>"
+    "</tr>"
+    "<tr>"
+    "<td>2</td>"
+    "<td>Topic 2: Tax Formula</td>"
+    "<td>Chapter 2</td>"
+    "<td>Read Chapter 2; Homework 2</td>"
+    "<td>Jan 22</td>"
+    "</tr>"
+    "</table>"
+)
+
+
+def _sanitize_syllabus(html: str) -> str:
+    """Run sanitizer in syllabus mode (all default flags, file recognised as syllabus)."""
+    policy = CanvasSanitizerPolicy()
+    result, _ = apply_canvas_sanitizer(
+        html, policy, file_path="course-syllabus.html"
+    )
+    return result
+
+
+class TestCourseOutlineCaption:
+    """Caption for a course-outline table is always 'Course Outline'."""
+
+    def test_caption_has_no_16week_suffix(self):
+        html = _SYLLABUS_WRAP.format(_COURSE_OUTLINE_TABLE)
+        result = _sanitize_syllabus(html)
+        assert "Course Outline (16-Week)" not in result
+        assert "Course Outline (12-Week)" not in result
+        assert "Course Outline" in result
+
+    def test_caption_preserved_without_week_qualifier(self):
+        table = _COURSE_OUTLINE_TABLE.replace("16-WEEK", "WEEK")
+        html = _SYLLABUS_WRAP.format(table)
+        result = _sanitize_syllabus(html)
+        assert "Course Outline (16-Week)" not in result
+        assert "Course Outline" in result
+
+    def test_existing_caption_with_week_suffix_is_normalised(self):
+        table = (
+            '<table summary="">'
+            "<caption>Course Outline (16-Week)</caption>"
+            '<tr><th scope="col">16-WEEK</th>'
+            '<th scope="col">TOPICS</th></tr>'
+            "<tr><td>1</td><td>Topic 1</td></tr>"
+            "</table>"
+        )
+        html = _SYLLABUS_WRAP.format(table)
+        result = _sanitize_syllabus(html)
+        assert "Course Outline (16-Week)" not in result
+        assert "Course Outline" in result
+
+
+class TestCourseOutlineColumnNormalisation:
+    """WEEK / DUE DATE columns dropped; TOPICS/ASSIGNMENTS/CHAPTER renamed."""
+
+    def _run(self, inner_html: str) -> str:
+        return _normalize_course_outline_columns(inner_html)
+
+    def test_week_column_dropped(self):
+        inner = (
+            "<tr>"
+            '<th scope="col">16-WEEK</th>'
+            '<th scope="col">TOPICS</th>'
+            "</tr>"
+            "<tr><td>1</td><td>Topic 1</td></tr>"
+        )
+        result = self._run(inner)
+        assert "16-WEEK" not in result
+        # Week number cell ("1") should be gone
+        assert "<td>1</td>" not in result
+        # TOPICS data cell gets Topic→Module transformation
+        assert "Module 1" in result
+
+    def test_due_date_column_dropped(self):
+        inner = (
+            "<tr>"
+            '<th scope="col">TOPICS</th>'
+            '<th scope="col">DUE DATE</th>'
+            "</tr>"
+            "<tr><td>Topic 1</td><td>Jan 15</td></tr>"
+        )
+        result = self._run(inner)
+        assert "DUE DATE" not in result
+        assert "Jan 15" not in result
+        # TOPICS data cell gets Topic→Module transformation
+        assert "Module 1" in result
+
+    def test_topics_renamed_to_modules(self):
+        inner = (
+            "<tr>"
+            '<th scope="col">TOPICS</th>'
+            "</tr>"
+            "<tr><td>Topic 1: Intro</td></tr>"
+        )
+        result = self._run(inner)
+        assert "TOPICS" not in result
+        assert "Modules" in result
+
+    def test_assignments_renamed_to_activities(self):
+        inner = (
+            "<tr>"
+            '<th scope="col">ASSIGNMENTS</th>'
+            "</tr>"
+            "<tr><td>Read Chapter 1</td></tr>"
+        )
+        result = self._run(inner)
+        assert "ASSIGNMENTS" not in result
+        assert "Activities" in result
+
+    def test_chapter_renamed_canonical(self):
+        inner = (
+            "<tr>"
+            '<th scope="col">CHAPTERS</th>'
+            "</tr>"
+            "<tr><td>Chapter 1</td></tr>"
+        )
+        result = self._run(inner)
+        assert "CHAPTERS" not in result
+        assert "Chapter" in result
+
+    def test_topic_prefix_in_data_cells_replaced(self):
+        inner = (
+            "<tr>"
+            '<th scope="col">TOPICS</th>'
+            "</tr>"
+            "<tr><td>Topic 1: Introduction to Taxation</td></tr>"
+            "<tr><td>Topic 2: Tax Formula</td></tr>"
+        )
+        result = self._run(inner)
+        assert "Topic 1:" not in result
+        assert "Topic 2:" not in result
+        assert "Module 1: Introduction to Taxation" in result
+        assert "Module 2: Tax Formula" in result
+
+    def test_full_table_via_sanitizer(self):
+        """Integration: pipeline produces correct columns for ACC-2321-style input."""
+        html = _SYLLABUS_WRAP.format(_COURSE_OUTLINE_TABLE)
+        result = _sanitize_syllabus(html)
+        # Caption
+        assert "Course Outline" in result
+        assert "(16-Week)" not in result
+        # Dropped column headers
+        assert "16-WEEK" not in result
+        assert "DUE DATE" not in result
+        # Renamed headers present
+        assert "Modules" in result
+        assert "Activities" in result
+        assert "Chapter" in result
+        # Week data cells (just numbers) are gone
+        assert "<td>1</td>" not in result
+        assert "<td>2</td>" not in result
+        # Due date data gone
+        assert "Jan 15" not in result
+        assert "Jan 22" not in result
+        # Topic → Module replacement in data cells
+        assert "Topic 1:" not in result
+        assert "Module 1: Introduction to Taxation" in result
+
+
+# ===========================================================================
+# Divider normalisation
+# ===========================================================================
+
+
+class TestDividerNormalisation:
+    """normalize_hr_tag: bare <hr> stays grey; D2L red banner → grey; canonical red preserved."""
+
+    def _run(self, html: str) -> str:
+        return _sanitize(html, normalize_divider_styling=True)
+
+    def test_bare_hr_not_made_red(self):
+        """A plain <hr> should be left untouched — renders as grey in Canvas."""
+        result = self._run("<div><hr></div>")
+        assert "#ac1a2f" not in result.lower()
+        assert "background-color" not in result.lower()
+        assert "<hr>" in result.lower() or "<hr " in result.lower()
+
+    def test_bare_hr_self_closing_not_made_red(self):
+        result = self._run("<div><hr/></div>")
+        assert "#ac1a2f" not in result.lower()
+
+    def test_d2l_banner_hr_converted_to_grey(self):
+        """The D2L top-banner <hr style="...background-color: #ac1a2f;"> → grey."""
+        hr = '<hr style="width: 100%; height: 4px; color: #ac1a2f; background-color: #ac1a2f;" row="">'
+        result = self._run(f"<div>{hr}</div>")
+        assert "#ac1a2f" not in result.lower()
+        assert "#cccccc" in result.lower()
+
+    def test_canonical_red_closing_divider_preserved(self):
+        """<hr style="border-top: 8px solid #AC1A2F; ..."> must not change."""
+        hr = '<hr style="border-top: 8px solid #AC1A2F; border-bottom: 0; height: 0; margin: 16px 0;">'
+        result = self._run(f"<div>{hr}</div>")
+        assert "border-top" in result
+        assert ("AC1A2F" in result or "ac1a2f" in result.lower())
+
+    def test_canonical_minimal_red_closing_divider_preserved(self):
+        hr = '<hr style="border-top: 8px solid #AC1A2F;">'
+        result = self._run(f"<div>{hr}</div>")
+        assert "border-top" in result
+        assert ("AC1A2F" in result or "ac1a2f" in result.lower())
+
+
+# ===========================================================================
+# D2L Rule image → <hr> replacement
+# ===========================================================================
+
+
+class TestRuleImageReplacement:
+    """D2L Rule_brown_gradient.png inside a lone <p> becomes a bare <hr>."""
+
+    _RULE_SRC = (
+        "/shared/Brightspace_HTML_Template/pages/../_assets/"
+        "standardImages/Rule_brown_gradient.png"
+    )
+
+    def _make_rule_para(self, extra_span: bool = True) -> str:
+        img = (
+            f'<img src="{self._RULE_SRC}" alt="" title="" '
+            'data-d2l-editor-default-img-style="true" style="max-width: 100%;">'
+        )
+        if extra_span:
+            return f'<p><span style="font-family: Lato, sans-serif;">{img}</span></p>'
+        return f"<p>{img}</p>"
+
+    def _run(self, html: str) -> str:
+        return _sanitize(html, sanitize_brightspace_assets=True)
+
+    def test_rule_image_in_span_para_becomes_hr(self):
+        body = f"<div><p>Before</p>{self._make_rule_para(extra_span=True)}<p>After</p></div>"
+        result = self._run(body)
+        assert "<hr>" in result.lower() or "<hr " in result.lower()
+        assert "Rule_brown_gradient" not in result
+        assert "standardImages" not in result
+
+    def test_rule_image_bare_para_becomes_hr(self):
+        body = f"<div><p>Before</p>{self._make_rule_para(extra_span=False)}<p>After</p></div>"
+        result = self._run(body)
+        assert "<hr>" in result.lower() or "<hr " in result.lower()
+        assert "Rule_brown_gradient" not in result
+
+    def test_rule_hr_has_no_style(self):
+        """The replacement <hr> must be bare (no style attribute)."""
+        body = self._make_rule_para()
+        result = self._run(body)
+        hr_match = re.search(r"<hr\b([^>]*)>", result, re.IGNORECASE)
+        assert hr_match is not None, "Expected an <hr> tag in result"
+        attrs = hr_match.group(1)
+        assert "style" not in attrs.lower()
+
+    def test_non_rule_template_image_not_replaced_with_hr(self):
+        """Other Brightspace template images (e.g. a header logo) are stripped, not hr'd."""
+        src = "/shared/Brightspace_HTML_Template/pages/../_assets/img/logo.png"
+        body = f'<p><img src="{src}" alt="logo"></p>'
+        result = self._run(body)
+        assert "logo.png" not in result
+        assert "<hr>" not in result.lower()
