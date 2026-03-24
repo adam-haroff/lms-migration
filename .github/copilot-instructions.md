@@ -245,16 +245,18 @@ From scanning all 9 course zip exports:
 - **Template merger additions** — Module ordering (`course_settings/module_meta.xml`), home page
   auto-selection (divisional variant + `front_page=true` meta + `course_settings/course_settings.xml`).
   558 tests. Committed 10614b9. `--template-merge` flag required to activate.
+- **Phase 4 item 1** — New Quizzes question-type risk flags wired to preflight checklist (P1 per quiz).
+  `quiz_audit.py` `_RISK_TYPES` now emit per-quiz P1 items. 575 tests. Committed c97725b.
+- **Phase 4 item 2** — `_audit_unresolvable_grade_items()` in `pipeline.py` flags grade items with no
+  Canvas-importable D2L submission object (e.g. Cengage, external-tool grade columns). Uses dropbox
+  `grade_item` attr for direct RC matching; uses manifest `<title>` matching for quiz/discussion items
+  (grade item resource_codes are a DIFFERENT internal ID space — direct RC cross-reference doesn't work
+  for quiz/discussion XML files). 589 tests. Committed 3480d72.
+- **Phase 4 item 3** — `canvas_post_import.py` confirmed fully wired as `lms-canvas-auto-relink` CLI
+  entry point in `pyproject.toml`. `build_parser()` and `main()` both present and functional.
 
-## What needs doing next (Phase 4 items not yet implemented)
+## What needs doing next
 
-Phase 4 is defined in `docs/app-roadmap.md`. Items below are **not yet in the codebase**:
-
-1. **New Quizzes compatibility review on question type** — `quiz_audit.py` already parses QTI and has
-   `_RISK_TYPES`. Wire the per-question-type risk flags through to the preflight checklist as P1 items
-   (currently only per-quiz settings emit checklist rows; question-type risks do not).
-2. **Discussion / assignment submission type detection** — Detect D2L graded content pages (pages
-   with a grade category in the manifest) and surface them as P1 checklist items prompting the ID
-   to create a Canvas Assignment for the gradeable deliverable.
-3. **Canvas post-import sync** — `canvas_post_import.py` exists; confirm whether the Canvas API
-   integration for auto-relinking / post-import checks is fully wired into the CLI.
+Phase 4 roadmap items above are complete. See `docs/app-roadmap.md` for the full list of remaining
+Phase 4 ideas (many are marked feasibility-limited: `not_in_gradebook` is not in IMSCC exports,
+role-restriction data is not in exports, rubric-to-assignment correlation is not feasible from exports).
