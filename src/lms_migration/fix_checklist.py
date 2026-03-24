@@ -238,6 +238,17 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "See `d2l-export.quiz-audit.md` for the complete per-quiz settings inventory "
             "(time limits, attempts, shuffle settings).",
         )
+    if "quiz settings inventory" in lowered:
+        return (
+            "P1",
+            "quiz_settings_inventory",
+            "Faculty/Course Coordinator",
+            "Re-enter the quiz settings shown in the evidence column inside Canvas New Quizzes. "
+            "Open each quiz in Canvas > Quizzes > Build/Edit and set: time limit and enforcement, "
+            "allowed attempts, and shuffle settings (questions and/or answers). "
+            "These settings are not preserved through the D2L QTI import. "
+            "See `d2l-export.quiz-audit.md` for the full per-quiz inventory.",
+        )
     if "new quizzes question-type compatibility risk" in lowered:
         # Determine priority from the flagged level in the reason string
         priority = "P1" if "(p1)" in lowered else "P2"

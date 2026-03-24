@@ -38,6 +38,9 @@ from .policy_profiles import PolicyProfile, get_policy_profile
 from .quiz_audit import (
     _RISK_TYPES as _QUIZ_RISK_TYPES,
     _parse_quiz_xml as _parse_quiz_xml_file,
+    audit_quizzes as _audit_quizzes,
+    write_json_report as _write_quiz_json_report,
+    write_markdown_report as _write_quiz_markdown_report,
 )
 from .rules import load_rules
 from .template_merger import run_template_merge
@@ -79,6 +82,8 @@ class MigrationOutput:
     preflight_checklist: Path
     policy_profile_id: str
     template_overlay_report_json: Path | None = None
+    quiz_audit_json: Path | None = None
+    quiz_audit_md: Path | None = None
 
 
 def _read_text(path: Path) -> str:
@@ -1805,6 +1810,55 @@ def _audit_quiz_question_types(zip_path: Path) -> list[dict]:
     return rows
 
 
+def _audit_quiz_settings_inventory(zip_path: Path) -> list[dict]:
+    """Return one row per quiz with a per-quiz settings inventory.
+
+    Canvas New Quizzes requires manual re-entry of every quiz's time limit,
+    attempt count, shuffle settings, and availability window — they are NOT
+    preserved through the D2L QTI → Canvas import process.  This emits a P1
+    row per quiz so the fix checklist surfaces all settings the ID must
+    re-enter, even for quizzes that have no question-type compatibility risk.
+    """
+    rows: list[dict] = []
+    try:
+        report = _audit_quizzes(zip_path)
+    except Exception:
+        return rows
+    for q in report.quizzes:
+        # Build a human-readable settings summary
+        parts: list[str] = [f'quiz: "{q.title}"']
+        if q.time_limit_minutes is not None:
+            enforced = " (enforced)" if q.enforce_time_limit else " (not enforced)"
+            parts.append(f"time limit: {q.time_limit_minutes} min{enforced}")
+        else:
+            parts.append("time limit: none")
+        att = "unlimited" if q.attempts_allowed == 0 else str(q.attempts_allowed)
+        parts.append(f"attempts: {att}")
+        parts.append(f"shuffle: {q.shuffle_type}")
+        if q.has_availability_window:
+            window_parts: list[str] = []
+            if q.date_start:
+                window_parts.append(f"start: {q.date_start[:10]}")
+            if q.date_end:
+                window_parts.append(f"end: {q.date_end[:10]}")
+            if q.date_due:
+                window_parts.append(f"due: {q.date_due[:10]}")
+            parts.append("window: " + ", ".join(window_parts))
+        rows.append(
+            {
+                "file": q.quiz_file,
+                "type": "d2l_xml_audit",
+                "reason": (
+                    "Quiz settings inventory — re-enter in Canvas New Quizzes "
+                    "after import (time limit, attempts, shuffle are not "
+                    "preserved through QTI import)"
+                ),
+                "evidence": " | ".join(parts),
+            }
+        )
+    return rows
+
+
 def _append_xml_audit_rows_to_csv(zip_path: Path, csv_path: Path) -> None:
     """Append D2L XML audit rows (graded discussions, availability windows,
     gradebook groups, rubrics, date-shift advisory) to the manual-review CSV."""
@@ -1816,6 +1870,7 @@ def _append_xml_audit_rows_to_csv(zip_path: Path, csv_path: Path) -> None:
     rows.extend(_audit_dropbox_folders(zip_path))
     rows.extend(_audit_unresolvable_grade_items(zip_path))
     rows.extend(_audit_date_shift_items(zip_path))
+    rows.extend(_audit_quiz_settings_inventory(zip_path))
     rows.extend(_audit_quiz_question_types(zip_path))
     if not rows:
         return
@@ -1913,14 +1968,18 @@ def _write_preflight_checklist(
         "lti_quicklink_reconfiguration": "LTI QuickLink",
         "lti_embed_reconfiguration": "LTI embed",
         "rubric_import_setup": "D2L rubric",
-        "d2l_media_library_file": "D2L media library",
-        "graded_discussion_reconnect": "Graded discussion",
-        "availability_window_reentry": "Availability window",
-        "gradebook_group_drop_rules": "Gradebook drop rule",
+        "d2l_media_library_migration": "D2L media library",
+        "graded_discussion_setup": "Graded discussion",
+        "assignment_availability_window": "Availability window",
+        "gradebook_drop_rule_setup": "Gradebook drop rule",
         "gradebook_group_weights": "Gradebook weight",
         "extra_credit_setup": "Extra credit",
-        "date_shift_planning": "Course start date",
+        "canvas_date_shift_setup": "Course start date",
         "quiz_settings_inventory": "Quiz settings",
+        "new_quizzes_question_type_rebuild": "New Quizzes compat",
+        "unresolvable_grade_item_setup": "Unresolvable grade item",
+        "dropbox_assignment_setup": "Dropbox assignment",
+        "graded_discussion_reconnect": "Graded discussion",  # legacy alias
         "layout_css_rendering_review": "Layout CSS",
         "embedded_iframe_review": "Embedded iframe",
         "a11y_video_captions": "Video captions",
@@ -2147,6 +2206,8 @@ def run_migration(
     report_markdown = output_dir / f"{input_zip.stem}.migration-report.md"
     manual_review_csv = output_dir / f"{input_zip.stem}.manual-review.csv"
     preflight_checklist = output_dir / f"{input_zip.stem}.preflight-checklist.md"
+    quiz_audit_json = output_dir / f"{input_zip.stem}.quiz-audit.json"
+    quiz_audit_md = output_dir / f"{input_zip.stem}.quiz-audit.md"
     template_overlay_report_json: Path | None = None
     template_overlay_report_payload: dict | None = None
     template_overlay_context = None
@@ -2962,6 +3023,16 @@ def run_migration(
     report_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _write_markdown_report(report, report_markdown)
     _write_manual_review_csv(file_results, manual_review_csv)
+
+    # Write standalone quiz-audit reports (supplement to preflight checklist)
+    try:
+        _quiz_report = _audit_quizzes(input_zip)
+        _write_quiz_json_report(_quiz_report, quiz_audit_json)
+        _write_quiz_markdown_report(_quiz_report, quiz_audit_md)
+    except Exception:
+        quiz_audit_json = None  # type: ignore[assignment]
+        quiz_audit_md = None  # type: ignore[assignment]
+
     _append_xml_audit_rows_to_csv(input_zip, manual_review_csv)
     _write_preflight_checklist(
         report, policy_profile, preflight_checklist, manual_review_csv
@@ -2975,4 +3046,6 @@ def run_migration(
         preflight_checklist=preflight_checklist,
         policy_profile_id=policy_profile.profile_id,
         template_overlay_report_json=template_overlay_report_json,
+        quiz_audit_json=quiz_audit_json,
+        quiz_audit_md=quiz_audit_md,
     )

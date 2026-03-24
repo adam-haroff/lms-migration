@@ -1926,3 +1926,209 @@ class TestFixChecklistUnresolvableGradeItem:
             "found; create Canvas Assignment and connect to gradebook after import",
         )
         assert "id" in owner.lower() or "faculty" in owner.lower()
+
+
+# ===========================================================================
+# _audit_quiz_settings_inventory — pipeline helper
+# ===========================================================================
+
+_QUIZ_XML_WITH_LIMITS = """\
+<questestinterop xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">
+  <assessment d2l_2p0:id="10" title="Chapter 1 Quiz">
+    <assess_procextension>
+      <d2l_2p0:time_limit>45</d2l_2p0:time_limit>
+      <d2l_2p0:enforce_time_limit>yes</d2l_2p0:enforce_time_limit>
+      <d2l_2p0:attempts_allowed>3</d2l_2p0:attempts_allowed>
+      <d2l_2p0:shuffle_questions>yes</d2l_2p0:shuffle_questions>
+    </assess_procextension>
+    <section ident="S">
+      <item ident="A">
+        <itemmetadata>
+          <qtimetadata>
+            <qti_metadatafield>
+              <fieldlabel>qmd_questiontype</fieldlabel>
+              <fieldentry>Multiple Choice</fieldentry>
+            </qti_metadatafield>
+          </qtimetadata>
+        </itemmetadata>
+      </item>
+    </section>
+  </assessment>
+</questestinterop>
+"""
+
+_QUIZ_XML_UNLIMITED = """\
+<questestinterop xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">
+  <assessment d2l_2p0:id="20" title="Practice Quiz">
+    <assess_procextension>
+      <d2l_2p0:attempts_allowed>0</d2l_2p0:attempts_allowed>
+    </assess_procextension>
+    <section ident="S">
+      <item ident="A">
+        <itemmetadata>
+          <qtimetadata>
+            <qti_metadatafield>
+              <fieldlabel>qmd_questiontype</fieldlabel>
+              <fieldentry>Multiple Choice</fieldentry>
+            </qti_metadatafield>
+          </qtimetadata>
+        </itemmetadata>
+      </item>
+    </section>
+  </assessment>
+</questestinterop>
+"""
+
+_QUIZ_XML_WITH_WINDOW = """\
+<questestinterop xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">
+  <assessment d2l_2p0:id="30" title="Midterm Exam">
+    <assess_procextension>
+      <d2l_2p0:time_limit>60</d2l_2p0:time_limit>
+      <d2l_2p0:enforce_time_limit>yes</d2l_2p0:enforce_time_limit>
+      <d2l_2p0:attempts_allowed>1</d2l_2p0:attempts_allowed>
+      <d2l_2p0:date_start>2026-03-01T08:00:00</d2l_2p0:date_start>
+      <d2l_2p0:date_end>2026-03-07T23:59:59</d2l_2p0:date_end>
+    </assess_procextension>
+    <section ident="S">
+      <item ident="A">
+        <itemmetadata>
+          <qtimetadata>
+            <qti_metadatafield>
+              <fieldlabel>qmd_questiontype</fieldlabel>
+              <fieldentry>Multiple Choice</fieldentry>
+            </qti_metadatafield>
+          </qtimetadata>
+        </itemmetadata>
+      </item>
+    </section>
+  </assessment>
+</questestinterop>
+"""
+
+
+class TestAuditQuizSettingsInventory:
+    """_audit_quiz_settings_inventory() emits one P1 row per quiz."""
+
+    def _make_zip(self, files: dict[str, str]) -> Path:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, content in files.items():
+                zf.writestr(name, content)
+        buf.seek(0)
+        tmp = Path("/tmp/test_quiz_settings_inventory.zip")
+        tmp.write_bytes(buf.read())
+        return tmp
+
+    def test_emits_one_row_per_quiz(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip(
+            {
+                "quiz_d2l_10.xml": _QUIZ_XML_WITH_LIMITS,
+                "quiz_d2l_20.xml": _QUIZ_XML_UNLIMITED,
+            }
+        )
+        rows = _audit_quiz_settings_inventory(zp)
+        assert len(rows) == 2
+
+    def test_row_contains_quiz_title(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip({"quiz_d2l_10.xml": _QUIZ_XML_WITH_LIMITS})
+        rows = _audit_quiz_settings_inventory(zp)
+        assert len(rows) == 1
+        assert "Chapter 1 Quiz" in rows[0]["evidence"]
+
+    def test_time_limit_in_evidence(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip({"quiz_d2l_10.xml": _QUIZ_XML_WITH_LIMITS})
+        rows = _audit_quiz_settings_inventory(zp)
+        assert "45" in rows[0]["evidence"]
+        assert "time limit" in rows[0]["evidence"].lower()
+
+    def test_unlimited_attempts_shown(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip({"quiz_d2l_20.xml": _QUIZ_XML_UNLIMITED})
+        rows = _audit_quiz_settings_inventory(zp)
+        assert "unlimited" in rows[0]["evidence"].lower()
+
+    def test_attempts_count_shown(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip({"quiz_d2l_10.xml": _QUIZ_XML_WITH_LIMITS})
+        rows = _audit_quiz_settings_inventory(zp)
+        assert "3" in rows[0]["evidence"]
+        assert "attempts" in rows[0]["evidence"].lower()
+
+    def test_availability_window_included_when_present(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip({"quiz_d2l_30.xml": _QUIZ_XML_WITH_WINDOW})
+        rows = _audit_quiz_settings_inventory(zp)
+        assert len(rows) == 1
+        assert "window" in rows[0]["evidence"].lower()
+        assert "2026-03-01" in rows[0]["evidence"]
+
+    def test_no_window_when_absent(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip({"quiz_d2l_20.xml": _QUIZ_XML_UNLIMITED})
+        rows = _audit_quiz_settings_inventory(zp)
+        assert "window" not in rows[0]["evidence"].lower()
+
+    def test_row_type_is_xml_audit(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip({"quiz_d2l_10.xml": _QUIZ_XML_WITH_LIMITS})
+        rows = _audit_quiz_settings_inventory(zp)
+        assert rows[0]["type"] == "d2l_xml_audit"
+
+    def test_reason_mentions_quiz_settings_inventory(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip({"quiz_d2l_10.xml": _QUIZ_XML_WITH_LIMITS})
+        rows = _audit_quiz_settings_inventory(zp)
+        assert "quiz settings inventory" in rows[0]["reason"].lower()
+
+    def test_no_quiz_files_returns_empty(self):
+        from lms_migration.pipeline import _audit_quiz_settings_inventory
+
+        zp = self._make_zip({"grades_d2l.xml": "<grades/>"})
+        rows = _audit_quiz_settings_inventory(zp)
+        assert rows == []
+
+
+class TestFixChecklistQuizSettingsInventory:
+    """fix_checklist routes 'quiz settings inventory' reason to quiz_settings_inventory category."""
+
+    _REASON = (
+        "Quiz settings inventory — re-enter in Canvas New Quizzes "
+        "after import (time limit, attempts, shuffle are not "
+        "preserved through QTI import)"
+    )
+
+    def test_category_is_quiz_settings_inventory(self):
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit", self._REASON
+        )
+        assert category == "quiz_settings_inventory"
+
+    def test_priority_is_p1(self):
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit", self._REASON
+        )
+        assert priority == "P1"
+
+    def test_action_mentions_time_limit(self):
+        _, _, _, action = _map_manual_review_group("d2l_xml_audit", self._REASON)
+        assert "time limit" in action.lower()
+
+    def test_action_mentions_attempts(self):
+        _, _, _, action = _map_manual_review_group("d2l_xml_audit", self._REASON)
+        assert "attempt" in action.lower()
+
+    def test_action_references_quiz_audit_md(self):
+        _, _, _, action = _map_manual_review_group("d2l_xml_audit", self._REASON)
+        assert "quiz-audit.md" in action.lower()
