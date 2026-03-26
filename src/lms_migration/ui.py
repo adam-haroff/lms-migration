@@ -1180,7 +1180,7 @@ class LMSMigrationUI:
         ttk.Label(
             intro_lf,
             text=(
-                "Upload the converted Canvas-ready ZIP to your Canvas sandbox for visual verification "
+                "Upload the converted Canvas-ready ZIP to a Canvas course for visual verification "
                 "before handing off to the instructor.  The package is imported via the Canvas migration "
                 "API and page preview URLs are returned for spot-checking.  Canvas course ID and API "
                 "token are read from the top bar."
@@ -1254,7 +1254,7 @@ class LMSMigrationUI:
         upload_btn_frame.grid(row=2, column=0, columnspan=3, sticky="e", pady=(4, 4))
         self.run_canvas_upload_btn = ttk.Button(
             upload_btn_frame,
-            text="Upload to Canvas Sandbox",
+            text="Upload to Canvas",
             command=self._run_canvas_upload_clicked,
             style="Primary.TButton",
         )
@@ -1777,6 +1777,10 @@ class LMSMigrationUI:
 
     def _run_background(self, task_name: str, target: Callable[[], None]) -> None:
         if self.is_busy:
+            self._log(
+                f"[SKIP] {task_name} — another task is still running. "
+                "Wait for it to finish or restart the app."
+            )
             return
         self._set_busy(True)
         self.status_text_var.set(f"Status: Running - {task_name}")
@@ -3752,24 +3756,41 @@ class LMSMigrationUI:
         )
 
         def task() -> None:
-            def _on_progress(msg: str) -> None:
+            def _upload_progress(msg: str) -> None:
+                """Append progress to both the Run Log and the Upload Results area."""
                 self.root.after(0, lambda m=msg: self._log(f"  {m}"))  # type: ignore[misc]
+                self.root.after(0, lambda m=msg: self._append_upload_progress(m))
 
             self.root.after(
                 0,
-                lambda: self._log(
-                    "  Note: Canvas migration import can take 1–5 minutes. "
-                    "Status updates will appear every few seconds."
+                lambda: (
+                    self._log(
+                        "  Note: Canvas migration import can take 1–5 minutes. "
+                        "Status updates will appear below and in the results area."
+                    ),
+                    self._init_upload_progress(
+                        "Uploading to Canvas — this can take 1–5 minutes.\n"
+                        "Status updates will appear every few seconds.\n"
+                    ),
                 ),
             )
-            result = run_preview(
-                zip_path,
-                base_url=base_url,
-                token=token,
-                course_id=course_id,
-                template_zip_path=tmpl_zip_path,
-                progress_callback=_on_progress,
-            )
+            try:
+                result = run_preview(
+                    zip_path,
+                    base_url=base_url,
+                    token=token,
+                    course_id=course_id,
+                    template_zip_path=tmpl_zip_path,
+                    progress_callback=_upload_progress,
+                )
+            except Exception as exc:
+                self.root.after(
+                    0,
+                    lambda e=exc: self._append_upload_progress(
+                        f"\n*** Upload failed: {e}"
+                    ),
+                )
+                raise
             output_json.parent.mkdir(parents=True, exist_ok=True)
             import dataclasses
 
@@ -3780,7 +3801,7 @@ class LMSMigrationUI:
                 0, lambda: self._handle_canvas_upload_result(result, output_json)
             )
 
-        self._run_background("Upload to Canvas sandbox", task)
+        self._run_background("Upload to Canvas", task)
 
     def _handle_canvas_upload_result(self, result, output_json: Path) -> None:
         try:
@@ -3818,7 +3839,7 @@ class LMSMigrationUI:
         except Exception as exc:
             self._log(f"[WARN] Upload results display error: {exc}")
         finally:
-            self._task_succeeded("Upload to Canvas sandbox")
+            self._task_succeeded("Upload to Canvas")
 
     def _on_upload_url_clicked(self, event: tk.Event) -> None:
         """Open the clicked URL in the default browser."""
@@ -3833,6 +3854,19 @@ class LMSMigrationUI:
                 except (ValueError, IndexError):
                     pass
                 return
+
+    def _init_upload_progress(self, header: str) -> None:
+        """Clear the Upload Results area and show the initial progress header."""
+        self.upload_results_text.configure(state="normal")
+        self.upload_results_text.delete("1.0", "end")
+        self.upload_results_text.insert("end", header)
+        self.upload_results_text.see("end")
+
+    def _append_upload_progress(self, msg: str) -> None:
+        """Append a progress line to the Upload Results area."""
+        self.upload_results_text.configure(state="normal")
+        self.upload_results_text.insert("end", f"{msg}\n")
+        self.upload_results_text.see("end")
 
     def _get_canvas_credentials(self) -> tuple[str, str, str] | None:
         base_url = self.canvas_base_url_var.get().strip()

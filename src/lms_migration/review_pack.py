@@ -1883,10 +1883,10 @@ def _write_html(
           const newHr = document.createElement('hr');
           const style = HR_STYLES[hrType];
           if (style) newHr.setAttribute('style', style);
-          const sel = window.getSelection();
+          const saved = savedRanges.get(shell);
           let inserted = false;
-          if (sel && sel.rangeCount > 0) {{
-            let anchor = sel.getRangeAt(0).endContainer;
+          if (saved) {{
+            let anchor = saved.endContainer;
             while (anchor.parentNode && anchor.parentNode !== surface) {{
               anchor = anchor.parentNode;
             }}
@@ -2069,16 +2069,31 @@ def _write_html(
         }}
         // Priority 3: first heading of any kind
         if (!targetHeading) targetHeading = headings[0];
-        // Priority 4: no heading at all — create one at the top of the surface
+        // Priority 4: no heading at all — create one at the cursor position
         if (!targetHeading) {{
           targetHeading = document.createElement('h2');
           targetHeading.setAttribute('style', 'color: #ac1a2f;');
-          // Insert after any leading <hr> (accent divider), otherwise as first child
-          const firstHr = surface.querySelector(':scope > hr:first-child');
-          if (firstHr) {{
-            firstHr.after(targetHeading);
-          }} else {{
-            surface.insertBefore(targetHeading, surface.firstChild);
+          // Try to insert at cursor position from savedRanges
+          const savedRange = savedRanges.get(shell);
+          let cursorInserted = false;
+          if (savedRange) {{
+            let anchor = savedRange.startContainer;
+            while (anchor.parentNode && anchor.parentNode !== surface) {{
+              anchor = anchor.parentNode;
+            }}
+            if (anchor.parentNode === surface) {{
+              anchor.before(targetHeading);
+              cursorInserted = true;
+            }}
+          }}
+          if (!cursorInserted) {{
+            // Fallback: insert after any leading <hr> (accent divider), otherwise as first child
+            const firstHr = surface.querySelector(':scope > hr:first-child');
+            if (firstHr) {{
+              firstHr.after(targetHeading);
+            }} else {{
+              surface.insertBefore(targetHeading, surface.firstChild);
+            }}
           }}
         }}
         pushUndo(shell);
@@ -2492,12 +2507,26 @@ def _write_html(
           ) || null;
         }}
         if (!bannerImg) {{
-          // No banner on the page — insert one at the very top of the surface
+          // No banner on the page — insert at cursor position or top of surface
           pushUndo(shell);
           bannerImg = document.createElement('img');
           bannerImg.style.cssText = 'display:block; width:100%; max-width:100%; height:auto; margin:0 0 8px 0;';
           bannerImg.alt = 'Page banner';
-          surface.insertBefore(bannerImg, surface.firstChild);
+          const savedRange = savedRanges.get(shell);
+          let cursorInserted = false;
+          if (savedRange) {{
+            let anchor = savedRange.startContainer;
+            while (anchor.parentNode && anchor.parentNode !== surface) {{
+              anchor = anchor.parentNode;
+            }}
+            if (anchor.parentNode === surface) {{
+              anchor.before(bannerImg);
+              cursorInserted = true;
+            }}
+          }}
+          if (!cursorInserted) {{
+            surface.insertBefore(bannerImg, surface.firstChild);
+          }}
         }}
         // Swap the asset map entry for the banner
         const assetMapEl = shell.querySelector('.editor-asset-map');
