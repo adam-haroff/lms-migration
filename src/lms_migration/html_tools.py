@@ -2562,6 +2562,53 @@ def repair_missing_local_references(
     return updated, applied
 
 
+# ── Accent divider injection ────────────────────────────────────────────────
+
+_ICON_HEADING_RE = re.compile(
+    r"<h[1-6][^>]*>(?:(?!</h[1-6]>).){0,500}<img\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_ACCENT_HR = (
+    '<hr style="border-top: 10px solid #AC1A2F; border-bottom: none;'
+    ' margin: 0 0 16px 0;">'
+)
+
+
+def inject_accent_divider(content: str) -> tuple[str, list[AppliedChange]]:
+    """Prepend a 10 px red accent ``<hr>`` to pages that lack an icon heading.
+
+    Pages with a template icon heading (``<h*>…<img …>…</h*>``) already get
+    the red accent from the heading's ``border-bottom`` style.  Pages without
+    one need a standalone ``<hr>`` at the top of the body for visual
+    consistency.
+
+    Returns ``(updated_content, applied_changes)``.
+    """
+    stripped = content.lstrip()
+    already_has_top_hr = stripped.startswith("<hr") and "border-top" in stripped[:120]
+    has_icon_heading = bool(_ICON_HEADING_RE.search(content))
+
+    if has_icon_heading or already_has_top_hr:
+        return content, []
+
+    # Inject inside <body> if present, otherwise prepend.
+    body_match = re.search(r"(<body[^>]*>)", content, re.IGNORECASE)
+    if body_match:
+        insert_pos = body_match.end()
+        updated = content[:insert_pos] + "\n" + _ACCENT_HR + "\n" + content[insert_pos:]
+    else:
+        updated = _ACCENT_HR + "\n" + content
+
+    return updated, [
+        AppliedChange(
+            category="structure",
+            description="Prepended accent divider (no icon heading detected)",
+            count=1,
+        )
+    ]
+
+
 def apply_best_practice_enforcer(
     content: str,
     *,

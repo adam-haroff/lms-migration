@@ -273,7 +273,7 @@ class TestFetchPaginatedList:
         headers1 = {
             "Link": '<https://canvas.example.com/api/v1/test?page=2>; rel="next"'
         }
-        headers2 = {}
+        headers2: dict[str, str] = {}
 
         with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
             mock_open.side_effect = [

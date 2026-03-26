@@ -16,6 +16,7 @@ from lms_migration.html_tools import (
     apply_canvas_sanitizer,
     BestPracticeEnforcerPolicy,
     apply_best_practice_enforcer,
+    inject_accent_divider,
     _convert_bootstrap_accordion_cards,
     _merge_inline_style,
     _extract_attr_value,
@@ -1365,7 +1366,9 @@ class TestModuleChecklistCloserFlaggedNotInjected:
         assert checklist_issues == []
 
     def test_checklist_path_triggers_detection(self):
-        _, _, issues = self._run(self._PAGE_WITHOUT_CLOSER, file_path=self._CHECKLIST_PATH)
+        _, _, issues = self._run(
+            self._PAGE_WITHOUT_CLOSER, file_path=self._CHECKLIST_PATH
+        )
         assert any("module checklist" in i.reason.lower() for i in issues)
 
     def test_stale_migration_closer_paragraph_stripped(self):
@@ -1399,3 +1402,51 @@ class TestModuleChecklistCloserFlaggedNotInjected:
         )
         checklist_issues = [i for i in issues if "module checklist" in i.reason.lower()]
         assert checklist_issues == []
+
+
+# ===========================================================================
+# inject_accent_divider — pipeline HR injection
+# ===========================================================================
+
+
+class TestInjectAccentDivider:
+    """inject_accent_divider should prepend a 10 px red accent <hr> to pages
+    that lack an icon heading and don't already have a top-of-body accent hr.
+    """
+
+    def test_plain_page_gets_hr(self):
+        html = "<html><body><p>Hello</p></body></html>"
+        updated, changes = inject_accent_divider(html)
+        assert "border-top: 10px solid #AC1A2F" in updated
+        assert len(changes) == 1
+        assert changes[0].category == "structure"
+
+    def test_page_with_icon_heading_unchanged(self):
+        html = '<html><body><h2><img src="star.png"> Intro</h2><p>Content</p></body></html>'
+        updated, changes = inject_accent_divider(html)
+        assert updated == html
+        assert changes == []
+
+    def test_page_already_has_accent_hr(self):
+        html = '<hr style="border-top: 10px solid #AC1A2F; border-bottom: none;">\n<p>Content</p>'
+        updated, changes = inject_accent_divider(html)
+        assert updated == html
+        assert changes == []
+
+    def test_hr_injected_inside_body_tag(self):
+        html = "<html><body><p>Content</p></body></html>"
+        updated, _ = inject_accent_divider(html)
+        # The HR should appear right after <body>, not before <html>
+        assert "<body>\n<hr" in updated
+
+    def test_no_body_tag_prepends(self):
+        html = "<p>Content</p>"
+        updated, _ = inject_accent_divider(html)
+        assert updated.startswith("<hr")
+
+    def test_page_with_non_icon_heading_gets_hr(self):
+        """An h2 without an <img> is not an icon heading — should inject."""
+        html = "<html><body><h2>Just Text</h2><p>Content</p></body></html>"
+        updated, changes = inject_accent_divider(html)
+        assert "border-top: 10px solid #AC1A2F" in updated
+        assert len(changes) == 1

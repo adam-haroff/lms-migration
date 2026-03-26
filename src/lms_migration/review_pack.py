@@ -894,6 +894,26 @@ def _write_html(
         page_path = str(row.get("path", "")).strip()
         editor_payload = editor_payloads.get(page_path, {})
         raw_body_html = str(editor_payload.get("converted_body_html", "")).strip()
+        # Pages with no icon-template heading (h* containing an <img>) get a
+        # thick red hr prepended so Canvas sees the same visual divider that
+        # icon-template pages get from their post-heading styled <hr>.
+        # 10 px matches the border-bottom on Introduction-style h2 headings.
+        _stripped = raw_body_html.lstrip()
+        _already_has_top_hr = (
+            _stripped.startswith("<hr") and "border-top" in _stripped[:120]
+        )
+        _has_icon_heading = bool(
+            re.search(
+                r"<h[1-6][^>]*>(?:(?!</h[1-6]>).){0,500}<img\b",
+                raw_body_html,
+                re.IGNORECASE | re.DOTALL,
+            )
+        )
+        if not _has_icon_heading and not _already_has_top_hr:
+            raw_body_html = (
+                '<hr style="border-top: 10px solid #AC1A2F; border-bottom: none;'
+                ' margin: 0 0 16px 0;">\n' + raw_body_html
+            )
         asset_map = _build_preview_asset_map(
             zip_path=converted_zip,
             page_path=page_path,
@@ -1039,6 +1059,12 @@ def _write_html(
                     {icon_select_html}
                   </div>
                   <div class="toolbar-group">
+                    <span class="toolbar-label">Dividers</span>
+                    <button type="button" data-editor-hr="thick10" title="Insert or change to accent divider (10 px) — page opener">Red 10px</button>
+                    <button type="button" data-editor-hr="thick8" title="Insert or change to accent divider (8 px) — page footer">Red 8px</button>
+                    <button type="button" data-editor-hr="thin" title="Insert or change to thin grey divider">Grey &#8212;</button>
+                  </div>
+                  <div class="toolbar-group">
                     <span class="toolbar-label">Page</span>
                     {banner_select_html}
                     <select class="accordion-mode-picker" data-accordion-mode title="Convert accordions on this page">
@@ -1057,7 +1083,9 @@ def _write_html(
                     <button type="button" data-editor-copy title="Copy body HTML to clipboard">Copy</button>
                   </div>
                 </div>
-                <div class="editor-surface" contenteditable="true">{preview_body_html}</div>
+                <div class="editor-status" data-editor-status>Click inside the white editor area below, then use the toolbar buttons</div>
+                <div class="editor-surface" contenteditable="true"></div>
+                <script type="application/json" class="editor-preview-html">{json.dumps(preview_body_html)}</script>
                 <textarea class="editor-source is-hidden" spellcheck="false">{html.escape(raw_body_html)}</textarea>
                 <textarea class="editor-initial-source is-hidden" spellcheck="false">{html.escape(raw_body_html)}</textarea>
                 <script type="application/json" class="editor-asset-map">{json.dumps(asset_map)}</script>
@@ -1319,6 +1347,17 @@ def _write_html(
     .editor-header {{
       margin-bottom: 6px;
     }}
+    .editor-status {{
+      font-size: 11px;
+      color: var(--muted);
+      background: #f0eff0;
+      border-radius: 0 0 8px 8px;
+      padding: 3px 12px 4px;
+      margin: -10px -14px 10px -14px;
+      min-height: 20px;
+    }}
+    .editor-status.is-active {{ color: #1a7f3c; background: #edf7f0; }}
+    .editor-status.is-error {{ color: #9c1a1a; background: #fdf0f0; }}
     .editor-note {{
       margin: 0;
       color: var(--muted);
@@ -1393,13 +1432,17 @@ def _write_html(
       border: 1px solid var(--line);
       border-radius: 12px;
       background: #fff;
-      padding: 20px 24px;
-      overflow-y: auto;
+      padding: 20px 24px 32px;
+      overflow: auto;
       /* Canvas-like typography */
       font-family: "Lato", "Helvetica Neue", Helvetica, Arial, sans-serif;
       font-size: 14px;
       line-height: 1.6;
       color: #2d3b45;
+      cursor: text;
+    }}
+    .editor-surface:hover {{
+      border-color: rgba(172, 26, 47, 0.4);
     }}
     .editor-surface:focus {{
       outline: 2px solid rgba(172, 26, 47, 0.25);
@@ -1431,8 +1474,6 @@ def _write_html(
     /* Canvas heading styles */
     .editor-surface h2 {{
       color: #ac1a2f;
-      border-bottom: 10px solid #AC1A2F;
-      padding: 10px;
       font-size: 1.5em;
       margin: 1em 0 0.5em;
     }}
@@ -1454,8 +1495,16 @@ def _write_html(
     }}
     .editor-surface hr {{
       border: none;
-      border-top: 8px solid #AC1A2F;
-      margin: 1.5em 0;
+      border-top: 1px solid #c7cfd4;
+      margin: 1.5em 0 0;
+      cursor: pointer;
+      /* Canonical closing hr carries inline style="border-top: 8px solid #AC1A2F;"
+         which overrides this default — bare <hr> dividers stay thin grey.
+         No margin-bottom: the container's padding-bottom (32px) provides spacing. */
+    }}
+    .editor-surface hr.is-selected-hr {{
+      outline: 2px dashed #ac1a2f;
+      outline-offset: 3px;
     }}
     .editor-surface p {{
       margin: 0 0 0.75em;
@@ -1620,8 +1669,11 @@ def _write_html(
         syncSource(shell);
       }}
 
-      // Persist the last known selection per shell so toolbar buttons can restore
-      // it after the brief focus-loss that some browsers (e.g. Brave) cause.
+      // ── Selection tracker ────────────────────────────────────────────────
+      // Captured whenever the cursor moves or text is selected inside any
+      // editor surface.  Toolbar click handlers restore this snapshot before
+      // calling document.execCommand() so the command always targets the right
+      // content even in browsers where a button press briefly shifts focus.
       const savedRanges = new WeakMap();
       document.addEventListener('selectionchange', () => {{
         const sel = window.getSelection();
@@ -1634,6 +1686,25 @@ def _write_html(
           }}
         }});
       }});
+
+      // Restore the last saved selection into window.getSelection().
+      function _restoreSel(shell) {{
+        const saved = savedRanges.get(shell);
+        if (!saved) return false;
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(saved);
+        return true;
+      }}
+
+      // Update the status bar for the given shell.
+      function _setStatus(shell, msg, isError) {{
+        const bar = shell.querySelector('[data-editor-status]');
+        if (!bar) return;
+        bar.textContent = msg;
+        bar.classList.toggle('is-error', !!isError);
+        bar.classList.toggle('is-active', !isError);
+      }}
 
       function previewToRaw(htmlText, assetMap) {{
         let updated = htmlText;
@@ -1657,7 +1728,8 @@ def _write_html(
         const surface = getSurface(shell);
         const source = shell.querySelector('.editor-source');
         const assetMap = parseAssetMap(shell);
-        if (surface) source.value = previewToRaw(surface.innerHTML, assetMap);
+        if (!surface) return;
+        source.value = previewToRaw(surface.innerHTML, assetMap);
       }}
 
       function applyAccordionMode(shell, mode) {{
@@ -1731,64 +1803,38 @@ def _write_html(
         syncSource(shell);
       }}
 
-      function execBlock(shell, blockTag) {{
-        const surface = getSurface(shell);
-        if (!surface) return;
-        pushUndo(shell);
-        // Read saved range BEFORE surface.focus() — calling focus() fires
-        // selectionchange which would overwrite savedRanges with the post-focus
-        // cursor position, discarding the user's text selection.
-        const saved = savedRanges.get(shell);
-        surface.focus();
-        if (saved) {{
-          const s = window.getSelection();
-          s.removeAllRanges();
-          s.addRange(saved);
-        }}
-        const sel = window.getSelection();
-        if (!sel || !sel.rangeCount) return;
-        // Walk up from anchor node to find the direct child of surface
-        let node = sel.getRangeAt(0).startContainer;
-        if (node.nodeType === Node.TEXT_NODE) node = node.parentNode;
-        while (node && node.parentNode !== surface) node = node.parentNode;
-        if (!node || node === surface) {{
-          // Couldn't locate a containing block — leave as-is
-          return;
-        }}
-        // Swap the tag in-place, preserving innerHTML and style/class attrs
-        const newBlock = document.createElement(blockTag);
-        newBlock.innerHTML = node.innerHTML;
-        for (const attr of node.attributes) {{
-          if (attr.name === 'style' || attr.name === 'class') {{
-            newBlock.setAttribute(attr.name, attr.value);
-          }}
-        }}
-        node.parentNode.replaceChild(newBlock, node);
-        // Leave cursor at end of the new block
-        const newRange = document.createRange();
-        newRange.selectNodeContents(newBlock);
-        newRange.collapse(false);
-        sel.removeAllRanges();
-        sel.addRange(newRange);
-        syncSource(shell);
-      }}
+      // ── Editing commands ─────────────────────────────────────────────────
+      // Uses document.execCommand — the universally-supported browser API for
+      // contenteditable editing.  _restoreSel() puts the user's selection back
+      // into window.getSelection() before each command so the operation always
+      // targets the correct text regardless of any transient focus change.
 
       function execCommand(shell, command) {{
         const surface = getSurface(shell);
         if (!surface) return;
-        pushUndo(shell);
-        // Read saved range BEFORE surface.focus() — calling focus() fires
-        // selectionchange which would overwrite savedRanges with the post-focus
-        // cursor position, discarding the user's text selection.
-        const saved = savedRanges.get(shell);
-        surface.focus();
-        if (saved) {{
-          const sel = window.getSelection();
-          sel.removeAllRanges();
-          sel.addRange(saved);
+        if (!savedRanges.has(shell)) {{
+          _setStatus(shell, 'Click inside the editor text area first, then try again', true);
+          return;
         }}
-        document.execCommand(command, false, null);
+        pushUndo(shell);
+        _restoreSel(shell);
+        const ok = document.execCommand(command, false, null);
         syncSource(shell);
+        _setStatus(shell, ok ? command + ' applied' : command + ' had no effect (select text first)', !ok);
+      }}
+
+      function execBlock(shell, blockTag) {{
+        const surface = getSurface(shell);
+        if (!surface) return;
+        if (!savedRanges.has(shell)) {{
+          _setStatus(shell, 'Click inside the editor text area first, then try again', true);
+          return;
+        }}
+        pushUndo(shell);
+        _restoreSel(shell);
+        const ok = document.execCommand('formatBlock', false, blockTag);
+        syncSource(shell);
+        _setStatus(shell, ok ? 'Changed to ' + blockTag.toUpperCase() : 'formatBlock had no effect — click in text first', !ok);
       }}
 
       function clearSelectedImages(scope) {{
@@ -1801,6 +1847,57 @@ def _write_html(
 
       function selectedMedia(shell) {{
         return getSurface(shell)?.querySelector('img.is-selected, video.is-selected, iframe.is-selected') || null;
+      }}
+
+      // ── HR divider helpers ──────────────────────────────────────────────
+      const HR_STYLES = {{
+        thick10: 'border-top: 10px solid #AC1A2F; border-bottom: none; margin: 0 0 16px 0;',
+        thick8:  'border-top: 8px solid #AC1A2F; border-bottom: none; margin: 0 0 16px 0;',
+        thin:    '',
+      }};
+
+      function selectedHr(shell) {{
+        return getSurface(shell)?.querySelector('hr.is-selected-hr') || null;
+      }}
+
+      function clearSelectedHrs(scope) {{
+        scope?.querySelectorAll('hr.is-selected-hr').forEach((el) => el.classList.remove('is-selected-hr'));
+      }}
+
+      function applyHrChange(shell, hrType) {{
+        const surface = getSurface(shell);
+        if (!surface) return;
+        const hr = selectedHr(shell);
+        pushUndo(shell);
+        if (hr) {{
+          // Modify an existing selected HR
+          const style = HR_STYLES[hrType];
+          if (style) {{
+            hr.setAttribute('style', style);
+          }} else {{
+            hr.removeAttribute('style');
+          }}
+          clearSelectedHrs(surface);
+        }} else {{
+          // Insert a new HR after the block that contains the cursor
+          const newHr = document.createElement('hr');
+          const style = HR_STYLES[hrType];
+          if (style) newHr.setAttribute('style', style);
+          const sel = window.getSelection();
+          let inserted = false;
+          if (sel && sel.rangeCount > 0) {{
+            let anchor = sel.getRangeAt(0).endContainer;
+            while (anchor.parentNode && anchor.parentNode !== surface) {{
+              anchor = anchor.parentNode;
+            }}
+            if (anchor.parentNode === surface) {{
+              anchor.after(newHr);
+              inserted = true;
+            }}
+          }}
+          if (!inserted) surface.appendChild(newHr);
+        }}
+        syncSource(shell);
       }}
 
       function applyImagePreset(shell, size) {{
@@ -1817,7 +1914,7 @@ def _write_html(
         if (media.tagName === 'IFRAME') {{
           const currW = parseFloat(media.getAttribute('width') || media.style.width) || 560;
           const currH = parseFloat(media.getAttribute('height') || media.style.height) || 315;
-          const ratio = currH / currW;
+          const ratio = currW > 0 ? currH / currW : 1;
           const targetW = size === 'full' ? 560 : Number(size);
           media.style.width = size === 'full' ? '100%' : `${{size}}px`;
           media.style.height = `${{Math.round(targetW * ratio)}}px`;
@@ -1922,38 +2019,71 @@ def _write_html(
       }}
 
       function applyIconChange(shell, basename) {{
-        // Locate the first icon heading in the editor that has a templateassets img
+        // Locate the first icon heading in the editor that has a templateassets img.
+        // In the editor-surface all TemplateAssets/ image srcs are replaced with
+        // base64 data URIs, so we reverse-map via assetMap instead of checking src paths.
         const surface = getSurface(shell);
         if (!surface) return false;
         const catalog = iconCatalog();
         const entry = catalog.find((e) => e.basename === basename);
         if (!entry) return false;
+        const assetMap = parseAssetMap(shell);
+
+        // Build a set of data-URI values that correspond to TemplateAssets paths
+        const templateAssetDataUris = new Set(
+          Object.entries(assetMap)
+            .filter(([rawRef]) => rawRef.toLowerCase().includes('templateassets'))
+            .map(([, dataUri]) => dataUri)
+        );
+        // An img is a template-assets icon if its src is one of those data URIs,
+        // or (fallback for newly-regenerated pages) if the src itself references TemplateAssets
+        const isIconImg = (img) =>
+          templateAssetDataUris.has(img.src) ||
+          img.src.toLowerCase().includes('templateassets');
+
         const headings = Array.from(surface.querySelectorAll('h1, h2, h3, h4, h5, h6'));
-        // Prefer the heading that already contains a templateassets icon img
-        let targetHeading = headings.find((h) => h.querySelector('img[src*="TemplateAssets"], img[src*="templateassets"]'));
-        if (!targetHeading) {{
-          // Fall back to the heading nearest the current cursor/selection
-          const sel = surface.ownerDocument.getSelection();
-          if (sel && sel.rangeCount) {{
-            const anchorNode = sel.getRangeAt(0).startContainer;
-            const anchorEl = anchorNode.nodeType === 1 ? anchorNode : anchorNode.parentElement;
-            // Walk up from cursor — are we already inside a heading?
+        // Priority 1: heading nearest last cursor position (savedRanges)
+        // This lets the user click into a specific section heading, then pick its icon.
+        let targetHeading = null;
+        const savedRange = savedRanges.get(shell);
+        if (savedRange) {{
+          const anchorNode = savedRange.startContainer;
+          const anchorEl = anchorNode.nodeType === 1 ? anchorNode : anchorNode.parentElement;
+          if (surface.contains(anchorEl)) {{
+            // Walk up from cursor — are we directly inside a heading?
             let cursorHeading = anchorEl.closest('h1,h2,h3,h4,h5,h6');
             if (!cursorHeading) {{
-              // Find the last heading that comes before the cursor in document order
+              // Find the last heading that precedes the cursor in document order
               cursorHeading = [...headings].reverse().find((h) =>
                 (h.compareDocumentPosition(anchorEl) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
               );
             }}
-            targetHeading = cursorHeading || headings[0];
-          }} else {{
-            targetHeading = headings[0];
+            targetHeading = cursorHeading || null;
           }}
         }}
-        if (!targetHeading) return false;
+        // Priority 2: first heading that already has a template-assets icon img
+        if (!targetHeading) {{
+          targetHeading = headings.find((h) =>
+            Array.from(h.querySelectorAll('img')).some(isIconImg)
+          );
+        }}
+        // Priority 3: first heading of any kind
+        if (!targetHeading) targetHeading = headings[0];
+        // Priority 4: no heading at all — create one at the top of the surface
+        if (!targetHeading) {{
+          targetHeading = document.createElement('h2');
+          targetHeading.setAttribute('style', 'color: #ac1a2f;');
+          // Insert after any leading <hr> (accent divider), otherwise as first child
+          const firstHr = surface.querySelector(':scope > hr:first-child');
+          if (firstHr) {{
+            firstHr.after(targetHeading);
+          }} else {{
+            surface.insertBefore(targetHeading, surface.firstChild);
+          }}
+        }}
         pushUndo(shell);
-        const iconImg = targetHeading.querySelector('img[src*="TemplateAssets"], img[src*="templateassets"]');
-        const assetMap = parseAssetMap(shell);
+        // Find existing icon img (using the same data-URI-aware matcher)
+        const iconImg = Array.from(targetHeading.querySelectorAll('img')).find(isIconImg) || null;
         // Build a raw ref + preview src for the new icon
         const rawRef = `../TemplateAssets/${{basename}}`;
         const previewSrc = entry.data_uri || rawRef;
@@ -2081,27 +2211,100 @@ def _write_html(
         }}
       }}
 
-      // Prevent toolbar buttons from stealing editor focus (preserves selection for execCommand)
-      document.addEventListener('mousedown', (event) => {{
-        if (event.target.closest(
-          'button[data-editor-command], button[data-editor-block], ' +
-          'button[data-editor-image-size], button[data-editor-image-align], ' +
-          'button[data-editor-image-wrap], button[data-editor-image-clear], ' +
-          'button[data-editor-toggle-source], button[data-editor-reset], button[data-editor-undo], button[data-editor-copy]'
-        )) {{
-          event.preventDefault();
-        }}
-      }}, true);
-
+      // ── Per-shell setup ───────────────────────────────────────────────
       document.querySelectorAll('.editor-shell').forEach((shell) => {{
         const surface = shell.querySelector('.editor-surface');
         const source = shell.querySelector('.editor-source');
+        if (!surface || !source) return;  // guard: skip shells without editor DOM
 
-        // Media click: highlight selected image, video, or iframe.
+        // Inject the preview HTML via JS rather than embedding it in the outer
+        // page's HTML source.  When complex page content (nested <footer>,
+        // tables, etc.) is embedded directly, Chrome's HTML5 parser can
+        // implicitly close the editor-surface <div> early, pushing the
+        // trailing <hr> and other tail content outside the editor box.
+        const previewHtmlEl = shell.querySelector('.editor-preview-html');
+        if (previewHtmlEl) surface.innerHTML = JSON.parse(previewHtmlEl.textContent);
+
+        // Text / block formatting buttons: bind mousedown + click directly so
+        // each button owns its own focus-preservation logic.  mousedown
+        // preventDefault stops the button from stealing keyboard focus (and
+        // thus the text selection) away from the editor surface.
+        // The click handler restores the saved range, then calls execCommand /
+        // execBlock which each use document.execCommand internally.
+        shell.querySelectorAll('[data-editor-command]').forEach((btn) => {{
+          btn.addEventListener('mousedown', (e) => {{ e.preventDefault(); }});
+          btn.addEventListener('click', () => {{
+            execCommand(shell, btn.getAttribute('data-editor-command'));
+          }});
+        }});
+        shell.querySelectorAll('[data-editor-block]').forEach((btn) => {{
+          btn.addEventListener('mousedown', (e) => {{ e.preventDefault(); }});
+          btn.addEventListener('click', () => {{
+            execBlock(shell, btn.getAttribute('data-editor-block'));
+          }});
+        }});
+
+        // Status bar: live feedback on editor state.
+        surface.addEventListener('focus', () => {{
+          _setStatus(shell, 'Editor active — place cursor or select text, then click a toolbar button', false);
+        }});
+        surface.addEventListener('blur', () => {{
+          const bar = shell.querySelector('[data-editor-status]');
+          if (bar) {{
+            bar.textContent = 'Editor inactive — click inside the white editor area below first';
+            bar.classList.remove('is-active', 'is-error');
+          }}
+        }});
+        surface.addEventListener('mouseup', () => {{
+          const sel = window.getSelection();
+          if (sel && sel.toString().trim()) {{
+            _setStatus(shell, 'Selected: \u201c' + sel.toString().trim().slice(0, 40) + (sel.toString().length > 40 ? '\u2026' : '') + '\u201d — now click a toolbar button', false);
+          }}
+        }});
+        surface.addEventListener('keyup', () => {{
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount) {{
+            const txt = sel.toString().trim();
+            _setStatus(shell, txt
+              ? 'Selected: \u201c' + txt.slice(0, 40) + (txt.length > 40 ? '\u2026' : '') + '\u201d'
+              : 'Cursor placed — use toolbar buttons', false);
+          }}
+        }});
+
+        // Keyboard shortcuts inside the editor surface.
+        surface.addEventListener('keydown', (event) => {{
+          if ((event.metaKey || event.ctrlKey) && event.key === 'z') {{
+            event.preventDefault();
+            popUndo(shell);
+          }}
+        }});
+
+        // Media / HR click handling.
         // Note: iframes/videos have pointer-events:none so event.target will
         // be whatever element is behind them — closest() won't find them.
         // Fall back to a bounding-rect hit test for those elements.
         surface.addEventListener('mousedown', (event) => {{
+          // HR click: select it for potential style change, or deselect on elsewhere.
+          if (event.target.tagName === 'HR') {{
+            clearSelectedImages(surface);
+            const wasSelected = event.target.classList.contains('is-selected-hr');
+            clearSelectedHrs(surface);
+            if (!wasSelected) {{
+              event.target.classList.add('is-selected-hr');
+              const st = (event.target.getAttribute('style') || '').toLowerCase();
+              let label = 'grey thin divider';
+              if (st.includes('10px')) label = '10 px red divider';
+              else if (st.includes('8px')) label = '8 px red divider';
+              else if (st.includes('ac1a2f')) label = 'red divider';
+              _setStatus(shell, 'Selected: ' + label + ' \u2014 use Divider buttons to change', false);
+            }} else {{
+              _setStatus(shell, 'Divider deselected', false);
+            }}
+            event.preventDefault();
+            return;
+          }}
+          clearSelectedHrs(surface);
+
           let clickedMedia = event.target.closest('img, video, iframe');
           if (!clickedMedia) {{
             const x = event.clientX, y = event.clientY;
@@ -2113,6 +2316,15 @@ def _write_html(
           if (!clickedMedia) return;
           clearSelectedImages(surface);
           clickedMedia.classList.add('is-selected');
+          // Explicitly record a range AT this element before surface.focus()
+          // fires a selectionchange that could move savedRanges to the surface
+          // start, making the icon picker target the wrong heading.
+          try {{
+            const r = document.createRange();
+            r.selectNode(clickedMedia);
+            savedRanges.set(shell, r);
+          }} catch (_) {{}}
+          surface.focus();
         }});
 
         // Source textarea edits → update editor surface
@@ -2186,6 +2398,15 @@ def _write_html(
         const imageClearButton = event.target.closest('[data-editor-image-clear]');
         if (imageClearButton) {{
           clearImageFormatting(imageClearButton.closest('.editor-shell'));
+          return;
+        }}
+
+        const hrButton = event.target.closest('[data-editor-hr]');
+        if (hrButton) {{
+          applyHrChange(
+            hrButton.closest('.editor-shell'),
+            hrButton.getAttribute('data-editor-hr')
+          );
           return;
         }}
 
@@ -2271,7 +2492,12 @@ def _write_html(
           ) || null;
         }}
         if (!bannerImg) {{
-          return;
+          // No banner on the page — insert one at the very top of the surface
+          pushUndo(shell);
+          bannerImg = document.createElement('img');
+          bannerImg.style.cssText = 'display:block; width:100%; max-width:100%; height:auto; margin:0 0 8px 0;';
+          bannerImg.alt = 'Page banner';
+          surface.insertBefore(bannerImg, surface.firstChild);
         }}
         // Swap the asset map entry for the banner
         const assetMapEl = shell.querySelector('.editor-asset-map');
@@ -2291,6 +2517,11 @@ def _write_html(
       // Collapse every card except the first (highest priority)
       allCards.forEach((card, idx) => {{
         if (idx > 0) card.classList.add('is-collapsed');
+      }});
+      // Scroll the first expanded card into view after initial render.
+      requestAnimationFrame(() => {{
+        const firstExpanded = allCards.find((c) => !c.classList.contains('is-collapsed'));
+        if (firstExpanded) firstExpanded.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
       }});
       // Click the page-head to expand/collapse
       document.querySelectorAll('.page-head').forEach((head) => {{

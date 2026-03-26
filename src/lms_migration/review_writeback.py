@@ -215,14 +215,16 @@ def apply_review_draft(
 
             writeback_bp_issues: list = []
             if best_practice_enforcer:
-                updated_document, best_practice_changes, writeback_bp_issues = apply_best_practice_enforcer(
-                    updated_document,
-                    file_path=relative_path,
-                    policy=BestPracticeEnforcerPolicy(
-                        enabled=True,
-                        enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
-                        ensure_external_links_new_tab=True,
-                    ),
+                updated_document, best_practice_changes, writeback_bp_issues = (
+                    apply_best_practice_enforcer(
+                        updated_document,
+                        file_path=relative_path,
+                        policy=BestPracticeEnforcerPolicy(
+                            enabled=True,
+                            enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
+                            ensure_external_links_new_tab=True,
+                        ),
+                    )
                 )
                 applied_changes.extend(best_practice_changes)
                 best_practice_change_total += sum(

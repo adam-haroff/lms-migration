@@ -31,6 +31,7 @@ from .html_tools import (
     detect_d2l_media_library_embeds,
     detect_email_submission_issues,
     detect_manual_review_issues,
+    inject_accent_divider,
     neutralize_legacy_d2l_hrefs_in_markup,
     repair_missing_local_references,
 )
@@ -2317,14 +2318,16 @@ def run_migration(
 
             best_practice_issues: list[ManualReviewIssue] = []
             if best_practice_enforcer:
-                updated, best_practice_changes, best_practice_issues = apply_best_practice_enforcer(
-                    updated,
-                    file_path=relative_html_path,
-                    policy=BestPracticeEnforcerPolicy(
-                        enabled=True,
-                        enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
-                        ensure_external_links_new_tab=True,
-                    ),
+                updated, best_practice_changes, best_practice_issues = (
+                    apply_best_practice_enforcer(
+                        updated,
+                        file_path=relative_html_path,
+                        policy=BestPracticeEnforcerPolicy(
+                            enabled=True,
+                            enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
+                            ensure_external_links_new_tab=True,
+                        ),
+                    )
                 )
                 applied_changes.extend(best_practice_changes)
 
@@ -2344,6 +2347,12 @@ def run_migration(
                             count=max(1, topic_phrase_hits + topic_ref_hits),
                         )
                     )
+
+            # Inject a top-of-page accent divider for pages that lack an
+            # icon heading (those pages miss the border-bottom on the h2).
+            if template_overlay_context is not None:
+                updated, accent_hr_changes = inject_accent_divider(updated)
+                applied_changes.extend(accent_hr_changes)
 
             manual_issues = detect_manual_review_issues(
                 updated, rules.manual_review_triggers
@@ -2512,14 +2521,16 @@ def run_migration(
 
                 manifest_best_practice_issues: list[ManualReviewIssue] = []
                 if best_practice_enforcer:
-                    updated, best_practice_changes, manifest_best_practice_issues = apply_best_practice_enforcer(
-                        updated,
-                        file_path=relative_manifest_path,
-                        policy=BestPracticeEnforcerPolicy(
-                            enabled=True,
-                            enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
-                            ensure_external_links_new_tab=True,
-                        ),
+                    updated, best_practice_changes, manifest_best_practice_issues = (
+                        apply_best_practice_enforcer(
+                            updated,
+                            file_path=relative_manifest_path,
+                            policy=BestPracticeEnforcerPolicy(
+                                enabled=True,
+                                enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
+                                ensure_external_links_new_tab=True,
+                            ),
+                        )
                     )
                     applied_changes.extend(best_practice_changes)
 
@@ -2695,16 +2706,18 @@ def run_migration(
 
                     intro_best_practice_issues: list[ManualReviewIssue] = []
                     if best_practice_enforcer:
-                        intro_updated, intro_best_practice_changes, intro_best_practice_issues = (
-                            apply_best_practice_enforcer(
-                                intro_updated,
-                                file_path=intro_relative_path,
-                                policy=BestPracticeEnforcerPolicy(
-                                    enabled=True,
-                                    enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
-                                    ensure_external_links_new_tab=True,
-                                ),
-                            )
+                        (
+                            intro_updated,
+                            intro_best_practice_changes,
+                            intro_best_practice_issues,
+                        ) = apply_best_practice_enforcer(
+                            intro_updated,
+                            file_path=intro_relative_path,
+                            policy=BestPracticeEnforcerPolicy(
+                                enabled=True,
+                                enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
+                                ensure_external_links_new_tab=True,
+                            ),
                         )
                         intro_applied_changes.extend(intro_best_practice_changes)
 
@@ -2911,16 +2924,22 @@ def run_migration(
             for html_file in html_files:
                 relative_html_path = str(html_file.relative_to(unpack_dir).as_posix())
                 original = _read_text(html_file)
-                updated, final_best_practice_changes, final_best_practice_issues = apply_best_practice_enforcer(
-                    original,
-                    file_path=relative_html_path,
-                    policy=BestPracticeEnforcerPolicy(
-                        enabled=True,
-                        enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
-                        ensure_external_links_new_tab=True,
-                    ),
+                updated, final_best_practice_changes, final_best_practice_issues = (
+                    apply_best_practice_enforcer(
+                        original,
+                        file_path=relative_html_path,
+                        policy=BestPracticeEnforcerPolicy(
+                            enabled=True,
+                            enforce_module_checklist_closer=policy_profile.require_mc_closing_bullet,
+                            ensure_external_links_new_tab=True,
+                        ),
+                    )
                 )
-                if not final_best_practice_changes and not final_best_practice_issues and updated == original:
+                if (
+                    not final_best_practice_changes
+                    and not final_best_practice_issues
+                    and updated == original
+                ):
                     continue
 
                 if updated != original:
