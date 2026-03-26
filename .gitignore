@@ -6,6 +6,7 @@ output/
 *.egg-info/
 
 # Scratch / debug scripts (never commit)
+.scratch/
 _check_*.py
 _debug_*.py
 _scratch_*.py

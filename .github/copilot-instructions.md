@@ -255,7 +255,7 @@ From scanning all 9 course zip exports:
 
 ---
 
-## Completed phases (as of 2026-03-23)
+## Completed phases (as of 2026-03-25)
 
 - **Phase 1** — Checklist quality, divider fix, quiz/rubric audits, LTI/iframe detection (76b25a1)
 - **Phase 2** — `canvas_preview.py` Canvas Preview API, `canvas_api.py`, Canvas live audit (21dc339)
@@ -281,6 +281,33 @@ From scanning all 9 course zip exports:
   links with submission context AND explicit phrases ("email your assignment", "submit via email").
   Wired into all 4 HTML processing loops in `pipeline.py`. New `email_submission_workflow` P1 category
   added to `fix_checklist.py` and `_CATEGORY_LABELS`. 620 tests. Committed 2137f06.
+- **Phase 4 item 6** — Pipeline accent HR injection + workbench UX + insert capabilities. Committed
+  b34b07a. 689 tests. Details below.
+
+### Phase 4 item 6 — accent HR injection and workbench improvements
+
+**Pipeline accent HR injection (Option B)**:
+`inject_accent_divider(content)` in `html_tools.py` prepends a 10 px red `<hr>` to pages that lack an
+icon heading. Wired into `pipeline.py` after all transforms, before writing to disk. Only activates
+when `template_overlay_context is not None`. ACC-2321 result: 21 icon-heading pages + 13 injected-HR
+pages + 1 template-merger stub = 35 pages, 100% coverage.
+
+Key constants: `_ICON_HEADING_RE` (detects `<h*>…<img…>` pattern), `_ACCENT_HR` (the 10 px red HR
+string). The function injects inside `<body>` if present, otherwise prepends.
+
+**Page Review Workbench UX improvements** (in `review_pack.py`):
+- HR type shown in status bar when selected ("10 px red divider", "8 px red divider", "grey thin")
+- Cmd/Ctrl+Z calls `popUndo(shell)` via keydown listener on editor surfaces
+- `applyImagePreset()` division-by-zero guard: `currW > 0 ? currH / currW : 1`
+- Auto-scroll to first expanded card via `requestAnimationFrame` + `scrollIntoView`
+
+**Insert capabilities** (in `review_pack.py`):
+- `applyIconChange()` now creates a new `<h2 style="color: #ac1a2f;">` when no heading exists on
+  the page, placed after any accent HR. The icon and label are added to it.
+- Banner picker inserts a new `<img>` at the top of the surface when no banner exists,
+  instead of silently returning.
+- HR divider buttons already support insert (from prior session): when no HR is selected,
+  clicking a divider button inserts a new HR after the block containing the cursor.
 
 ## What needs doing next
 
