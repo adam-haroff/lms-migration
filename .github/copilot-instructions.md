@@ -43,6 +43,12 @@ psy-2180, psy-2235, vet-2111.
 - **mat-0200, vet-2111** — have D2L quickLink LTI iframes (`quickLink.d2l?type=lti`)
 - **psy-2180** — has a Panopto iframe embed
 
+Corpus terminology:
+
+- `resources/incoming/` = active intake/reference courses for real migration work
+- `resources/examples/` = curated example/reference corpus
+- `resources/training-corpus-v2/` = separate training corpus used by pattern analysis
+
 Standard conversion command:
 
 ```bash
@@ -51,7 +57,7 @@ lms-migrate resources/incoming/acc-2321/before/d2l-export.zip \
   --rules rules/default_rules.json \
   --policy-profile strict \
   --best-practice-enforcer \
-  --template-package resources/examples/template/elearn-standard-template-export-20260316.imscc \
+  --template-package resources/examples/template/elearn-standard-template-export-20260324.imscc \
   --template-alias-map-json rules/template_asset_aliases.json \
   --template-merge \
   --output-dir output/acc-2321

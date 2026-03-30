@@ -135,6 +135,29 @@ def build_parser() -> argparse.ArgumentParser:
             "Requires --template-package."
         ),
     )
+    parser.add_argument(
+        "--full-template-shell",
+        action="store_true",
+        default=False,
+        help=(
+            "Include the full starter-template shell modules/pages/resources in the "
+            "generated package. Requires --template-merge and --template-package."
+        ),
+    )
+    parser.add_argument(
+        "--intro-checklist-handling",
+        type=str,
+        choices=("preserve", "rebuild-when-confident"),
+        default="rebuild-when-confident",
+        help="How to handle Introduction and Checklist synthesis during template merge.",
+    )
+    parser.add_argument(
+        "--learning-activities-handling",
+        type=str,
+        choices=("preserve", "rebuild-when-confident"),
+        default="preserve",
+        help="How to handle Learning Activities page synthesis during template merge.",
+    )
     return parser
 
 
@@ -196,6 +219,9 @@ def main() -> None:
             ),
             image_layout_mode=args.image_layout_mode,
             template_merge=bool(args.template_merge),
+            full_template_shell=bool(args.full_template_shell),
+            intro_checklist_handling=args.intro_checklist_handling,
+            learning_activities_handling=args.learning_activities_handling,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -205,6 +231,10 @@ def main() -> None:
     print(f"Markdown report: {result.report_markdown}")
     print(f"Manual review CSV: {result.manual_review_csv}")
     print(f"Preflight checklist: {result.preflight_checklist}")
+    if result.kickoff_summary_md is not None:
+        print(f"Kickoff summary Markdown: {result.kickoff_summary_md}")
+    if result.kickoff_summary_json is not None:
+        print(f"Kickoff summary JSON: {result.kickoff_summary_json}")
     if result.template_overlay_report_json is not None:
         print(f"Template overlay report JSON: {result.template_overlay_report_json}")
     print(f"Policy profile: {result.policy_profile_id}")

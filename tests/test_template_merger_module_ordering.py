@@ -25,11 +25,16 @@ from lms_migration.template_merger import (
     _TEMPLATE_START_HERE_TITLE,
     _build_module_meta_xml,
     _course_prefix_from_manifest,
+    _fill_learning_activities_page,
+    _fill_module_intro,
+    _extract_do_this_items_from_learning_activities,
     _home_page_variant,
     _inject_home_page,
     _read_d2l_module_titles,
     _write_course_settings,
     _write_module_meta,
+    classify_page,
+    run_template_merge,
 )
 
 # ---------------------------------------------------------------------------
@@ -37,6 +42,10 @@ from lms_migration.template_merger import (
 # ---------------------------------------------------------------------------
 
 _NS = {"m": _MODULE_META_NS}
+_TEMPLATE_PACKAGE = (
+    Path(__file__).resolve().parents[1]
+    / "resources/examples/template/elearn-standard-template-export-20260324.imscc"
+)
 
 
 def _parse_modules(xml_str: str) -> list[ET.Element]:
@@ -49,6 +58,28 @@ def _module_attr(module_el: ET.Element, tag: str) -> str:
     child = module_el.find(f"m:{tag}", _NS)
     assert child is not None, f"<{tag}> not found in module"
     return (child.text or "").strip()
+
+
+def _write_minimal_d2l_manifest(tmp_path: Path) -> None:
+    manifest = tmp_path / "imsmanifest.xml"
+    manifest.write_text(
+        textwrap.dedent(
+            """\
+            <?xml version="1.0" encoding="UTF-8"?>
+            <manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+              <organizations>
+                <organization identifier="d2l_org">
+                  <item identifier="module1">
+                    <title>Module 1: Sample</title>
+                  </item>
+                </organization>
+              </organizations>
+              <resources />
+            </manifest>
+            """
+        ),
+        encoding="utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +324,109 @@ class TestReadD2lModuleTitles:
         assert result == titles
 
 
+class TestFillModuleIntro:
+    def test_intro_shell_does_not_insert_space_after_icon(self):
+        source = (
+            "<html><head><title>Intro</title></head><body>"
+            "<h1>Introduction</h1><p>Welcome.</p>"
+            "<h2>Objectives</h2><ul><li>Learn it</li></ul>"
+            "</body></html>"
+        )
+        result = _fill_module_intro(
+            source,
+            module_number=1,
+            chapter_title="Chapter 1",
+            path_seed="module-1",
+        )
+        assert (
+            'star.png" alt="" width="45" height="45" loading="lazy"><strong>Introduction</strong>'
+            in result
+        )
+        assert (
+            'bullseye.png" alt="" width="45" height="45" loading="lazy"><strong><span style="color: #ac1a2f;">Module Objectives</span></strong>'
+            in result
+        )
+        assert (
+            'checkmark.png" alt="" width="45" height="45" loading="lazy"><span style="color: #ac1a2f;"><strong>Module Checklist</strong></span>'
+            in result
+        )
+
+    def test_intro_shell_uses_extracted_checklist_items_when_present(self):
+        source = (
+            "<html><head><title>Intro</title></head><body>"
+            "<h1>Introduction</h1><p>Welcome.</p>"
+            "<h2>Objectives</h2><ul><li>Learn it</li></ul>"
+            "<h2>To meet the learning objectives</h2><ul><li>Read Chapter 1</li><li>Post to discussion</li></ul>"
+            "</body></html>"
+        )
+        result = _fill_module_intro(
+            source,
+            module_number=1,
+            chapter_title="Chapter 1",
+            path_seed="Introduction and Objectives.html",
+        )
+        assert "<li>Read Chapter 1</li>" in result
+        assert "<li>Post to discussion</li>" in result
+        assert "Complete the items listed below as you work through this module:" not in result
+
+
+class TestLearningActivitiesClassification:
+    def test_learning_activities_page_role_detected(self):
+        role, module_number, chapter_title = classify_page(
+            "Learning Activities1.html",
+            "Learning Activities",
+        )
+        assert role.value == "learning_activities"
+        assert module_number is None
+        assert chapter_title == "Learning Activities"
+
+
+class TestLearningActivitiesRebuild:
+    def test_extracts_do_this_items_from_legacy_page(self):
+        body = (
+            '<body><p><img src="standardImages/doThis.png" alt=""></p>'
+            "<ul><li>Read Chapter 1</li><li>Take Quiz 1</li></ul></body>"
+        )
+        items = _extract_do_this_items_from_learning_activities(body)
+        assert items == ["Read Chapter 1", "Take Quiz 1"]
+
+    def test_rebuilds_legacy_learning_activities_sections(self):
+        source = (
+            "<html><head><title>Learning Activities</title></head><body>"
+            '<p><img src="standardImages/doThis.png" alt=""></p>'
+            "<ul><li>Read Chapter 1</li></ul>"
+            '<p><img src="standardImages/exploreThis.png" alt=""></p>'
+            '<p><a href="https://example.com">Example resource</a></p>'
+            "</body></html>"
+        )
+        rebuilt = _fill_learning_activities_page(
+            source,
+            path_seed="Learning Activities.html",
+        )
+        assert rebuilt is not None
+        assert "TemplateAssets/paper.png" in rebuilt
+        assert "TemplateAssets/folder.png" in rebuilt
+        assert "Do This" in rebuilt
+        assert "Explore This" in rebuilt
+        assert "<li>Read Chapter 1</li>" in rebuilt
+        assert "Example resource" in rebuilt
+
+    def test_rebuilds_view_this_marker_from_data_template_label(self):
+        source = (
+            "<html><head><title>Learning Activities</title></head><body>"
+            '<p><strong><img src="TemplateAssets/bookmark.png" data-template-label="View This" alt=""></strong></p>'
+            '<p><a href="https://example.com/video">Video Link</a></p>'
+            "</body></html>"
+        )
+        rebuilt = _fill_learning_activities_page(
+            source,
+            path_seed="Learning Activities.html",
+        )
+        assert rebuilt is not None
+        assert "View This" in rebuilt
+        assert "TemplateAssets/video.png" in rebuilt
+
+
 # ---------------------------------------------------------------------------
 # _write_course_settings
 # ---------------------------------------------------------------------------
@@ -410,6 +544,53 @@ class TestWriteModuleMeta:
         _write_module_meta(tmp_path, ["Module 1"])
         meta = tmp_path / "course_settings" / "module_meta.xml"
         ET.parse(str(meta))  # should not raise
+
+
+class TestFullTemplateShell:
+    def test_full_template_shell_injects_shell_resources_into_manifest(
+        self, tmp_path: Path
+    ):
+        _write_minimal_d2l_manifest(tmp_path)
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            full_template_shell=True,
+        )
+
+        manifest = (tmp_path / "imsmanifest.xml").read_text(encoding="utf-8")
+        assert "Template: Image Customizations" in manifest
+        assert "Canvas Resources for Instructors" in manifest
+        assert "Syllabus Quiz" in manifest
+        assert "Course Q&amp;A" in manifest
+        assert "wiki_content/home-page.html" in manifest
+        assert "course_settings/syllabus.html" in manifest
+
+    def test_full_template_shell_writes_real_shell_module_meta_and_web_resources(
+        self, tmp_path: Path
+    ):
+        _write_minimal_d2l_manifest(tmp_path)
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            full_template_shell=True,
+        )
+
+        module_meta = (tmp_path / "course_settings" / "module_meta.xml").read_text(
+            encoding="utf-8"
+        )
+        assert "Template: Image Customizations" in module_meta
+        assert "Canvas Resources for Instructors" in module_meta
+        assert "Syllabus Quiz" in module_meta
+        assert "Course Q&amp;A" in module_meta
+        assert "Module 16: Introduction and Checklist" in module_meta
+
+        home_page = (tmp_path / "wiki_content" / "home-page.html").read_text(
+            encoding="utf-8"
+        )
+        assert "../web_resources/" in home_page
+        assert "TemplateAssets/" not in home_page
 
     def test_idempotent_if_already_exists(self, tmp_path: Path):
         _write_module_meta(tmp_path, ["Module 1"])

@@ -1081,13 +1081,13 @@ def main() -> None:
         "--training-courses-root",
         type=Path,
         default=Path("resources/training-corpus-v2/courses"),
-        help="Training corpus root with before/after course folders",
+        help="Dedicated training corpus root with before/after course folders.",
     )
     parser.add_argument(
         "--examples-courses-root",
         type=Path,
         default=Path("resources/examples"),
-        help="Optional second corpus root for example courses with Canvas gold exports.",
+        help="Optional second corpus root for curated example/reference courses with Canvas gold exports.",
     )
     parser.add_argument(
         "--template-package",

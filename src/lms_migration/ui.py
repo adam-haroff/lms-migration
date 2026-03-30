@@ -132,6 +132,8 @@ class LMSMigrationUI:
         self.output_dir_var = tk.StringVar(value=str(default_output))
         self.enable_best_practice_enforcer_var = tk.BooleanVar(value=True)
         self.enable_template_overlay_var = tk.BooleanVar(value=True)
+        self.template_merge_var = tk.BooleanVar(value=True)
+        self.full_template_shell_var = tk.BooleanVar(value=False)
         self.template_package_var = tk.StringVar(
             value=(
                 str(default_template_package)
@@ -151,6 +153,10 @@ class LMSMigrationUI:
         self.template_color_standards_var = tk.BooleanVar(value=True)
         self.template_divider_standards_var = tk.BooleanVar(value=True)
         self.image_layout_mode_var = tk.StringVar(value="safe-block")
+        self.intro_checklist_handling_var = tk.StringVar(
+            value="rebuild-when-confident"
+        )
+        self.learning_activities_handling_var = tk.StringVar(value="preserve")
         default_policy = (
             "strict"
             if "strict" in self.available_policy_profiles
@@ -863,6 +869,20 @@ class LMSMigrationUI:
             variable=self.template_overlay_use_alias_map_var,
         )
         self.template_overlay_use_alias_map_check.grid(row=0, column=1, sticky="w")
+        self.template_merge_check = ttk.Checkbutton(
+            tmpl_row,
+            text="Apply Template Merge",
+            variable=self.template_merge_var,
+        )
+        self.template_merge_check.grid(row=0, column=2, sticky="w", padx=(16, 0))
+        self.full_template_shell_check = ttk.Checkbutton(
+            tmpl_row,
+            text="Include Full Starter Template Shell",
+            variable=self.full_template_shell_var,
+        )
+        self.full_template_shell_check.grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
 
         # Conversion options
         opts = ttk.LabelFrame(parent, text="Conversion Options", padding=10)
@@ -959,6 +979,42 @@ class LMSMigrationUI:
             state="readonly",
         )
         self.math_handling_combo.grid(row=6, column=1, sticky="w", padx=6, pady=3)
+
+        ttk.Label(opts, text="Intro/Checklist handling").grid(
+            row=7, column=0, sticky="w", pady=3
+        )
+        self.intro_checklist_handling_combo = ttk.Combobox(
+            opts,
+            textvariable=self.intro_checklist_handling_var,
+            values=("rebuild-when-confident", "preserve"),
+            state="readonly",
+        )
+        self.intro_checklist_handling_combo.grid(
+            row=7, column=1, sticky="w", padx=6, pady=3
+        )
+        ttk.Label(
+            opts,
+            text="Controls template synthesis of Introduction and Checklist pages.",
+            foreground="#555555",
+        ).grid(row=7, column=2, sticky="w", pady=3)
+
+        ttk.Label(opts, text="Learning Activities handling").grid(
+            row=8, column=0, sticky="w", pady=3
+        )
+        self.learning_activities_handling_combo = ttk.Combobox(
+            opts,
+            textvariable=self.learning_activities_handling_var,
+            values=("rebuild-when-confident", "preserve"),
+            state="readonly",
+        )
+        self.learning_activities_handling_combo.grid(
+            row=8, column=1, sticky="w", padx=6, pady=3
+        )
+        ttk.Label(
+            opts,
+            text="Rebuilds legacy Learning Activities pages only when clear section markers are found.",
+            foreground="#555555",
+        ).grid(row=8, column=2, sticky="w", pady=3)
 
         # Template standards
         tpl = ttk.LabelFrame(parent, text="Template Standards", padding=10)
@@ -1683,7 +1739,19 @@ class LMSMigrationUI:
         self.root.unbind_all("<Button-4>")
         self.root.unbind_all("<Button-5>")
 
+    def _mousewheel_event_belongs_to_dropdown(self, event: tk.Event) -> bool:
+        widget = getattr(event, "widget", None)
+        if widget is None:
+            return False
+        try:
+            widget_class = str(widget.winfo_class())
+        except Exception:
+            return False
+        return widget_class in {"TCombobox", "Combobox", "Listbox"}
+
     def _on_mousewheel(self, event: tk.Event) -> None:
+        if self._mousewheel_event_belongs_to_dropdown(event):
+            return
         canvas = getattr(self, "_active_scroll_canvas", None)
         if canvas is None:
             return
@@ -1743,8 +1811,15 @@ class LMSMigrationUI:
         self.accordion_alignment_combo.configure(
             state="disabled" if busy else "readonly"
         )
+        self.intro_checklist_handling_combo.configure(
+            state="disabled" if busy else "readonly"
+        )
+        self.learning_activities_handling_combo.configure(
+            state="disabled" if busy else "readonly"
+        )
         self.template_overlay_use_alias_map_check.configure(state=state)
         self.enable_template_overlay_check.configure(state=state)
+        self.template_merge_check.configure(state=state)
         self.template_module_structure_check.configure(state=state)
         self.template_visual_standards_check.configure(state=state)
         self._sync_template_visual_subcontrols_state()
@@ -1848,6 +1923,15 @@ class LMSMigrationUI:
             self.image_layout_mode_var.get().strip().lower() or "safe-block"
         )
         template_overlay_enabled = bool(self.enable_template_overlay_var.get())
+        template_merge_enabled = bool(self.template_merge_var.get())
+        full_template_shell = bool(self.full_template_shell_var.get())
+        intro_checklist_handling = (
+            self.intro_checklist_handling_var.get().strip().lower()
+            or "rebuild-when-confident"
+        )
+        learning_activities_handling = (
+            self.learning_activities_handling_var.get().strip().lower() or "preserve"
+        )
         template_package: Path | None = None
         template_alias_map_json: Path | None = None
 
@@ -1863,12 +1947,12 @@ class LMSMigrationUI:
                 f"Policy profiles file not found: {self.policy_profiles_path}",
             )
             return None
-        if template_overlay_enabled:
+        if template_overlay_enabled or template_merge_enabled:
             template_package_text = self.template_package_var.get().strip()
             if not template_package_text:
                 messagebox.showwarning(
                     "Missing template package",
-                    "Select a template package (.imscc) or disable Template Overlay.",
+                    "Select a template package (.imscc) or disable Template Overlay / Template Merge.",
                 )
                 return None
             template_package = Path(template_package_text)
@@ -1889,6 +1973,12 @@ class LMSMigrationUI:
                         )
                         return None
                     template_alias_map_json = alias_path
+        if full_template_shell and not template_merge_enabled:
+            messagebox.showwarning(
+                "Template merge required",
+                "Enable Apply Template Merge to use Full Starter Template Shell.",
+            )
+            return None
 
         if not self.visual_original_zip_var.get().strip():
             self.visual_original_zip_var.set(str(input_zip))
@@ -1911,6 +2001,10 @@ class LMSMigrationUI:
             "apply_template_color_standards": apply_template_color_standards,
             "apply_template_divider_standards": apply_template_divider_standards,
             "image_layout_mode": image_layout_mode,
+            "template_merge": template_merge_enabled,
+            "full_template_shell": full_template_shell,
+            "intro_checklist_handling": intro_checklist_handling,
+            "learning_activities_handling": learning_activities_handling,
             "template_package": template_package,
             "template_alias_map_json": template_alias_map_json,
             "reference_audit_json": self._find_reference_audit_json(),
@@ -1950,6 +2044,12 @@ class LMSMigrationUI:
                     "apply_template_divider_standards"
                 ],
                 image_layout_mode=request["image_layout_mode"],
+                template_merge=request["template_merge"],
+                full_template_shell=request["full_template_shell"],
+                intro_checklist_handling=request["intro_checklist_handling"],
+                learning_activities_handling=request[
+                    "learning_activities_handling"
+                ],
             )
             self.root.after(
                 0,
@@ -1994,6 +2094,12 @@ class LMSMigrationUI:
                     "apply_template_divider_standards"
                 ],
                 image_layout_mode=request["image_layout_mode"],
+                template_merge=request["template_merge"],
+                full_template_shell=request["full_template_shell"],
+                intro_checklist_handling=request["intro_checklist_handling"],
+                learning_activities_handling=request[
+                    "learning_activities_handling"
+                ],
             )
 
             safe_summary_path = _default_safe_summary_path(result.report_json)
@@ -2791,6 +2897,10 @@ class LMSMigrationUI:
         self._log(f"Migration report Markdown: {result.report_markdown}")
         self._log(f"Manual review CSV: {result.manual_review_csv}")
         self._log(f"Preflight checklist: {result.preflight_checklist}")
+        if result.kickoff_summary_md is not None:
+            self._log(f"Kickoff summary Markdown: {result.kickoff_summary_md}")
+        if result.kickoff_summary_json is not None:
+            self._log(f"Kickoff summary JSON: {result.kickoff_summary_json}")
         if result.template_overlay_report_json is not None:
             self._log(
                 f"Template overlay report JSON: {result.template_overlay_report_json}"
@@ -3300,6 +3410,9 @@ class LMSMigrationUI:
         self._log(f"Page review JSON: {json_path}")
         self._log(f"Page review Markdown: {md_path}")
         self._log(f"Page review HTML workbench: {html_path}")
+        self._log(
+            f"Page review shortlist CSV: {json_path.with_name(f'{json_path.stem}-shortlist.csv')}"
+        )
         converted_zip = (
             Path(self.visual_converted_zip_var.get().strip())
             if self.visual_converted_zip_var.get().strip()
@@ -3316,6 +3429,8 @@ class LMSMigrationUI:
             "Page review summary: "
             f"high={summary.get('files_with_high_priority_review', 0)} | "
             f"medium={summary.get('files_with_medium_priority_review', 0)} | "
+            f"layout_pages={summary.get('files_with_layout_sanitizer_flags', 0)} | "
+            f"content_loss_pages={summary.get('files_with_content_loss', 0)} | "
             f"manual_pages={summary.get('files_with_manual_issues', 0)} | "
             f"a11y_pages={summary.get('files_with_accessibility_issues', 0)}"
         )
@@ -3617,8 +3732,13 @@ class LMSMigrationUI:
                 self.page_review_html_var.set(str(page_review_html))
                 self._log(f"Reviewed page review HTML workbench: {page_review_html}")
             self._log(
+                f"Reviewed page review shortlist CSV: {page_review_json.with_name(f'{page_review_json.stem}-shortlist.csv')}"
+            )
+            self._log(
                 "Reviewed page review summary: "
                 f"high={page_review_summary.get('files_with_high_priority_review', 0)} | "
+                f"layout_pages={page_review_summary.get('files_with_layout_sanitizer_flags', 0)} | "
+                f"content_loss_pages={page_review_summary.get('files_with_content_loss', 0)} | "
                 f"manual_pages={page_review_summary.get('files_with_manual_issues', 0)} | "
                 f"a11y_pages={page_review_summary.get('files_with_accessibility_issues', 0)}"
             )

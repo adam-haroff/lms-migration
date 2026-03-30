@@ -62,12 +62,14 @@ Notes
 from __future__ import annotations
 
 import hashlib
+import html
 import re
 import textwrap
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Iterable
 from zipfile import ZipFile
 
 
@@ -78,6 +80,7 @@ from zipfile import ZipFile
 
 class PageRole(str, Enum):
     MODULE_INTRO = "module_intro"
+    LEARNING_ACTIVITIES = "learning_activities"
     WELCOME_INSTRUCTOR = "welcome_instructor"
     STANDALONE = "standalone"
 
@@ -106,6 +109,17 @@ class TemplateMergeResult:
         return len(self.added_template_pages)
 
 
+@dataclass
+class ScannedPage:
+    path: str
+    html_file: Path
+    content: str
+    title: str
+    role: PageRole
+    module_number: int | None
+    chapter_title: str
+
+
 # ---------------------------------------------------------------------------
 # Regex constants
 # ---------------------------------------------------------------------------
@@ -116,6 +130,10 @@ _META_ID_RE = re.compile(
     re.IGNORECASE,
 )
 _BODY_RE = re.compile(r"<body[^>]*>(.*?)</body>", re.DOTALL | re.IGNORECASE)
+_TEMPLATE_FILEBASE_URL_RE = re.compile(
+    r"\$IMS-CC-FILEBASE\$/([^\"' >]+)",
+    re.IGNORECASE,
+)
 
 # $IMS-CC-FILEBASE$/template-images/.../{basename}
 _TEMPLATE_ASSET_URL_RE = re.compile(
@@ -134,6 +152,32 @@ _INTRO_HEADING_RE = re.compile(
 _OBJECTIVES_HEADING_RE = re.compile(
     r"<h[1-6][^>]*>(?:(?!</h[1-6]>).)*?objectives?(?:(?!</h[1-6]>).)*?</h[1-6]>",
     re.IGNORECASE | re.DOTALL,
+)
+_CHECKLIST_HEADING_RE = re.compile(
+    r"<h[1-6][^>]*>(?:(?!</h[1-6]>).)*?(?:checklist|to meet the learning objectives)(?:(?!</h[1-6]>).)*?</h[1-6]>",
+    re.IGNORECASE | re.DOTALL,
+)
+_LIST_RE = re.compile(
+    r"<(?:ol|ul)[^>]*>.*?</(?:ol|ul)>",
+    re.DOTALL | re.IGNORECASE,
+)
+_LIST_ITEM_RE = re.compile(r"<li[^>]*>(.*?)</li>", re.DOTALL | re.IGNORECASE)
+_LEARNING_SECTION_MARKER_RE = re.compile(
+    r"(?P<marker>"
+    r"<h[1-6][^>]*>.*?</h[1-6]>"
+    r"|<(?:p|div)[^>]*>\s*(?:<(?:strong|span|em|b)[^>]*>\s*)*"
+    r"<img\b[^>]*src\s*=\s*[\"'][^\"']+?(?:dothis|explorethis|reviewthis|viewthis|paper\.png|folder\.png|circle-arrow\.png|bookmark\.png|video\.png|book\.png)[^\"']*[\"'][^>]*>"
+    r"(?:\s*</(?:strong|span|em|b)>\s*)*</(?:p|div)>"
+    r")",
+    re.DOTALL | re.IGNORECASE,
+)
+_LEARNING_SEPARATOR_RE = re.compile(
+    r"<(?:p[^>]*>\s*)?<img[^>]*(?:rule_brown_gradient|separator|gradient|rule)[^>]*>(?:\s*</p>)?",
+    re.IGNORECASE | re.DOTALL,
+)
+_EMPTY_BLOCK_RE = re.compile(
+    r"<(?:p|div)[^>]*>\s*(?:&nbsp;|\s|<br\s*/?>)*</(?:p|div)>",
+    re.IGNORECASE,
 )
 
 # Instructor Note placeholder paragraphs in template HTML
@@ -323,6 +367,11 @@ _TEMPLATE_START_HERE_TITLE = "Start Here"
 
 _TEMPLATE_CONCLUSION_ID = "g66a1695af5ea06b33c8a1add85501ac2"
 _TEMPLATE_CONCLUSION_TITLE = "Module 16: Course Conclusion"
+_TEMPLATE_SHELL_MODULE_TITLES = (
+    _TEMPLATE_INSTRUCTOR_MODULE_TITLE,
+    _TEMPLATE_START_HERE_TITLE,
+    _TEMPLATE_CONCLUSION_TITLE,
+)
 
 # D2L module titles that map to a template shell — excluded from the
 # middle section so they don't appear twice.
@@ -341,6 +390,18 @@ _D2L_SHELL_MODULE_TITLES = frozenset(
 
 _MODULE_META_NS = "http://canvas.instructure.com/xsd/cccv1p0"
 _MODULE_META_XSD = "https://canvas.instructure.com/xsd/cccv1p0.xsd"
+_EXTRA_TEMPLATE_RESOURCE_HREFS = frozenset(
+    {
+        "wiki_content/home-page.html",
+        "wiki_content/policies-and-support.html",
+        "wiki_content/next-steps.html",
+        "wiki_content/about-the-instructor.html",
+        "wiki_content/canvas-resources-for-students.html",
+        "wiki_content/canvas-resources-for-instructors.html",
+        "course_settings/syllabus.html",
+        "course_settings/canvas_export.txt",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +444,8 @@ def _inject_home_page(
     unpack_dir: Path,
     template_pages: dict[str, str],
     course_prefix: str,
+    *,
+    use_template_web_resources: bool = False,
 ) -> str | None:
     """Write the correct home-page variant into ``wiki_content/``.
 
@@ -411,7 +474,11 @@ def _inject_home_page(
         return None
 
     # Rewrite template asset URLs to be relative
-    page_html = _rewrite_template_asset_urls(page_html, depth=1)
+    page_html = _rewrite_template_asset_urls(
+        page_html,
+        relative_path="wiki_content/home-page.html",
+        use_template_web_resources=use_template_web_resources,
+    )
 
     # Ensure front_page meta is present and set to true
     if "front_page" not in page_html.lower():
@@ -546,6 +613,7 @@ def _build_module_meta_xml(
     d2l_module_titles: list[str],
     *,
     ns: str = _MODULE_META_NS,
+    template_shell_modules: dict[str, ET.Element] | None = None,
 ) -> str:
     """Build the ``module_meta.xml`` content string.
 
@@ -575,26 +643,42 @@ def _build_module_meta_xml(
         },
     )
 
-    # 1. Instructor Module
-    root.append(
-        _build_module_element(
-            ns,
-            _TEMPLATE_INSTRUCTOR_MODULE_ID,
-            _TEMPLATE_INSTRUCTOR_MODULE_TITLE,
-            position=1,
-            workflow_state="unpublished",
-        )
-    )
+    def _position_module(module_el: ET.Element, position: int) -> ET.Element:
+        module_copy = _clone_element(module_el)
+        position_el = module_copy.find(f"{{{ns}}}position")
+        if position_el is None:
+            position_el = ET.SubElement(module_copy, f"{{{ns}}}position")
+        position_el.text = str(position)
+        return module_copy
 
-    # 2. Start Here
-    root.append(
-        _build_module_element(
-            ns,
-            _TEMPLATE_START_HERE_ID,
-            _TEMPLATE_START_HERE_TITLE,
-            position=2,
+    shell_modules = template_shell_modules or {}
+
+    instructor_module = shell_modules.get(_TEMPLATE_INSTRUCTOR_MODULE_TITLE)
+    if instructor_module is not None:
+        root.append(_position_module(instructor_module, 1))
+    else:
+        root.append(
+            _build_module_element(
+                ns,
+                _TEMPLATE_INSTRUCTOR_MODULE_ID,
+                _TEMPLATE_INSTRUCTOR_MODULE_TITLE,
+                position=1,
+                workflow_state="unpublished",
+            )
         )
-    )
+
+    start_here_module = shell_modules.get(_TEMPLATE_START_HERE_TITLE)
+    if start_here_module is not None:
+        root.append(_position_module(start_here_module, 2))
+    else:
+        root.append(
+            _build_module_element(
+                ns,
+                _TEMPLATE_START_HERE_ID,
+                _TEMPLATE_START_HERE_TITLE,
+                position=2,
+            )
+        )
 
     # 3 … N. D2L content modules
     for idx, title in enumerate(d2l_module_titles, start=3):
@@ -609,14 +693,18 @@ def _build_module_meta_xml(
 
     # N+1. Course Conclusion
     conclusion_pos = len(d2l_module_titles) + 3
-    root.append(
-        _build_module_element(
-            ns,
-            _TEMPLATE_CONCLUSION_ID,
-            _TEMPLATE_CONCLUSION_TITLE,
-            position=conclusion_pos,
+    conclusion_module = shell_modules.get(_TEMPLATE_CONCLUSION_TITLE)
+    if conclusion_module is not None:
+        root.append(_position_module(conclusion_module, conclusion_pos))
+    else:
+        root.append(
+            _build_module_element(
+                ns,
+                _TEMPLATE_CONCLUSION_ID,
+                _TEMPLATE_CONCLUSION_TITLE,
+                position=conclusion_pos,
+            )
         )
-    )
 
     # Pretty serialisation
     ET.indent(root, space="  ")
@@ -625,7 +713,12 @@ def _build_module_meta_xml(
     )
 
 
-def _write_module_meta(unpack_dir: Path, d2l_module_titles: list[str]) -> None:
+def _write_module_meta(
+    unpack_dir: Path,
+    d2l_module_titles: list[str],
+    *,
+    template_shell_modules: dict[str, ET.Element] | None = None,
+) -> None:
     """Generate and write ``course_settings/module_meta.xml``.
 
     Only writes if the file does not already exist (idempotent).
@@ -635,8 +728,292 @@ def _write_module_meta(unpack_dir: Path, d2l_module_titles: list[str]) -> None:
     if meta_path.exists():
         return
     cs_dir.mkdir(parents=True, exist_ok=True)
-    xml = _build_module_meta_xml(d2l_module_titles)
+    xml = _build_module_meta_xml(
+        d2l_module_titles,
+        template_shell_modules=template_shell_modules,
+    )
     meta_path.write_text(xml, encoding="utf-8")
+
+
+def _load_template_manifest_root(template_package: Path) -> ET.Element:
+    with ZipFile(template_package, "r") as zf:
+        return ET.fromstring(zf.read("imsmanifest.xml"))
+
+
+def _extract_item_title(item: ET.Element) -> tuple[ET.Element | None, str]:
+    for child in list(item):
+        if _local_name(child.tag) == "title":
+            return child, (child.text or "").strip()
+    return None, ""
+
+
+def _find_first_organization(root: ET.Element) -> ET.Element | None:
+    for element in root.iter():
+        if _local_name(element.tag) == "organization":
+            return element
+    return None
+
+
+def _find_template_top_level_item(
+    organization: ET.Element,
+    title: str,
+) -> ET.Element | None:
+    for item in organization.iter():
+        if _local_name(item.tag) != "item":
+            continue
+        _title_el, item_title = _extract_item_title(item)
+        if item_title.strip() == title:
+            return item
+    return None
+
+
+def _resource_elements_by_id(root: ET.Element) -> dict[str, ET.Element]:
+    resources: dict[str, ET.Element] = {}
+    for element in root.iter():
+        if _local_name(element.tag) != "resource":
+            continue
+        identifier = (element.attrib.get("identifier") or "").strip()
+        if identifier:
+            resources[identifier] = element
+    return resources
+
+
+def _resource_identifiers_from_item(item: ET.Element) -> set[str]:
+    resource_ids: set[str] = set()
+    identifierref = (item.attrib.get("identifierref") or "").strip()
+    if identifierref:
+        resource_ids.add(identifierref)
+    for child in list(item):
+        if _local_name(child.tag) == "item":
+            resource_ids.update(_resource_identifiers_from_item(child))
+    return resource_ids
+
+
+def _resource_dependency_closure(
+    resources_by_id: dict[str, ET.Element],
+    initial_ids: Iterable[str],
+) -> set[str]:
+    resolved: set[str] = set()
+    pending = [resource_id for resource_id in initial_ids if resource_id]
+    while pending:
+        current = pending.pop()
+        if current in resolved:
+            continue
+        resolved.add(current)
+        resource = resources_by_id.get(current)
+        if resource is None:
+            continue
+        for child in list(resource):
+            if _local_name(child.tag) != "dependency":
+                continue
+            dependency_id = (child.attrib.get("identifierref") or "").strip()
+            if dependency_id and dependency_id not in resolved:
+                pending.append(dependency_id)
+    return resolved
+
+
+def _resource_file_hrefs(resource: ET.Element) -> set[str]:
+    hrefs: set[str] = set()
+    href = (resource.attrib.get("href") or "").strip()
+    if href:
+        hrefs.add(href.replace("\\", "/"))
+    for child in list(resource):
+        if _local_name(child.tag) != "file":
+            continue
+        file_href = (child.attrib.get("href") or "").strip()
+        if file_href:
+            hrefs.add(file_href.replace("\\", "/"))
+    return hrefs
+
+
+def _copy_template_paths(
+    template_package: Path,
+    unpack_dir: Path,
+    relative_paths: Iterable[str],
+) -> set[str]:
+    copied: set[str] = set()
+    with ZipFile(template_package, "r") as zf:
+        names = set(zf.namelist())
+        for rel_path in sorted({path.replace("\\", "/") for path in relative_paths if path}):
+            if rel_path not in names:
+                continue
+            target = unpack_dir / Path(rel_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(zf.read(rel_path))
+            copied.add(rel_path)
+    return copied
+
+
+def _rewrite_copied_template_filebase_refs(
+    unpack_dir: Path,
+    copied_paths: Iterable[str],
+) -> None:
+    text_suffixes = {".html", ".htm", ".xml"}
+    for rel_path in copied_paths:
+        path = unpack_dir / Path(rel_path)
+        if path.suffix.lower() not in text_suffixes or not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        rewritten = _rewrite_template_asset_urls(
+            text,
+            relative_path=rel_path,
+            use_template_web_resources=True,
+        )
+        if rewritten != text:
+            path.write_text(rewritten, encoding="utf-8")
+
+
+def _copy_template_web_resources(template_package: Path, unpack_dir: Path) -> set[str]:
+    with ZipFile(template_package, "r") as zf:
+        web_resource_paths = [
+            name
+            for name in zf.namelist()
+            if name.startswith("web_resources/") and not name.endswith("/")
+        ]
+    return _copy_template_paths(template_package, unpack_dir, web_resource_paths)
+
+
+def _template_resource_ids_by_href(root: ET.Element) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for resource_id, resource in _resource_elements_by_id(root).items():
+        href = (resource.attrib.get("href") or "").strip().replace("\\", "/")
+        if href:
+            mapping[href] = resource_id
+    return mapping
+
+
+def _inject_template_resources_into_manifest(
+    unpack_dir: Path,
+    template_root: ET.Element,
+    resource_ids: set[str],
+) -> None:
+    manifest_path = unpack_dir / "imsmanifest.xml"
+    if not manifest_path.exists() or not resource_ids:
+        return
+    tree = ET.parse(manifest_path)
+    root = tree.getroot()
+
+    resources_el: ET.Element | None = None
+    for element in root.iter():
+        if _local_name(element.tag) == "resources":
+            resources_el = element
+            break
+    if resources_el is None:
+        return
+
+    existing_ids = {
+        (element.attrib.get("identifier") or "").strip()
+        for element in resources_el
+        if _local_name(element.tag) == "resource"
+    }
+    template_resources = _resource_elements_by_id(template_root)
+    appended = False
+    for resource_id in sorted(resource_ids):
+        if resource_id in existing_ids:
+            continue
+        resource = template_resources.get(resource_id)
+        if resource is None:
+            continue
+        resources_el.append(_clone_element(resource))
+        appended = True
+
+    if appended:
+        tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+
+
+def _inject_template_shell_items_into_manifest(
+    unpack_dir: Path,
+    template_root: ET.Element,
+) -> None:
+    manifest_path = unpack_dir / "imsmanifest.xml"
+    if not manifest_path.exists():
+        return
+    tree = ET.parse(manifest_path)
+    root = tree.getroot()
+    organization = _find_first_organization(root)
+    template_organization = _find_first_organization(template_root)
+    if organization is None or template_organization is None:
+        return
+
+    existing_titles = {
+        _extract_item_title(item)[1].strip()
+        for item in organization
+        if _local_name(item.tag) == "item"
+    }
+
+    added = False
+    prepend_items: list[ET.Element] = []
+    append_items: list[ET.Element] = []
+    for title in _TEMPLATE_SHELL_MODULE_TITLES:
+        if title in existing_titles:
+            continue
+        item = _find_template_top_level_item(template_organization, title)
+        if item is None:
+            continue
+        if title == _TEMPLATE_CONCLUSION_TITLE:
+            append_items.append(_clone_element(item))
+        else:
+            prepend_items.append(_clone_element(item))
+        added = True
+
+    if not added:
+        return
+
+    existing_children = list(organization)
+    for child in existing_children:
+        organization.remove(child)
+    for item in prepend_items:
+        organization.append(item)
+    for child in existing_children:
+        organization.append(child)
+    for item in append_items:
+        organization.append(item)
+
+    tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+
+
+def _load_template_shell_modules(template_package: Path) -> dict[str, ET.Element]:
+    modules: dict[str, ET.Element] = {}
+    with ZipFile(template_package, "r") as zf:
+        root = ET.fromstring(zf.read("course_settings/module_meta.xml"))
+    for module in list(root):
+        title = ""
+        for child in list(module):
+            if _local_name(child.tag) == "title":
+                title = (child.text or "").strip()
+                break
+        if title in _TEMPLATE_SHELL_MODULE_TITLES:
+            modules[title] = _clone_element(module)
+    return modules
+
+
+def _load_template_shell_payload(
+    template_package: Path,
+) -> tuple[ET.Element, dict[str, ET.Element], set[str]]:
+    template_root = _load_template_manifest_root(template_package)
+    template_org = _find_first_organization(template_root)
+    if template_org is None:
+        return template_root, {}, set()
+
+    selected_resource_ids: set[str] = set()
+    for title in _TEMPLATE_SHELL_MODULE_TITLES:
+        item = _find_template_top_level_item(template_org, title)
+        if item is None:
+            continue
+        selected_resource_ids.update(_resource_identifiers_from_item(item))
+
+    resource_ids_by_href = _template_resource_ids_by_href(template_root)
+    for href in _EXTRA_TEMPLATE_RESOURCE_HREFS:
+        resource_id = resource_ids_by_href.get(href)
+        if resource_id:
+            selected_resource_ids.add(resource_id)
+
+    resources_by_id = _resource_elements_by_id(template_root)
+    selected_resource_ids = _resource_dependency_closure(
+        resources_by_id,
+        selected_resource_ids,
+    )
+    return template_root, _load_template_shell_modules(template_package), selected_resource_ids
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +1048,14 @@ def classify_page(
         module_number: int | None = int(m.group(1))
         chapter_title = m.group(2).replace("_", " ").replace("-", " ").title().strip()
         return PageRole.MODULE_INTRO, module_number, chapter_title
+
+    if "learning activities" in title_lower or "learning activities" in path_lower:
+        module_number = None
+        chapter_title = title.strip()
+        mod_match = re.search(r"\b(?:module|chapter|unit)\s*(\d+)", title, re.IGNORECASE)
+        if mod_match:
+            module_number = int(mod_match.group(1))
+        return PageRole.LEARNING_ACTIVITIES, module_number, chapter_title
 
     if any(kw in title_lower for kw in _WELCOME_KEYWORDS) or (
         "welcome" in path_lower and "instructor" in path_lower
@@ -727,20 +1112,57 @@ def _replace_body(html: str, new_body: str) -> str:
     return _BODY_RE.sub(f"<body>\n{new_body}\n</body>", html)
 
 
-def _rewrite_template_asset_urls(html: str, depth: int = 1) -> str:
+def _clone_element(element: ET.Element) -> ET.Element:
+    return ET.fromstring(ET.tostring(element, encoding="unicode"))
+
+
+def _relative_path_prefix(path: str) -> str:
+    parent = Path(path).parent
+    if str(parent) in {"", "."}:
+        return ""
+    return "../" * len(parent.parts)
+
+
+def _template_asset_prefix(
+    path: str,
+    *,
+    use_template_web_resources: bool = False,
+) -> str:
+    prefix = _relative_path_prefix(path)
+    if use_template_web_resources:
+        return f"{prefix}web_resources/template-images/icons/"
+    return f"{prefix}TemplateAssets/"
+
+
+def _rewrite_template_asset_urls(
+    html: str,
+    *,
+    relative_path: str,
+    use_template_web_resources: bool = False,
+) -> str:
     """Rewrite ``$IMS-CC-FILEBASE$/template-images/...`` to relative paths.
 
     Args:
         html: HTML text to process.
-        depth: Directory depth of the file from the package root (1 for both
-               ``wiki_content/`` pages and module-folder pages).
+        relative_path: Relative file path within the generated package.
     """
-    prefix = "../" * depth + "TemplateAssets/"
+    if use_template_web_resources:
+        prefix = f"{_relative_path_prefix(relative_path)}web_resources/"
 
-    def _sub(m: re.Match) -> str:
+        def _sub_full(m: re.Match) -> str:
+            return prefix + m.group(1)
+
+        return _TEMPLATE_FILEBASE_URL_RE.sub(_sub_full, html)
+
+    prefix = _template_asset_prefix(
+        relative_path,
+        use_template_web_resources=False,
+    )
+
+    def _sub_basename(m: re.Match) -> str:
         return prefix + m.group(1)
 
-    return _TEMPLATE_ASSET_URL_RE.sub(_sub, html)
+    return _TEMPLATE_ASSET_URL_RE.sub(_sub_basename, html)
 
 
 def _clean_d2l_scaffold(body: str) -> str:
@@ -751,6 +1173,20 @@ def _clean_d2l_scaffold(body: str) -> str:
     body = _SCRIPT_RE.sub("", body)
     body = _EMPTY_PARA_RE.sub("", body)
     return body.strip()
+
+
+def _plain_text(html_fragment: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", html_fragment)
+    text = html.unescape(text).replace("\xa0", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _page_pair_key(path: str, module_number: int | None) -> str:
+    if module_number is not None:
+        return f"module:{module_number}"
+    stem = Path(path).stem
+    suffix_match = re.search(r"(\d+)$", stem)
+    return f"suffix:{suffix_match.group(1) if suffix_match else 'root'}"
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +1233,134 @@ def _extract_objectives_list(body: str) -> str:
     return list_m.group(0) if list_m else ""
 
 
+def _extract_list_items(list_html: str) -> list[str]:
+    return [match.group(1).strip() for match in _LIST_ITEM_RE.finditer(list_html)]
+
+
+def _dedupe_list_items(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        key = _plain_text(item).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item.strip())
+    return deduped
+
+
+def _render_list_html(items: list[str]) -> str:
+    deduped = _dedupe_list_items(items)
+    if not deduped:
+        return ""
+    rendered = "\n".join(f"  <li>{item}</li>" for item in deduped)
+    return "<ul>\n" + rendered + "\n</ul>"
+
+
+def _extract_checklist_candidates(body: str) -> list[str]:
+    items: list[str] = []
+    heading_match = _CHECKLIST_HEADING_RE.search(body)
+    if heading_match is not None:
+        list_match = _LIST_RE.search(body, heading_match.end())
+        if list_match is not None:
+            items.extend(_extract_list_items(list_match.group(0)))
+
+    phrase_match = re.search(
+        r"to meet the learning objectives",
+        body,
+        flags=re.IGNORECASE,
+    )
+    if phrase_match is not None:
+        list_match = _LIST_RE.search(body, phrase_match.end())
+        if list_match is not None:
+            items.extend(_extract_list_items(list_match.group(0)))
+    return _dedupe_list_items(items)
+
+
+def _learning_section_spec(marker_html: str) -> tuple[str, str] | None:
+    src_match = re.search(
+        r'\bsrc\s*=\s*(["\'])(?P<src>[^"\']+)\1',
+        marker_html,
+        flags=re.IGNORECASE,
+    )
+    basename = ""
+    if src_match is not None:
+        basename = Path(src_match.group("src").replace("\\", "/")).name.lower()
+    label_match = re.search(
+        r'\bdata-template-label\s*=\s*(["\'])(?P<label>[^"\']+)\1',
+        marker_html,
+        flags=re.IGNORECASE,
+    )
+    text = (
+        (label_match.group("label") if label_match is not None else _plain_text(marker_html))
+        .lower()
+        .strip()
+    )
+
+    if "do this" in text or basename == "dothis.png":
+        return "Do This", "paper.png"
+    if "explore this" in text or basename == "explorethis.png":
+        return "Explore This", "folder.png"
+    if "review this" in text or basename == "reviewthis.png":
+        return "Review This", "circle-arrow.png"
+    if "view this" in text or basename == "viewthis.png":
+        return "View This", "video.png"
+    if re.search(r"\bview\b", text):
+        return "View", "video.png"
+    if re.search(r"\bread\b", text):
+        return "Read", "book.png"
+    if "additional resources" in text:
+        return "Additional Resources", "folder.png"
+    return None
+
+
+def _clean_learning_section_html(fragment: str) -> str:
+    cleaned = _LEARNING_SEPARATOR_RE.sub("", fragment)
+    cleaned = re.sub(r"<hr[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = _EMPTY_BLOCK_RE.sub("", cleaned)
+    cleaned = re.sub(r"</?div[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _extract_learning_sections(body: str) -> tuple[str, list[tuple[str, str, str]]]:
+    matches = [
+        match
+        for match in _LEARNING_SECTION_MARKER_RE.finditer(body)
+        if _learning_section_spec(match.group("marker")) is not None
+    ]
+    if not matches:
+        return "", []
+
+    preamble = _clean_learning_section_html(body[: matches[0].start()])
+    sections: list[tuple[str, str, str]] = []
+    for index, match in enumerate(matches):
+        label_icon = _learning_section_spec(match.group("marker"))
+        if label_icon is None:
+            continue
+        content_start = match.end()
+        content_end = (
+            matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        )
+        content_html = _clean_learning_section_html(body[content_start:content_end])
+        if not content_html:
+            continue
+        label, icon_basename = label_icon
+        sections.append((label, icon_basename, content_html))
+    return preamble, sections
+
+
+def _extract_do_this_items_from_learning_activities(body: str) -> list[str]:
+    _, sections = _extract_learning_sections(body)
+    for label, _icon, content_html in sections:
+        if label.lower() != "do this":
+            continue
+        list_match = _LIST_RE.search(content_html)
+        if list_match is None:
+            return []
+        return _dedupe_list_items(_extract_list_items(list_match.group(0)))
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Module intro  template filling
 # ---------------------------------------------------------------------------
@@ -806,34 +1370,33 @@ def _extract_objectives_list(body: str) -> str:
 # (No need to read the template HTML for every module — the body structure
 #  is stable; only the icon filenames and content differ.)
 
-_MODULE_INTRO_BODY_TMPL = """\
-<h2 style="color: #ac1a2f; border-bottom: 10px solid #AC1A2F; padding: 10px;">
-  <img role="presentation" src="../TemplateAssets/star.png"
-       alt="" width="45" height="45" loading="lazy">
-  <strong>Introduction</strong>
-</h2>
+def _build_module_intro_body(
+    *,
+    asset_prefix: str,
+    intro_content: str,
+    objectives_content: str,
+    checklist_content: str,
+) -> str:
+    return f"""\
+<h2 style="color: #ac1a2f; border-bottom: 10px solid #AC1A2F; padding: 10px;"><img role="presentation" src="{asset_prefix}star.png" alt="" width="45" height="45" loading="lazy"><strong>Introduction</strong></h2>
 {intro_content}
 <hr>
-<h2>
-  <img role="presentation" src="../TemplateAssets/bullseye.png"
-       alt="" width="45" height="45" loading="lazy">
-  <strong><span style="color: #ac1a2f;">Module Objectives</span></strong>
-</h2>
+<h2><img role="presentation" src="{asset_prefix}bullseye.png" alt="" width="45" height="45" loading="lazy"><strong><span style="color: #ac1a2f;">Module Objectives</span></strong></h2>
 <p>By the end of this module, students will be able to:</p>
 {objectives_content}
 <hr>
-<h2>
-  <img role="presentation" src="../TemplateAssets/checkmark.png"
-       alt="" width="45" height="45" loading="lazy">
-  <span style="color: #ac1a2f;"><strong>Module Checklist</strong></span>
-</h2>
-<p>Complete the items listed below as you work through this module:</p>
+<h2><img role="presentation" src="{asset_prefix}checkmark.png" alt="" width="45" height="45" loading="lazy"><span style="color: #ac1a2f;"><strong>Module Checklist</strong></span></h2>
+{checklist_content}
+"""
+
+
+def _default_module_checklist_html() -> str:
+    return """<p>Complete the items listed below as you work through this module:</p>
 <ul>
   <li>Read all assigned content and review lecture materials.</li>
   <li>Complete the learning activities for this module.</li>
   <li>Submit all assignments before the posted due date.</li>
-</ul>
-"""
+</ul>"""
 
 
 def _fill_module_intro(
@@ -841,6 +1404,9 @@ def _fill_module_intro(
     module_number: int | None,
     chapter_title: str,
     path_seed: str,
+    extra_checklist_items: list[str] | None = None,
+    *,
+    use_template_web_resources: bool = False,
 ) -> str:
     """Return the in-place replacement HTML for a module intro page.
 
@@ -867,9 +1433,23 @@ def _fill_module_intro(
     else:
         objectives_content = "<ul><li>See course materials for this module's learning objectives.</li></ul>"
 
-    new_body = _MODULE_INTRO_BODY_TMPL.format(
+    checklist_items = _extract_checklist_candidates(body)
+    if extra_checklist_items:
+        checklist_items.extend(extra_checklist_items)
+    checklist_html = (
+        _render_list_html(checklist_items)
+        if checklist_items
+        else _default_module_checklist_html()
+    )
+
+    new_body = _build_module_intro_body(
+        asset_prefix=_template_asset_prefix(
+            path_seed,
+            use_template_web_resources=use_template_web_resources,
+        ),
         intro_content=intro_content,
         objectives_content=objectives_content,
+        checklist_content=checklist_html,
     )
 
     mod_str = f"Module {module_number}: " if module_number else ""
@@ -877,6 +1457,58 @@ def _fill_module_intro(
 
     result = _replace_title(d2l_html, new_title)
     result = _replace_body(result, new_body)
+    return result
+
+
+def _render_learning_title(title: str, asset_prefix: str) -> str:
+    safe_title = html.escape(title or "Learning Activities")
+    return (
+        f'<h2 style="color: #ac1a2f; border-bottom: 10px solid #AC1A2F; padding: 10px;">'
+        f'<strong><img role="presentation" src="{asset_prefix}bookmark.png" alt="" width="45" loading="lazy">{safe_title}</strong></h2>'
+    )
+
+
+def _render_learning_section(label: str, icon_basename: str, content_html: str, asset_prefix: str) -> str:
+    safe_label = html.escape(label)
+    return (
+        f'<h2><img role="presentation" src="{asset_prefix}{icon_basename}" alt="" width="45" loading="lazy">'
+        f'<span style="color: #ac1a2f;"><strong>{safe_label}</strong></span></h2>\n'
+        f"{content_html}"
+    )
+
+
+def _fill_learning_activities_page(
+    d2l_html: str,
+    *,
+    path_seed: str,
+    use_template_web_resources: bool = False,
+) -> str | None:
+    body = _clean_d2l_scaffold(_extract_body(d2l_html))
+    preamble, sections = _extract_learning_sections(body)
+    if not sections:
+        return None
+
+    title = _extract_title(d2l_html) or "Learning Activities"
+    asset_prefix = _template_asset_prefix(
+        path_seed,
+        use_template_web_resources=use_template_web_resources,
+    )
+    parts = [_render_learning_title(title, asset_prefix)]
+    if preamble:
+        parts.append(preamble)
+    for index, (label, icon_basename, content_html) in enumerate(sections):
+        parts.append("<hr>")
+        parts.append(
+            _render_learning_section(
+                label,
+                icon_basename,
+                content_html,
+                asset_prefix,
+            )
+        )
+    parts.append('<hr style="border-top: 8px solid #AC1A2F;">')
+
+    result = _replace_body(d2l_html, "\n".join(parts))
     return result
 
 
@@ -911,12 +1543,18 @@ def _clean_instructor_bio(body: str) -> str:
 def _fill_about_instructor(
     welcome_d2l_html: str,
     template_html: str,
+    *,
+    use_template_web_resources: bool = False,
 ) -> str:
     """Inject the D2L instructor bio into the about-the-instructor template."""
     bio_fragment = _clean_instructor_bio(_extract_body(welcome_d2l_html))
 
     # Rewrite icon URLs in the template (they still have $IMS-CC-FILEBASE$ tokens)
-    result = _rewrite_template_asset_urls(template_html, depth=1)
+    result = _rewrite_template_asset_urls(
+        template_html,
+        relative_path="wiki_content/about-the-instructor.html",
+        use_template_web_resources=use_template_web_resources,
+    )
 
     # Replace the instructor bio placeholder block
     if _INSTRUCTOR_BIO_BLOCK_RE.search(result):
@@ -1043,6 +1681,10 @@ def _load_template_wiki_pages(template_package: Path) -> dict[str, str]:
 def run_template_merge(
     unpack_dir: Path,
     template_package: Path,
+    *,
+    intro_checklist_handling: str = "rebuild-when-confident",
+    learning_activities_handling: str = "preserve",
+    full_template_shell: bool = False,
 ) -> TemplateMergeResult:
     """Apply the template shell merger to processed HTML files in *unpack_dir*.
 
@@ -1060,24 +1702,106 @@ def run_template_merge(
 
     # Load template wiki pages (used as shells / for standalone additions)
     template_pages = _load_template_wiki_pages(template_package)
+    use_template_web_resources = bool(full_template_shell)
+    template_root: ET.Element | None = None
+    template_shell_modules: dict[str, ET.Element] | None = None
+    selected_resource_ids: set[str] = set()
+    if full_template_shell:
+        (
+            template_root,
+            template_shell_modules,
+            selected_resource_ids,
+        ) = _load_template_shell_payload(template_package)
+        # Copy the actual resource file paths referenced by the selected shell
+        # resources, plus the template web_resources tree so icon/button/banner
+        # references resolve without a synthetic TemplateAssets folder.
+        resource_paths: set[str] = set()
+        if template_root is not None:
+            resources_by_id = _resource_elements_by_id(template_root)
+            for resource_id in selected_resource_ids:
+                resource = resources_by_id.get(resource_id)
+                if resource is None:
+                    continue
+                resource_paths.update(_resource_file_hrefs(resource))
+        copied_paths = _copy_template_paths(
+            template_package,
+            unpack_dir,
+            resource_paths,
+        )
+        copied_paths.update(_copy_template_web_resources(template_package, unpack_dir))
+        _rewrite_copied_template_filebase_refs(unpack_dir, copied_paths)
+        if template_root is not None:
+            _inject_template_resources_into_manifest(
+                unpack_dir,
+                template_root,
+                selected_resource_ids,
+            )
+            _inject_template_shell_items_into_manifest(unpack_dir, template_root)
 
     # Survey all HTML files
     html_files = sorted(unpack_dir.rglob("*.html")) + sorted(unpack_dir.rglob("*.htm"))
-
-    welcome_path: str | None = None
-
+    scanned_pages: list[ScannedPage] = []
     for html_file in html_files:
         rel = str(html_file.relative_to(unpack_dir).as_posix())
         content = html_file.read_text(encoding="utf-8", errors="replace")
         title = _extract_title(content)
         role, module_number, chapter_title = classify_page(rel, title, body=content)
+        scanned_pages.append(
+            ScannedPage(
+                path=rel,
+                html_file=html_file,
+                content=content,
+                title=title,
+                role=role,
+                module_number=module_number,
+                chapter_title=chapter_title,
+            )
+        )
+
+    learning_pages_by_key = {
+        _page_pair_key(page.path, page.module_number): page
+        for page in scanned_pages
+        if page.role == PageRole.LEARNING_ACTIVITIES
+    }
+
+    welcome_path: str | None = None
+
+    for page in scanned_pages:
+        rel = page.path
+        content = page.content
+        role = page.role
+        module_number = page.module_number
+        chapter_title = page.chapter_title
+        html_file = page.html_file
 
         if role == PageRole.MODULE_INTRO:
+            if intro_checklist_handling == "preserve":
+                result.pages.append(
+                    MergedPageRecord(
+                        original_path=rel,
+                        role=role,
+                        action="passthrough",
+                        module_number=module_number,
+                        chapter_title=chapter_title,
+                    )
+                )
+                continue
+
+            learning_page = learning_pages_by_key.get(_page_pair_key(rel, module_number))
+            extra_checklist_items = (
+                _extract_do_this_items_from_learning_activities(
+                    _extract_body(learning_page.content)
+                )
+                if learning_page is not None
+                else []
+            )
             new_html = _fill_module_intro(
                 d2l_html=content,
                 module_number=module_number,
                 chapter_title=chapter_title,
                 path_seed=rel,
+                extra_checklist_items=extra_checklist_items,
+                use_template_web_resources=use_template_web_resources,
             )
             html_file.write_text(new_html, encoding="utf-8")
             result.pages.append(
@@ -1085,6 +1809,36 @@ def run_template_merge(
                     original_path=rel,
                     role=role,
                     action="template_wrapped",
+                    module_number=module_number,
+                    chapter_title=chapter_title,
+                )
+            )
+
+        elif role == PageRole.LEARNING_ACTIVITIES:
+            if learning_activities_handling == "rebuild-when-confident":
+                rebuilt = _fill_learning_activities_page(
+                    content,
+                    path_seed=rel,
+                    use_template_web_resources=use_template_web_resources,
+                )
+                if rebuilt:
+                    html_file.write_text(rebuilt, encoding="utf-8")
+                    result.pages.append(
+                        MergedPageRecord(
+                            original_path=rel,
+                            role=role,
+                            action="template_wrapped",
+                            module_number=module_number,
+                            chapter_title=chapter_title,
+                        )
+                    )
+                    continue
+
+            result.pages.append(
+                MergedPageRecord(
+                    original_path=rel,
+                    role=role,
+                    action="passthrough",
                     module_number=module_number,
                     chapter_title=chapter_title,
                 )
@@ -1116,11 +1870,20 @@ def run_template_merge(
         about_html = _fill_about_instructor(
             welcome_d2l_html=welcome_content,  # type: ignore[possibly-undefined]
             template_html=template_pages["about-the-instructor.html"],
+            use_template_web_resources=use_template_web_resources,
         )
-        about_dest = unpack_dir / "CourseOverview" / "About the Instructor.html"
+        about_dest = (
+            unpack_dir / "wiki_content" / "about-the-instructor.html"
+            if full_template_shell
+            else unpack_dir / "CourseOverview" / "About the Instructor.html"
+        )
         about_dest.parent.mkdir(parents=True, exist_ok=True)
         about_dest.write_text(about_html, encoding="utf-8")
-        result.added_template_pages.append("CourseOverview/About the Instructor.html")
+        result.added_template_pages.append(
+            "wiki_content/about-the-instructor.html"
+            if full_template_shell
+            else "CourseOverview/About the Instructor.html"
+        )
 
         # Replace the original welcome page with a brief redirect notice so any
         # manifest link that points to it doesn't produce a 404.
@@ -1140,7 +1903,7 @@ def run_template_merge(
         welcome_file.write_text(redirect_html, encoding="utf-8")
 
     # Add standalone template pages (only if not already present)
-    for dest_rel in _STANDALONE_TEMPLATE_PAGES:
+    for dest_rel in ([] if full_template_shell else _STANDALONE_TEMPLATE_PAGES):
         dest = unpack_dir / dest_rel
         dest_basename = Path(dest_rel).name
 
@@ -1160,7 +1923,11 @@ def run_template_merge(
             continue
 
         # CourseOverview/ is depth=1 from root — same as wiki_content/
-        page_html = _rewrite_template_asset_urls(page_html, depth=1)
+        page_html = _rewrite_template_asset_urls(
+            page_html,
+            relative_path=dest_rel,
+            use_template_web_resources=use_template_web_resources,
+        )
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(page_html, encoding="utf-8")
         result.added_template_pages.append(dest_rel)
@@ -1170,7 +1937,12 @@ def run_template_merge(
     # correct divisional home-page template.
     manifest_path = next(unpack_dir.rglob("imsmanifest.xml"), None)
     course_prefix = _course_prefix_from_manifest(manifest_path) if manifest_path else ""
-    home_variant = _inject_home_page(unpack_dir, template_pages, course_prefix)
+    home_variant = _inject_home_page(
+        unpack_dir,
+        template_pages,
+        course_prefix,
+        use_template_web_resources=use_template_web_resources,
+    )
     if home_variant:
         result.added_template_pages.append(
             f"wiki_content/home-page.html ({home_variant})"
@@ -1180,6 +1952,10 @@ def run_template_merge(
     # Read the D2L manifest to get the ordered list of content modules, then
     # build module_meta.xml that places them between the template shell modules.
     d2l_modules = _read_d2l_module_titles(unpack_dir)
-    _write_module_meta(unpack_dir, d2l_modules)
+    _write_module_meta(
+        unpack_dir,
+        d2l_modules,
+        template_shell_modules=template_shell_modules,
+    )
 
     return result

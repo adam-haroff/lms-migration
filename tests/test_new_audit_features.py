@@ -23,7 +23,10 @@ from lms_migration.html_tools import (
     check_accessibility_heuristics,
     _suggest_alt_text,
 )
-from lms_migration.fix_checklist import _map_manual_review_group
+from lms_migration.fix_checklist import (
+    _generate_standard_postmigration_tasks,
+    _map_manual_review_group,
+)
 from lms_migration.quiz_audit import (
     _parse_quiz_xml,
     audit_quizzes,
@@ -254,6 +257,24 @@ _QUIZ_XML_CLEAN = """\
 </questestinterop>
 """
 
+_QUIZ_XML_QUESTIONDB_RANDOM = """\
+<questestinterop xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">
+  <assessment d2l_2p0:id="7" title="Banked Quiz">
+    <section ident="S">
+      <selection_ordering><order order_type="Random" /></selection_ordering>
+      <itemref linkrefid="QUES_1">
+        <d2l_2p0:file href="questiondb.xml" />
+        <d2l_2p0:points>2.000000000</d2l_2p0:points>
+      </itemref>
+      <itemref linkrefid="QUES_2">
+        <d2l_2p0:file href="questiondb.xml" />
+        <d2l_2p0:points>2.000000000</d2l_2p0:points>
+      </itemref>
+    </section>
+  </assessment>
+</questestinterop>
+"""
+
 
 class TestParseQuizXml:
     def test_title_extracted(self):
@@ -308,6 +329,14 @@ class TestParseQuizXml:
     def test_no_availability_when_dates_absent(self):
         qi = _parse_quiz_xml("quiz_d2l_5.xml", _QUIZ_XML_CLEAN)
         assert qi.has_availability_window is False
+
+    def test_questiondb_item_count_extracted(self):
+        qi = _parse_quiz_xml("quiz_d2l_7.xml", _QUIZ_XML_QUESTIONDB_RANDOM)
+        assert qi.questiondb_item_count == 2
+
+    def test_random_question_order_detected(self):
+        qi = _parse_quiz_xml("quiz_d2l_7.xml", _QUIZ_XML_QUESTIONDB_RANDOM)
+        assert qi.random_question_order is True
 
 
 class TestAuditQuizzes:
@@ -372,6 +401,15 @@ class TestAuditQuizzes:
         assert "Test Quiz" in md
         assert "New Quizzes" in md
         assert "Ordering" in md
+
+    def test_write_markdown_report_includes_questiondb_and_randomization(self, tmp_path):
+        zp = self._make_zip({"quiz_d2l_7.xml": _QUIZ_XML_QUESTIONDB_RANDOM})
+        report = audit_quizzes(zp)
+        out = tmp_path / "banked.quiz-audit.md"
+        write_markdown_report(report, out)
+        md = out.read_text()
+        assert "questiondb.xml" in md
+        assert "Random question order in D2L" in md
 
 
 # ===========================================================================
@@ -613,6 +651,27 @@ class TestAuditDropboxFolders:
         assert len(rows) == 1
         assert "rubric" in rows[0]["evidence"].lower()
 
+    def test_folder_with_rubric_name_mapping(self):
+        from lms_migration.pipeline import _audit_dropbox_folders
+
+        xml = self._dropbox_xml(
+            '<folder name="Project" id="3" out_of="100" grade_item="xyz" is_hidden="false">'
+            '<d2l_2p0:associations><d2l_2p0:rubric isDefault="false">7</d2l_2p0:rubric>'
+            "</d2l_2p0:associations>"
+            "</folder>"
+        )
+        rubrics_xml = """\
+<rubrics schemaversion="v2011">
+  <rubric id="7" resource_code="sinclairc-7" name="Project Rubric" scoring_method="3" state="0">
+    <criteria></criteria>
+  </rubric>
+</rubrics>
+"""
+        zp = self._make_zip({"dropbox_d2l.xml": xml, "rubrics_d2l.xml": rubrics_xml})
+        rows = _audit_dropbox_folders(zp)
+        assert len(rows) == 1
+        assert "Project Rubric" in rows[0]["evidence"]
+
     def test_multiple_folders(self):
         from lms_migration.pipeline import _audit_dropbox_folders
 
@@ -791,6 +850,128 @@ class TestAuditDateShiftItems:
             r for r in rows if "quiz availability window" in r["reason"].lower()
         ]
         assert window_rows == []
+
+
+class TestAuditCourseAlignmentDocs:
+    def _make_zip(self, files: dict[str, str | bytes]) -> Path:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, content in files.items():
+                zf.writestr(name, content)
+        buf.seek(0)
+        tmp = Path("/tmp/test_alignment_docs.zip")
+        tmp.write_bytes(buf.read())
+        return tmp
+
+    def test_detects_course_alignment_docx(self):
+        from lms_migration.pipeline import _audit_course_alignment_docs
+
+        zp = self._make_zip(
+            {"CourseDocuments/Course Alignment - ACC2321 Online.docx": b"stub"}
+        )
+        rows = _audit_course_alignment_docs(zp)
+        assert len(rows) == 1
+        assert "course alignment document" in rows[0]["reason"].lower()
+        assert "ACC2321" in rows[0]["evidence"]
+
+    def test_ignores_non_document_file_in_alignment_folder(self):
+        from lms_migration.pipeline import _audit_course_alignment_docs
+
+        zp = self._make_zip(
+            {"Course Alignment Documents/How To Look Up IRS Forms.mp4": b"stub"}
+        )
+        rows = _audit_course_alignment_docs(zp)
+        assert rows == []
+
+    def test_reason_triggers_checklist_handler(self):
+        from lms_migration.pipeline import _audit_course_alignment_docs
+
+        zp = self._make_zip(
+            {"CourseOverview/Course Alignment Document - VET 2111.docx": b"stub"}
+        )
+        rows = _audit_course_alignment_docs(zp)
+        priority, category, _owner, _action = _map_manual_review_group(
+            "d2l_xml_audit", rows[0]["reason"]
+        )
+        assert priority == "P2"
+        assert category == "course_alignment_review"
+
+
+class TestAuditQuizEmbeddedMedia:
+    def _make_zip(self, files: dict[str, str]) -> Path:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, content in files.items():
+                zf.writestr(name, content)
+        buf.seek(0)
+        tmp = Path("/tmp/test_quiz_embedded_media.zip")
+        tmp.write_bytes(buf.read())
+        return tmp
+
+    def test_detects_encoded_img_in_questiondb(self):
+        from lms_migration.pipeline import _audit_quiz_embedded_media
+
+        quiz_xml = """\
+<questestinterop xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">
+  <assessment d2l_2p0:id="5" title="Horse Quiz">
+    <section ident="SEC1">
+      <itemref linkrefid="QUES_1" d2l_2p0:page="1"><d2l_2p0:file href="questiondb.xml" /></itemref>
+    </section>
+  </assessment>
+</questestinterop>
+"""
+        questiondb_xml = """\
+<questestinterop>
+  <item ident="QUES_1">
+    <presentation><flow><material><mattext texttype="text/html">&lt;p&gt;&lt;img src="quizImages/horse blind spot.jpg" alt="horse blind spot" /&gt;&lt;/p&gt;</mattext></material></flow></presentation>
+  </item>
+</questestinterop>
+"""
+        zp = self._make_zip(
+            {"quiz_d2l_5.xml": quiz_xml, "questiondb.xml": questiondb_xml}
+        )
+        rows = _audit_quiz_embedded_media(zp)
+        assert len(rows) == 1
+        assert "Horse Quiz" in rows[0]["evidence"]
+        assert "QUES_1" in rows[0]["evidence"]
+        assert "horse blind spot.jpg" in rows[0]["evidence"]
+
+    def test_no_media_returns_empty(self):
+        from lms_migration.pipeline import _audit_quiz_embedded_media
+
+        quiz_xml = """\
+<questestinterop xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">
+  <assessment d2l_2p0:id="5" title="Plain Quiz">
+    <section ident="SEC1">
+      <item ident="Q1"><presentation><flow><material><mattext texttype="text/html">Plain text</mattext></material></flow></presentation></item>
+    </section>
+  </assessment>
+</questestinterop>
+"""
+        zp = self._make_zip({"quiz_d2l_5.xml": quiz_xml})
+        rows = _audit_quiz_embedded_media(zp)
+        assert rows == []
+
+    def test_reason_triggers_checklist_handler(self):
+        from lms_migration.pipeline import _audit_quiz_embedded_media
+
+        quiz_xml = """\
+<questestinterop xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0">
+  <assessment d2l_2p0:id="5" title="Media Quiz">
+    <section ident="SEC1">
+      <item ident="Q1"><presentation><flow><material><mattext texttype="text/html">&lt;img src="x.jpg" alt="" /&gt;</mattext></material></flow></presentation></item>
+    </section>
+  </assessment>
+</questestinterop>
+"""
+        zp = self._make_zip({"quiz_d2l_5.xml": quiz_xml})
+        rows = _audit_quiz_embedded_media(zp)
+        priority, category, _owner, action = _map_manual_review_group(
+            "d2l_xml_audit", rows[0]["reason"]
+        )
+        assert priority == "P1"
+        assert category == "new_quizzes_media_rebuild"
+        assert "stimulus" in action.lower() or "image" in action.lower()
 
 
 class TestAuditGradebookGroups:
@@ -2364,3 +2545,311 @@ class TestSuggestAltText:
             "accessibility", "Image alt attribute is empty"
         )
         assert "verify" in action.lower()
+
+
+class TestStandardPostmigrationTasks:
+    def test_without_supporting_evidence_skips_optional_generic_tasks(self, tmp_path: Path):
+        csv_path = tmp_path / "manual-review.csv"
+        csv_path.write_text("file,type,reason,evidence\n", encoding="utf-8")
+
+        items = _generate_standard_postmigration_tasks(manual_review_csv=csv_path)
+        categories = {item.category for item in items}
+
+        assert "gradebook_structure" in categories
+        assert "item_bank_sharing" not in categories
+
+    def test_with_supporting_evidence_includes_targeted_optional_tasks(
+        self, tmp_path: Path
+    ):
+        csv_path = tmp_path / "manual-review.csv"
+        csv_path.write_text(
+            "\n".join(
+                [
+                    "file,type,reason,evidence",
+                    'quiz_d2l_2.xml,d2l_xml_audit,Question bank migration requires manual verification,"question library / random draw"',
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        items = _generate_standard_postmigration_tasks(manual_review_csv=csv_path)
+        categories = {item.category for item in items}
+
+        assert "gradebook_structure" in categories
+        assert "item_bank_sharing" in categories
+
+
+class TestFileOrganizationAudit:
+    def _make_zip(self, tmp_path: Path, files: dict[str, str]) -> Path:
+        tmp = tmp_path / "file-organization.zip"
+        with zipfile.ZipFile(tmp, "w") as zf:
+            for name, content in files.items():
+                zf.writestr(name, content)
+        return tmp
+
+    def test_scattered_root_files_emit_advisory_row(self, tmp_path: Path):
+        from lms_migration.pipeline import _audit_file_organization_risks
+
+        zp = self._make_zip(
+            tmp_path,
+            {
+                "imsmanifest.xml": "<manifest/>",
+                "Syllabus.html": "<html></html>",
+                "Schedule.pdf": "pdf",
+                "CourseGraphic.png": "img",
+                "QuickTips.docx": "doc",
+                "Worksheet.xlsx": "xls",
+                "Welcome Letter.pdf": "pdf",
+                "Module1/lesson.html": "<html></html>",
+            },
+        )
+        rows = _audit_file_organization_risks(zp)
+        assert len(rows) == 1
+        assert "scattered d2l file organization detected" in rows[0]["reason"].lower()
+        assert "top-level loose content files: 6" in rows[0]["evidence"]
+        assert "sample loose files:" in rows[0]["evidence"]
+
+    def test_duplicate_basenames_emit_collision_row(self, tmp_path: Path):
+        from lms_migration.pipeline import _audit_file_organization_risks
+
+        zp = self._make_zip(
+            tmp_path,
+            {
+                "imsmanifest.xml": "<manifest/>",
+                "CourseDocuments/lecture1.pdf": "a",
+                "Module01/lecture1.pdf": "b",
+                "Module02/slides.pptx": "c",
+            },
+        )
+        rows = _audit_file_organization_risks(zp)
+        assert len(rows) == 1
+        assert "duplicate content filenames across d2l folders detected" in rows[0]["reason"].lower()
+        assert "duplicate basenames across folders: 1" in rows[0]["evidence"]
+        assert "lecture1.pdf (2 copies)" in rows[0]["evidence"]
+
+    def test_fix_checklist_handlers_for_file_organization_rows(self):
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "Scattered D2L file organization detected — preserve file paths during migration and plan optional Canvas Files cleanup later",
+        )
+        assert priority == "P3"
+        assert category == "course_files_cleanup_plan"
+        assert owner == "ID"
+        assert "preserve" in action.lower()
+        assert "canvas" in action.lower()
+
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "Duplicate content filenames across D2L folders detected — avoid automatic file moves during migration",
+        )
+        assert priority == "P2"
+        assert category == "file_move_collision_risk"
+        assert owner == "ID"
+        assert "duplicate" in action.lower()
+        assert "migration" in action.lower()
+
+
+class TestCourseKickoffSummary:
+    def test_build_course_kickoff_summary_surfaces_core_signals(self):
+        from lms_migration.pipeline import _build_course_kickoff_summary
+
+        report = {
+            "input_zip": "course.zip",
+            "output_zip": "course.canvas-ready.zip",
+            "policy_profile": {"id": "sinclair"},
+            "summary": {
+                "html_files_changed": 12,
+                "manual_review_issues": 9,
+                "accessibility_issues": 2,
+            },
+            "issue_summary": {
+                "top_manual_review_reasons": [
+                    {
+                        "reason": "Template placeholder text remains",
+                        "count": 4,
+                    }
+                ],
+                "top_accessibility_reasons": [
+                    {
+                        "reason": "Image missing alt attribute",
+                        "count": 2,
+                    }
+                ],
+            },
+        }
+        rows = [
+            {
+                "file": "Course Alignment Documents/map.xlsx",
+                "type": "d2l_xml_audit",
+                "reason": "Course alignment document detected — use during syllabus, module, and assessment verification",
+                "evidence": "Course Alignment Documents/map.xlsx",
+            },
+            {
+                "file": "imsmanifest.xml",
+                "type": "d2l_xml_audit",
+                "reason": "Quiz-based release condition detected — recreate module prerequisites/requirements in Canvas",
+                "evidence": 'quiz: "Syllabus Quiz" | required score: 100%',
+            },
+            {
+                "file": "grades_d2l.xml",
+                "type": "d2l_xml_audit",
+                "reason": "Unresolvable grade item — no D2L submission object found; create Canvas Assignment and connect to gradebook after import",
+                "evidence": 'grade item: "Homework 1" | points: 10',
+            },
+            {
+                "file": "welcome.pdf",
+                "type": "d2l_xml_audit",
+                "reason": "Scattered D2L file organization detected — preserve file paths during migration and plan optional Canvas Files cleanup later",
+                "evidence": "top-level loose content files: 8 | total content files: 30",
+            },
+        ]
+
+        summary = _build_course_kickoff_summary(report, rows)
+
+        assert summary["automated_summary"]["html_files_changed"] == 12
+        signal_counts = {row["id"]: row["count"] for row in summary["signals"]}
+        assert signal_counts["course_alignment_docs"] == 1
+        assert signal_counts["quiz_release_conditions"] == 1
+        assert signal_counts["unresolvable_grade_items"] == 1
+        assert signal_counts["file_organization_risks"] == 1
+        assert any(
+            "preserve d2l file paths during migration" in item.lower()
+            for item in summary["recommendations"]
+        )
+        assert any(
+            "course alignment document" in item.lower()
+            for item in summary["recommendations"]
+        )
+
+
+class TestReleaseConditionAndHiddenContentAudits:
+    def _make_zip(self, files: dict[str, str]) -> Path:
+        tmp = Path("/tmp/test_release_conditions.zip")
+        with zipfile.ZipFile(tmp, "w") as zf:
+            for name, content in files.items():
+                zf.writestr(name, content)
+        return tmp
+
+    def test_hidden_instructor_only_manifest_item_detected(self):
+        from lms_migration.pipeline import _audit_instructor_only_manifest_items
+
+        manifest = """\
+<manifest xmlns="http://www.imsglobal.org/xsd/imscp_v1p1" xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_rootv1p0">
+  <organizations>
+    <organization>
+      <item identifier="i1" identifierref="res1" isvisible="False" d2l_2p0:resource_code="rc-1">
+        <title>Preparing Your Course - For Faculty Use Only</title>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res1" href="faculty.html" />
+  </resources>
+</manifest>
+"""
+        zp = self._make_zip({"imsmanifest.xml": manifest})
+        rows = _audit_instructor_only_manifest_items(zp)
+        assert len(rows) == 1
+        assert "instructor-only" in rows[0]["reason"].lower() or "hidden" in rows[0]["reason"].lower()
+        assert "faculty use only" in rows[0]["evidence"].lower()
+
+    def test_quiz_release_condition_detected_and_mapped_to_title(self):
+        from lms_migration.pipeline import _audit_quiz_release_conditions
+
+        manifest = """\
+<manifest xmlns="http://www.imsglobal.org/xsd/imscp_v1p1" xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_rootv1p0">
+  <organizations>
+    <organization>
+      <item identifier="course_overview" identifierref="res_course_overview" d2l_2p0:resource_code="rc-course-overview">
+        <title>Course Overview</title>
+        <item identifier="quiz_item" identifierref="res_quiz" d2l_2p0:resource_code="rc-quiz" resource_type_key="D2L.LE.Quizzing.Quiz">
+          <title>Quiz | Course Overview Survey</title>
+        </item>
+      </item>
+      <item identifier="module_1" identifierref="res_module_1" d2l_2p0:resource_code="rc-module-1" condition_set="gate-1">
+        <title>Module 1</title>
+      </item>
+      <item identifier="module_2" identifierref="res_module_2" d2l_2p0:resource_code="rc-module-2" condition_set="gate-2">
+        <title>Module 2</title>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res_course_overview" href="course_overview.html" />
+    <resource identifier="res_quiz" href="/d2l/common/dialogs/quickLink/quickLink.d2l?ou={orgUnitId}&amp;type=quiz&amp;rcode=Sinclair-26" />
+    <resource identifier="res_module_1" href="" />
+    <resource identifier="res_module_2" href="" />
+  </resources>
+</manifest>
+"""
+        conditional_release = """\
+<conditional_release>
+  <condition_set resource_code="gate-1" tool="37000" operator="1">
+    <condition condition_type="3" quiz="Sinclair-26" percentage_value="100.0000" />
+  </condition_set>
+  <condition_set resource_code="gate-2" tool="37000" operator="1">
+    <condition condition_type="3" quiz="Sinclair-26" percentage_value="100.0000" />
+  </condition_set>
+</conditional_release>
+"""
+        zp = self._make_zip(
+            {
+                "imsmanifest.xml": manifest,
+                "conditionalrelease_d2l.xml": conditional_release,
+            }
+        )
+        rows = _audit_quiz_release_conditions(zp)
+        assert len(rows) == 1
+        assert "quiz-based release condition detected" in rows[0]["reason"].lower()
+        assert 'quiz: "Quiz | Course Overview Survey"' in rows[0]["evidence"]
+        assert "required score: 100%" in rows[0]["evidence"]
+        assert "gated items: 2" in rows[0]["evidence"]
+
+    def test_fix_checklist_handlers_for_new_release_rows(self):
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "Hidden or instructor-only D2L content detected — keep unpublished in Canvas",
+        )
+        assert priority == "P1"
+        assert category == "faculty_only_content"
+        assert owner == "ID/Faculty"
+        assert "unpublished" in action.lower()
+
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "Quiz-based release condition detected — recreate module prerequisites/requirements in Canvas",
+        )
+        assert priority == "P1"
+        assert category == "syllabus_quiz_gate"
+        assert owner == "ID/Faculty"
+        assert "module requirements" in action.lower() or "prerequisites" in action.lower()
+
+
+class TestQuizBankUsageAudit:
+    def _make_zip(self, files: dict[str, str]) -> Path:
+        tmp = Path("/tmp/test_quiz_bank_usage.zip")
+        with zipfile.ZipFile(tmp, "w") as zf:
+            for name, content in files.items():
+                zf.writestr(name, content)
+        return tmp
+
+    def test_quiz_bank_usage_row_emitted(self):
+        from lms_migration.pipeline import _audit_quiz_bank_usage
+
+        zp = self._make_zip({"quiz_d2l_7.xml": _QUIZ_XML_QUESTIONDB_RANDOM})
+        rows = _audit_quiz_bank_usage(zp)
+        assert len(rows) == 1
+        assert "question bank/randomization workflow detected" in rows[0]["reason"].lower()
+        assert "questiondb-backed items: 2" in rows[0]["evidence"]
+        assert "random question order: yes" in rows[0]["evidence"]
+
+    def test_fix_checklist_handler_for_quiz_bank_usage(self):
+        priority, category, owner, action = _map_manual_review_group(
+            "d2l_xml_audit",
+            "Question bank/randomization workflow detected — verify Item Banks and shuffle behavior in Canvas",
+        )
+        assert priority == "P1"
+        assert category == "question_bank_logic_review"
+        assert owner == "Faculty/ID"
+        assert "item banks" in action.lower()
+        assert "shuffle" in action.lower()

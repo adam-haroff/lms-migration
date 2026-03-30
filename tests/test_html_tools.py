@@ -28,6 +28,7 @@ from lms_migration.template_overlay import (
     TemplateOverlayContext,
     apply_template_overlay,
     _canonical_heading_label,
+    ensure_canonical_closing_divider,
 )
 
 
@@ -448,15 +449,25 @@ def _make_ctx(**overrides) -> TemplateOverlayContext:
     defaults: dict = dict(
         template_package=Path("."),
         alias_map_source="test",
-        alias_map={},
+        alias_map={
+            "explorethis.png": ("folder.png",),
+            "dothis.png": ("checklist.png",),
+            "viewthis.png": ("bookmark.png",),
+        },
         assets_by_basename={
             "checklist.png": ["TemplateAssets/checklist.png"],
             "video.png": ["TemplateAssets/video.png"],
+            "folder.png": ["TemplateAssets/folder.png"],
+            "paper.png": ["TemplateAssets/paper.png"],
+            "bookmark.png": ["TemplateAssets/bookmark.png"],
         },
         file_name_collisions={},
         icon_label_by_basename={
             "checklist.png": "Checklist",
             "video.png": "Learning Activities",
+            "folder.png": "Additional Resources",
+            "paper.png": "Do This",
+            "bookmark.png": "View",
         },
         apply_visual_standards=True,
         apply_color_standards=True,
@@ -486,12 +497,20 @@ class TestNormalizeIconOnlyParagraph:
         html = '<p><img src="../TemplateAssets/checklist.png" alt=""/></p>'
         out = self._overlay(html)
         assert "Checklist" in out
+        assert (
+            '<span style="color: #ac1a2f;"><strong>Checklist</strong></span>' in out
+        )
 
     def test_video_icon_gets_label(self):
         # video.png is hardcoded to return 'View' by _canonical_heading_label
         html = '<p><img src="../TemplateAssets/video.png" alt=""/></p>'
         out = self._overlay(html)
         assert "View" in out
+
+    def test_icon_heading_does_not_insert_space_before_label(self):
+        html = '<p><img src="../TemplateAssets/checklist.png" alt=""/></p>'
+        out = self._overlay(html)
+        assert not re.search(r"checklist\.png[^>]*>\s+<strong>", out, re.IGNORECASE)
 
     def test_div_wrapper_also_converted(self):
         html = '<div><img src="../TemplateAssets/checklist.png" alt=""/></div>'
@@ -523,6 +542,34 @@ class TestNormalizeIconOnlyParagraph:
         html = '<p><img src="../images/photo.jpg" alt="photo"/></p>'
         out = self._overlay(html)
         assert "<h3" not in out
+
+    def test_legacy_course_owned_explore_icon_becomes_template_heading(self):
+        html = '<p><img src="/content/enforced/course/Content/images/ExploreThis.png" alt="Explore This"/></p>'
+        out = self._overlay(html)
+        assert "TemplateAssets/folder.png" in out
+        assert "<h3" in out
+        assert "Explore This" in out
+
+    def test_legacy_course_owned_do_this_icon_uses_template_asset_and_label(self):
+        html = '<p><img src="/d2l/lor/viewer/viewFile.d2lfile/123/456/Content/images/DoThis.png" alt="Do This"/></p>'
+        out = self._overlay(html)
+        assert "TemplateAssets/paper.png" in out
+        assert "<h3" in out
+        assert "Do This" in out
+
+    def test_legacy_course_owned_explore_icon_without_alt_uses_basename_label(self):
+        html = '<p><img src="standardImages/exploreThis.png"/></p>'
+        out = self._overlay(html)
+        assert "TemplateAssets/folder.png" in out
+        assert "<h3" in out
+        assert "Explore This" in out
+
+    def test_legacy_course_owned_do_this_icon_without_alt_uses_basename_label(self):
+        html = '<p><img src="standardImages/doThis.png"/></p>'
+        out = self._overlay(html)
+        assert "TemplateAssets/paper.png" in out
+        assert "<h3" in out
+        assert "Do This" in out
 
 
 # ===========================================================================
@@ -628,6 +675,10 @@ class TestIntroHeadingStyle:
         h2_match = re.search(r"<h2[^>]*>", result, re.IGNORECASE)
         assert h2_match, "Expected an <h2> element"
         assert "border-bottom" in h2_match.group(0).lower()
+
+    def test_introduction_heading_icon_has_no_inserted_space(self):
+        result = self._apply("Introduction")
+        assert not re.search(r"star\.png[^>]*>\s+<strong>", result, re.IGNORECASE)
 
     # --- Section headings (Module Objectives, Module Checklist) ---
 
@@ -762,6 +813,60 @@ class TestTrailingRedHr:
         assert any(
             "closing red divider" in d for d in descriptions
         ), f"Expected trailing-hr AppliedChange, got: {descriptions}"
+
+
+class TestEnsureCanonicalClosingDivider:
+    _CANONICAL_HR = '<hr style="border-top: 8px solid #AC1A2F;">'
+
+    def test_adds_divider_before_body_close(self):
+        html = "<html><body><p>Content.</p></body></html>"
+        out, changed = ensure_canonical_closing_divider(
+            html,
+            file_path="Introduction and Objectives.html",
+            apply_divider_standards=True,
+        )
+        assert changed is True
+        assert self._CANONICAL_HR in out
+        assert out.index(self._CANONICAL_HR) < out.lower().rfind("</body>")
+
+    def test_home_page_still_excluded(self):
+        html = "<html><body><p>Home.</p></body></html>"
+        out, changed = ensure_canonical_closing_divider(
+            html,
+            file_path="CourseOverview/Home Page.html",
+            apply_divider_standards=True,
+        )
+        assert changed is False
+        assert self._CANONICAL_HR not in out
+
+
+class TestLearningActivitiesTitleSpacing:
+    def _make_ctx(self) -> TemplateOverlayContext:
+        return TemplateOverlayContext(
+            template_package=Path("."),
+            alias_map_source="test",
+            alias_map={},
+            assets_by_basename={
+                "bookmark.png": ["TemplateAssets/bookmark.png"],
+            },
+            file_name_collisions={},
+            icon_label_by_basename={
+                "bookmark.png": "Learning Activities",
+            },
+            apply_visual_standards=True,
+            apply_color_standards=True,
+            apply_divider_standards=True,
+            image_layout_mode="safe-block",
+        )
+
+    def test_learning_page_title_icon_has_no_inserted_space(self):
+        html = "<body><h2>Learning Activities</h2><p>Content.</p></body>"
+        out, _, _, _ = apply_template_overlay(
+            html,
+            file_path="Module 1 Learning Activities.html",
+            context=self._make_ctx(),
+        )
+        assert not re.search(r"bookmark\.png[^>]*>\s+Learning Activities", out, re.IGNORECASE)
 
 
 # ===========================================================================
@@ -1329,6 +1434,14 @@ class TestModuleChecklistCloserFlaggedNotInjected:
 </ul>
 </body></html>"""
 
+    _PAGE_WITH_ASSIGNMENT_CLOSER = """<html><body>
+<h2>Module Checklist</h2>
+<ul>
+  <li>Read chapter 1</li>
+  <li>Contact your instructor with any questions about the course or assignments.</li>
+</ul>
+</body></html>"""
+
     def _run(self, html: str, file_path: str = _INTRO_PATH):
         policy = BestPracticeEnforcerPolicy(
             enabled=True,
@@ -1362,6 +1475,11 @@ class TestModuleChecklistCloserFlaggedNotInjected:
 
     def test_page_with_local_closer_no_issue(self):
         _, _, issues = self._run(self._PAGE_WITH_LOCAL_CLOSER)
+        checklist_issues = [i for i in issues if "module checklist" in i.reason.lower()]
+        assert checklist_issues == []
+
+    def test_page_with_assignment_specific_closer_no_issue(self):
+        _, _, issues = self._run(self._PAGE_WITH_ASSIGNMENT_CLOSER)
         checklist_issues = [i for i in issues if "module checklist" in i.reason.lower()]
         assert checklist_issues == []
 

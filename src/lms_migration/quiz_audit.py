@@ -97,6 +97,8 @@ class QuizInfo:
     date_due: str
     shuffle_type: str  # "none", "answers", "questions", "both", "unknown"
     grade_item_resource_code: str
+    questiondb_item_count: int
+    random_question_order: bool
     compatibility_flags: list[dict] = field(default_factory=list)
 
 
@@ -163,6 +165,8 @@ def _parse_quiz_xml(filename: str, content: str) -> QuizInfo:
             date_due="",
             shuffle_type="unknown",
             grade_item_resource_code="",
+            questiondb_item_count=0,
+            random_question_order=False,
             compatibility_flags=[
                 {
                     "level": "P1",
@@ -266,6 +270,21 @@ def _parse_quiz_xml(filename: str, content: str) -> QuizInfo:
         shuffle_raw.lower(), "none" if not shuffle_raw else "unknown"
     )
 
+    questiondb_item_count = len(
+        re.findall(
+            r"<itemref\b[^>]*>.*?<[^>:\s]*:file\b[^>]*href=\"questiondb\.xml\"",
+            content,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+    random_question_order = bool(
+        re.search(
+            r"<selection_ordering>\s*<order\b[^>]*order_type=\"random\"",
+            content,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+
     # --- Compatibility flags ---
     flags: list[dict] = []
     for qtype, count in sorted(question_types.items()):
@@ -295,6 +314,8 @@ def _parse_quiz_xml(filename: str, content: str) -> QuizInfo:
         date_due=date_due,
         shuffle_type=shuffle_type,
         grade_item_resource_code=grade_item_rc,
+        questiondb_item_count=questiondb_item_count,
+        random_question_order=random_question_order,
         compatibility_flags=flags,
     )
 
@@ -428,6 +449,14 @@ def write_markdown_report(report: QuizAuditReport, output_path: Path) -> None:
             )
             lines.append(f"- **Question types:** {type_parts}")
 
+        if q.questiondb_item_count:
+            lines.append(
+                "- **Question bank references:** "
+                f"{q.questiondb_item_count} question(s) sourced from `questiondb.xml`"
+            )
+        if q.random_question_order:
+            lines.append("- **Random question order in D2L:** Yes")
+
         if q.compatibility_flags:
             lines.append("- **Compatibility flags:**")
             for f in q.compatibility_flags:
@@ -450,6 +479,8 @@ def write_markdown_report(report: QuizAuditReport, output_path: Path) -> None:
         "3. Reconfigure time limit and attempt settings (these do not always transfer).",
         "4. For quizzes with availability dates: re-enter open/close/until dates in Canvas.",
         "5. For quizzes with question banks/random draws: verify draw counts and bank sharing.",
+        "6. For quizzes sourcing questions from `questiondb.xml`: verify each imported question, point value, and any shared media. Rebuild as Canvas Item Banks if editing or coordinator sharing is needed.",
+        "7. If D2L randomized question order, re-enable the equivalent shuffle behavior in Canvas New Quizzes and verify order-sensitive questions still work correctly.",
         "",
     ]
 

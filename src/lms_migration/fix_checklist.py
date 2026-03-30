@@ -348,6 +348,66 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "Add Rubric; (3) check 'Use this rubric for grading' and (4) verify 'Free-form "
             "comment' and 'Hide score total' settings match faculty expectations.",
         )
+    if "course alignment document detected" in lowered:
+        return (
+            "P2",
+            "course_alignment_review",
+            "Faculty/Course Coordinator",
+            "Open the detected Course Alignment document and use it as a verification source "
+            "for module coverage, assignment names, point values, syllabus tables, and the "
+            "overall assessment sequence after migration. This is especially useful when "
+            "rebuilding schedules, due-date pages, or syllabus summary tables in Canvas.",
+        )
+    if "scattered d2l file organization detected" in lowered:
+        return (
+            "P3",
+            "course_files_cleanup_plan",
+            "ID",
+            "Preserve the exported file paths during the initial migration. After the course is imported "
+            "and validated in Canvas, review Files and optionally consolidate loose documents into a cleaner "
+            "folder structure. Do not move files before import unless every linked page, image, and document "
+            "reference is also being rewritten and revalidated.",
+        )
+    if "duplicate content filenames across d2l folders detected" in lowered:
+        return (
+            "P2",
+            "file_move_collision_risk",
+            "ID",
+            "Preserve package paths during migration. If you later reorganize Files in Canvas, handle duplicate "
+            "filenames deliberately, rename only with a cleanup plan, and re-check every page, quiz, and module "
+            "link that may reference those files.",
+        )
+    if "hidden or instructor-only d2l content detected" in lowered:
+        return (
+            "P1",
+            "faculty_only_content",
+            "ID/Faculty",
+            "Keep these items unpublished in Canvas. Verify that D2L content hidden from students "
+            "or clearly labeled for faculty/instructor use only stays out of the student-facing "
+            "module flow after migration.",
+        )
+    if "quiz-based release condition detected" in lowered:
+        return (
+            "P1",
+            "syllabus_quiz_gate",
+            "ID/Faculty",
+            "Recreate the D2L gating logic in Canvas Modules. Add the gating quiz to the start "
+            "module, set the required score/attempt behavior, and use Module Requirements and/or "
+            "Prerequisites so later modules stay locked until students complete the quiz.",
+        )
+    if "quiz question images/media detected" in lowered:
+        return (
+            "P1",
+            "new_quizzes_media_rebuild",
+            "Faculty/Course Coordinator",
+            "One or more quiz questions contain embedded images or media carried over from D2L. "
+            "In Canvas New Quizzes, open each affected question and verify that every image still "
+            "renders in the correct place, with the correct alt text and answer-choice alignment. "
+            "If Canvas dropped or misplaced the media, re-upload the image into the New Quiz question "
+            "stem/choices and rebuild the question manually. For complex figure-based questions, "
+            "consider using Stimulus + question pairs or moving long visual context onto a Canvas page "
+            "that the quiz references.",
+        )
     if "instructor note placeholder remains" in lowered:
         return (
             "P1",
@@ -385,6 +445,16 @@ def _map_manual_review_group(issue_type: str, reason: str) -> tuple[str, str, st
             "question_bank_logic_review",
             "Faculty/ID",
             "Rebuild question-pool logic in Canvas, verify draw counts/randomization, and share any required item banks with the course so coordinators can edit them.",
+        )
+    if "question bank/randomization workflow detected" in lowered:
+        return (
+            "P1",
+            "question_bank_logic_review",
+            "Faculty/ID",
+            "Open the affected quiz in Canvas New Quizzes and verify how D2L question-bank behavior should be recreated. "
+            "If the quiz used questiondb-backed items, confirm every imported question, point value, and shared image/media asset. "
+            "If D2L randomized question order, re-enable the equivalent shuffle behavior in Canvas. "
+            "When coordinator editing or reuse is needed, rebuild the quiz from Canvas Item Banks and share the banks with the course.",
         )
     if "youtube embeds may violate ad-free requirement" in lowered:
         return (
@@ -522,15 +592,47 @@ def _map_reference_best_practice_gap(row_id: str, label: str) -> tuple[str, str,
     )
 
 
-def _generate_standard_postmigration_tasks() -> list[ChecklistItem]:
-    """Return standard post-migration QA tasks based on known D2L→Canvas migration pain-points.
+def _load_standard_task_signals(manual_review_csv: Path | None) -> dict[str, bool]:
+    signals = {
+        "item_bank_sharing": False,
+    }
+    if manual_review_csv is None or not manual_review_csv.exists():
+        return signals
 
-    These items represent manual checks that are required (or likely needed) for every
-    course migration.  They cannot be fully auto-detected from HTML or Canvas import logs
-    because they depend on D2L gradebook/quiz XML that is not yet parsed by the pipeline.
-    They are included as P2 reminders so nothing falls through the cracks.
+    with manual_review_csv.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            blob = " ".join(
+                str(row.get(field, "")).strip()
+                for field in ("type", "reason", "evidence", "file")
+            ).lower()
+            if not blob:
+                continue
+            if any(
+                token in blob
+                for token in (
+                    "item bank",
+                    "question bank",
+                    "question library",
+                    "question pool",
+                    "random draw",
+                )
+            ):
+                signals["item_bank_sharing"] = True
+    return signals
+
+
+def _generate_standard_postmigration_tasks(
+    *, manual_review_csv: Path | None = None
+) -> list[ChecklistItem]:
+    """Return standard post-migration QA tasks for evidence-backed migration pain-points.
+
+    ``gradebook_structure`` remains a universal review step. Other reminders are only
+    emitted when the manual-review CSV contains evidence that the course used that
+    workflow in D2L.
     """
-    return [
+    signals = _load_standard_task_signals(manual_review_csv)
+    items = [
         ChecklistItem(
             priority="P2",
             source="standard_migration",
@@ -543,68 +645,23 @@ def _generate_standard_postmigration_tasks() -> list[ChecklistItem]:
                 "for any activity with student-drop policies."
             ),
         ),
-        ChecklistItem(
-            priority="P2",
-            source="standard_migration",
-            category="bonus_extra_credit",
-            owner="ID/Faculty",
-            description="Verify bonus / extra-credit assignments are configured correctly",
-            action=(
-                "In Canvas, extra-credit assignments must be worth 0 points and have an attached "
-                "rubric (or a manual points entry).  Find any D2L 'bonus' items and set them up "
-                "in Canvas accordingly.  Confirm they do not count against the total points denominator."
-            ),
-        ),
-        ChecklistItem(
-            priority="P2",
-            source="standard_migration",
-            category="syllabus_quiz_gate",
-            owner="ID/Faculty",
-            description="Verify Syllabus Quiz / prerequisite-gating is re-implemented in Canvas",
-            action=(
-                "If the D2L course gated module access with a Syllabus Quiz (quiz set to "
-                "'Not in Gradebook'), recreate the prerequisite using Canvas Module Requirements "
-                "(complete the quiz before proceeding) and verify the quiz is excluded from "
-                "grade calculations."
-            ),
-        ),
-        ChecklistItem(
-            priority="P2",
-            source="standard_migration",
-            category="faculty_only_content",
-            owner="ID",
-            description="Verify instructor-only / faculty-only pages are unpublished in Canvas",
-            action=(
-                "Identify D2L pages restricted to Staff/Instructor roles (release conditions).  "
-                "In Canvas, set those pages to Unpublished and add '(Instructor Only)' to the "
-                "page title per naming convention so they are excluded from student view."
-            ),
-        ),
-        ChecklistItem(
-            priority="P2",
-            source="standard_migration",
-            category="rubric_configuration",
-            owner="ID/Faculty",
-            description="Verify rubric point ranges, criteria, and grading connections in Canvas",
-            action=(
-                "Open each migrated rubric in Canvas.  Check that criterion point ranges are "
-                "correct (D2L and Canvas range differently), attach the rubric to its assignment, "
-                "and enable 'Use this rubric for grading' on graded assessments."
-            ),
-        ),
-        ChecklistItem(
-            priority="P2",
-            source="standard_migration",
-            category="item_bank_sharing",
-            owner="ID",
-            description="Share item banks with course coordinator after quiz migration",
-            action=(
-                "After rebuilding quiz question banks, open Canvas Item Banks, share each required "
-                "bank at the course level, and confirm the course coordinator can view and edit "
-                "questions.  This is required before the course goes live for multi-section courses."
-            ),
-        ),
     ]
+    if signals["item_bank_sharing"]:
+        items.append(
+            ChecklistItem(
+                priority="P2",
+                source="standard_migration",
+                category="item_bank_sharing",
+                owner="ID",
+                description="Share item banks with course coordinator after quiz migration",
+                action=(
+                    "After rebuilding quiz question banks, open Canvas Item Banks, share each required "
+                    "bank at the course level, and confirm the course coordinator can view and edit "
+                    "questions.  This is required before the course goes live for multi-section courses."
+                ),
+            )
+        )
+    return items
 
 
 def _load_canvas_items(path: Path) -> list[ChecklistItem]:
@@ -752,7 +809,7 @@ def build_fix_checklist(
     items.extend(_load_canvas_items(canvas_issues_json))
     items.extend(_load_manual_review_items(manual_review_csv))
     items.extend(_load_reference_items(reference_audit_json))
-    items.extend(_generate_standard_postmigration_tasks())
+    items.extend(_generate_standard_postmigration_tasks(manual_review_csv=manual_review_csv))
     items.sort(
         key=lambda item: (
             _priority_rank(item.priority),

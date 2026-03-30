@@ -350,13 +350,13 @@ def analyze_example_corpus(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lms-analyze-examples",
-        description="Analyze D2L example corpus with Canvas issue JSON and manual-conversion snapshots.",
+        description="Analyze the curated example/reference corpus with Canvas issue JSON and manual-conversion snapshots.",
     )
     parser.add_argument(
         "--examples-dir",
         type=Path,
         default=Path("resources/examples"),
-        help="Directory containing per-course example folders (zip + canvas-migration-issues.json).",
+        help="Directory containing curated per-course example folders (not the active resources/incoming intake area).",
     )
     parser.add_argument(
         "--snapshot-root",

@@ -62,6 +62,9 @@ _ICON_STYLE_SKIP_BASENAMES = {
     "student-resource-course.png",
     "video-placeholder.png",
 }
+_LEGACY_HEADING_ICON_BASENAMES = frozenset(
+    {"dothis.png", "explorethis.png", "reviewthis.png", "viewthis.png"}
+)
 _DEFAULT_ICON_LABELS = {
     "checklist.png": "Checklist",
     "exclamation.png": "Important",
@@ -237,6 +240,93 @@ def _extract_img_basename(tag_html: str) -> str:
     return _normalize_basename(unquote(parsed.path))
 
 
+def _extract_img_heading_label(tag_html: str) -> str:
+    for attr in ("data-template-label", "alt", "title"):
+        match = re.search(
+            rf'(?<=\s){attr}\s*=\s*(["\'])(?P<value>[^"\']*)\1',
+            tag_html,
+            flags=re.IGNORECASE,
+        )
+        if match is not None:
+            text = _canonical_icon_label(match.group("value"))
+            if text:
+                return text
+    return ""
+
+
+def _legacy_heading_label_for_basename(basename: str) -> str:
+    normalized = _normalize_basename(basename)
+    stem = normalized.rsplit(".", 1)[0]
+    if stem == "dothis":
+        return "Do This"
+    if stem == "explorethis":
+        return "Explore This"
+    if stem == "reviewthis":
+        return "Review This"
+    if stem == "viewthis":
+        return "View This"
+    return ""
+
+
+def _set_img_data_template_label(tag_html: str, label: str) -> str:
+    cleaned = _canonical_icon_label(label)
+    if not cleaned:
+        return tag_html
+    escaped = html.escape(cleaned, quote=True)
+    match = re.search(
+        r'(?<=\s)data-template-label\s*=\s*(["\'])(?P<value>[^"\']*)\1',
+        tag_html,
+        flags=re.IGNORECASE,
+    )
+    if match is not None:
+        return (
+            tag_html[: match.start("value")]
+            + escaped
+            + tag_html[match.end("value") :]
+        )
+    if re.search(r"/\s*>$", tag_html):
+        return re.sub(
+            r"/\s*>$", f' data-template-label="{escaped}" />', tag_html, count=1
+        )
+    return tag_html[:-1] + f' data-template-label="{escaped}">'
+
+
+def _img_looks_like_legacy_heading_icon(tag_html: str) -> bool:
+    if _extract_img_heading_label(tag_html):
+        return True
+    width_match = re.search(
+        r'\bwidth\s*=\s*(["\']?)\s*(?P<width>\d{1,3})\s*\1',
+        tag_html,
+        flags=re.IGNORECASE,
+    )
+    if width_match is not None and int(width_match.group("width")) <= 220:
+        return True
+    height_match = re.search(
+        r'\bheight\s*=\s*(["\']?)\s*(?P<height>\d{1,3})\s*\1',
+        tag_html,
+        flags=re.IGNORECASE,
+    )
+    if height_match is not None and int(height_match.group("height")) <= 80:
+        return True
+    style_match = re.search(
+        r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
+        tag_html,
+        flags=re.IGNORECASE,
+    )
+    if style_match is not None:
+        style_text = style_match.group("style")
+        for needle in (
+            r"width\s*:\s*(?P<width>\d{1,3})px",
+            r"height\s*:\s*(?P<height>\d{1,2})px",
+        ):
+            dim_match = re.search(needle, style_text, flags=re.IGNORECASE)
+            if dim_match is not None:
+                value = int(next(v for v in dim_match.groupdict().values() if v))
+                if value <= 220:
+                    return True
+    return False
+
+
 def _plain_text(value: str) -> str:
     without_tags = re.sub(r"<[^>]+>", " ", value, flags=re.IGNORECASE)
     unescaped = html.unescape(without_tags).replace("\xa0", " ")
@@ -255,6 +345,12 @@ def _canonical_heading_label(raw_label: str, *, icon_basename: str = "") -> str:
     key = _normalize_heading_key(label)
     basename = _normalize_basename(icon_basename)
 
+    if key == "explore this":
+        return "Explore This"
+    if key == "review this":
+        return "Review This"
+    if key == "view this":
+        return "View This"
     if basename == "video.png" or key in {"view", "watch"}:
         return "View"
     if basename == "bookmark.png" and key in {"syllabus", "title", "bookmark"}:
@@ -370,6 +466,21 @@ def _resolve_semantic_icon_basename(
         return current_basename
     normalized_combined = _normalize_heading_key(combined)
     normalized_label = _normalize_heading_key(label_text)
+
+    if normalized_label in {"do this", "complete this"} or normalized_combined in {
+        "do this",
+        "complete this",
+    }:
+        return "paper.png"
+    if normalized_label in {"explore this", "explore"} or normalized_combined in {
+        "explore this",
+        "explore",
+    }:
+        return "folder.png"
+    if normalized_label in {"review this"} or normalized_combined in {"review this"}:
+        return "circle-arrow.png"
+    if normalized_label in {"view this"} or normalized_combined in {"view this"}:
+        return "bookmark.png"
 
     if _contains_heading_phrase(
         combined,
@@ -520,7 +631,15 @@ def _render_icon_heading_block(
 ) -> str:
     normalized_canonical = _normalize_heading_key(canonical_label)
     normalized_original = _normalize_heading_key(original_title)
-    heading_html = f"<h{level}{attrs}>{img_tag} <strong>{html.escape(canonical_label)}</strong></h{level}>"
+    escaped_label = html.escape(canonical_label)
+    label_html = f"<strong>{escaped_label}</strong>"
+    if "color:" in attrs.lower():
+        label_html = (
+            f'<span style="color: #ac1a2f;"><strong>{escaped_label}</strong></span>'
+        )
+    heading_html = (
+        f"<h{level}{attrs}>{img_tag}{label_html}</h{level}>"
+    )
     if (
         original_title
         and normalized_original
@@ -758,6 +877,44 @@ def build_template_overlay_context(
     )
 
 
+def ensure_canonical_closing_divider(
+    content: str,
+    *,
+    file_path: str,
+    apply_divider_standards: bool,
+) -> tuple[str, bool]:
+    if not apply_divider_standards:
+        return content, False
+    normalized_file_path = file_path.replace("\\", "/").lower()
+    is_home = bool(re.search(r"(?:^|/)home[-_ ]?page?", normalized_file_path))
+    if is_home:
+        return content, False
+    canonical_hr = '<hr style="border-top: 8px solid #AC1A2F;">'
+    if re.search(r"<hr[^>]*border-top\s*:\s*8px\s+solid", content, re.IGNORECASE):
+        return content, False
+
+    if re.search(r"</body\s*>", content, re.IGNORECASE):
+        updated = re.sub(
+            r"(</body\s*>)",
+            f"\n{canonical_hr}\n\\1",
+            content,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        return updated, updated != content
+    if re.search(r"</html\s*>", content, re.IGNORECASE):
+        updated = re.sub(
+            r"(</html\s*>)",
+            f"\n{canonical_hr}\n\\1",
+            content,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        return updated, updated != content
+    updated = content.rstrip() + f"\n{canonical_hr}\n"
+    return updated, updated != content
+
+
 def _filter_required_styles(
     styles: tuple[str, ...],
     *,
@@ -883,6 +1040,12 @@ def apply_template_overlay(
         # un-aliased standardImages files (photos, decorative images) are left as-is.
         if is_standard_images and source_basename not in context.alias_map:
             return match.group(0)
+        if (
+            is_standard_images
+            and match.group("attr").strip().lower() == "src"
+            and source_basename in _LEGACY_HEADING_ICON_BASENAMES
+        ):
+            return match.group(0)
 
         target_basename, mode = _resolve_target_basename(
             source_basename=source_basename,
@@ -930,6 +1093,7 @@ def apply_template_overlay(
     icon_title_updates = 0
     icon_label_heading_updates = 0
     icon_block_heading_merges = 0
+    legacy_icon_asset_remaps = 0
     responsive_image_updates = 0
     promoted_icon_headings = 0
     page_heading_updates = 0
@@ -964,6 +1128,7 @@ def apply_template_overlay(
             nonlocal icon_alt_updates
             nonlocal icon_title_updates
             nonlocal responsive_image_updates
+            nonlocal legacy_icon_asset_remaps
 
             tag = match.group(0)
 
@@ -989,6 +1154,49 @@ def apply_template_overlay(
             is_template_asset = "templateassets/" in lowered_src
             is_known_visual_asset = src_basename in known_visual_basenames
             canonical_icon_label = context.icon_label_by_basename.get(src_basename, "")
+            raw_icon_label = _extract_img_heading_label(tag)
+            legacy_heading_label = raw_icon_label or _legacy_heading_label_for_basename(
+                src_basename
+            )
+
+            if (
+                not is_template_asset
+                and src_basename in context.alias_map
+                and (
+                    _img_looks_like_legacy_heading_icon(tag)
+                    or src_basename in _LEGACY_HEADING_ICON_BASENAMES
+                )
+            ):
+                target_basename, _ = _resolve_target_basename(
+                    source_basename=src_basename,
+                    context=context,
+                )
+                if target_basename:
+                    semantic_basename = _resolve_semantic_icon_basename(
+                        current_basename=target_basename,
+                        label_text=legacy_heading_label,
+                        original_title=legacy_heading_label,
+                    )
+                    if semantic_basename not in context.assets_by_basename:
+                        semantic_basename = target_basename
+                    rebuilt = f"{_MATERIALIZED_ASSET_DIR}/{semantic_basename}"
+                    tag = re.sub(
+                        r'(\bsrc\s*=\s*)(["\'])([^"\']+)(\2)',
+                        rf"\1\2{rebuilt}\4",
+                        tag,
+                        count=1,
+                        flags=re.IGNORECASE,
+                    )
+                    if legacy_heading_label:
+                        tag = _set_img_data_template_label(tag, legacy_heading_label)
+                    src_basename = semantic_basename
+                    lowered_src = rebuilt.lower()
+                    is_template_asset = True
+                    is_known_visual_asset = True
+                    canonical_icon_label = context.icon_label_by_basename.get(
+                        src_basename, ""
+                    )
+                    legacy_icon_asset_remaps += 1
 
             if not is_template_asset and not is_known_visual_asset:
                 updated_tag = tag
@@ -1344,7 +1552,8 @@ def apply_template_overlay(
             if not src_basename:
                 return full_heading
             label = _canonical_heading_label(
-                context.icon_label_by_basename.get(src_basename, ""),
+                _extract_img_heading_label(img_tag)
+                or context.icon_label_by_basename.get(src_basename, ""),
                 icon_basename=src_basename,
             )
             if not label:
@@ -1378,7 +1587,8 @@ def apply_template_overlay(
             if not src_basename:
                 return match.group(0)
             label = _canonical_heading_label(
-                context.icon_label_by_basename.get(src_basename, ""),
+                _extract_img_heading_label(img_tag)
+                or context.icon_label_by_basename.get(src_basename, ""),
                 icon_basename=src_basename,
             )
             if not label:
@@ -1569,7 +1779,7 @@ def apply_template_overlay(
                 heading_text = html.escape(str(spec["label"]))
                 _, heading_media = _extract_heading_title_and_media(match.group("body"))
                 replacement = (
-                    f'<h2{attrs}>{_build_heading_icon_tag(basename=str(spec["icon_basename"]))} '
+                    f'<h2{attrs}>{_build_heading_icon_tag(basename=str(spec["icon_basename"]))}'
                     f"<strong>{heading_text}</strong></h2>"
                 )
                 replacement += _render_heading_media_blocks(heading_media)
@@ -1602,7 +1812,7 @@ def apply_template_overlay(
                     remove_style_keys=_template_remove_style_keys(context=context),
                 )
                 replacement = (
-                    f'<h2{attrs}><strong>{_build_heading_icon_tag(basename="bookmark.png")} '
+                    f'<h2{attrs}><strong>{_build_heading_icon_tag(basename="bookmark.png")}'
                     f"{html.escape(heading_text)}</strong></h2>"
                 )
                 if replacement != match.group(0):
@@ -1640,31 +1850,13 @@ def apply_template_overlay(
                 )
                 default_banner_injected = True
 
-    # Append the canonical red closing hr to all template content pages that
-    # don't already have one.  Home pages are excluded.  This matches the gold
-    # standard where every module content page ends with the thick red divider.
-    _CANONICAL_CLOSING_HR = '<hr style="border-top: 8px solid #AC1A2F;">'
-    trailing_hr_added = False
-    if context.apply_divider_standards:
-        _nfp = file_path.replace("\\", "/").lower()
-        _is_home = bool(re.search(r"(?:^|/)home[-_ ]?page?", _nfp))
-        if not _is_home:
-            _has_canonical = bool(
-                re.search(
-                    r"<hr[^>]*border-top\s*:\s*8px\s+solid",
-                    updated,
-                    re.IGNORECASE,
-                )
-            )
-            if not _has_canonical:
-                updated = re.sub(
-                    r"(</body\s*>)",
-                    f"\n{_CANONICAL_CLOSING_HR}\n\\1",
-                    updated,
-                    count=1,
-                    flags=re.IGNORECASE,
-                )
-                trailing_hr_added = True
+    # Append the canonical red closing hr to all non-home template content
+    # pages that don't already have one.
+    updated, trailing_hr_added = ensure_canonical_closing_divider(
+        updated,
+        file_path=file_path,
+        apply_divider_standards=context.apply_divider_standards,
+    )
 
     applied_changes: list[AppliedChange] = []
     if direct_mapped:
@@ -1689,6 +1881,14 @@ def apply_template_overlay(
                 category="template_overlay",
                 description="Normalized mapped template icon image sizing for Canvas rendering",
                 count=icon_style_updates,
+            )
+        )
+    if legacy_icon_asset_remaps:
+        applied_changes.append(
+            AppliedChange(
+                category="template_overlay",
+                description="Remapped legacy course-owned heading icons to template assets for heading normalization",
+                count=legacy_icon_asset_remaps,
             )
         )
     if banner_style_updates:

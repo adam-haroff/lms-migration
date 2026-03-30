@@ -8,8 +8,10 @@ import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from .html_tools import (
@@ -51,6 +53,7 @@ from .template_overlay import (
     apply_template_overlay,
     build_template_overlay_context,
     build_template_overlay_report,
+    ensure_canonical_closing_divider,
     materialize_template_assets,
 )
 
@@ -86,6 +89,8 @@ class MigrationOutput:
     template_overlay_report_json: Path | None = None
     quiz_audit_json: Path | None = None
     quiz_audit_md: Path | None = None
+    kickoff_summary_json: Path | None = None
+    kickoff_summary_md: Path | None = None
 
 
 def _read_text(path: Path) -> str:
@@ -193,6 +198,52 @@ def _resource_href_map(manifest_root: ET.Element) -> dict[str, str]:
         if identifier and href:
             hrefs[identifier] = href
     return hrefs
+
+
+def _attr_local(element: ET.Element, name: str) -> str:
+    direct = (element.attrib.get(name) or "").strip()
+    if direct:
+        return direct
+    for key, value in element.attrib.items():
+        if _local_name(key) == name:
+            return value.strip()
+    return ""
+
+
+def _build_manifest_item_inventory(zf: ZipFile) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    manifest_files = [
+        n for n in zf.namelist() if re.match(r"imsmanifest\.xml$", n.rsplit("/", 1)[-1])
+    ]
+    for fname in manifest_files:
+        try:
+            raw = zf.read(fname).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        raw = re.sub(r"<\?xml[^>]*\?>", "", raw, count=1)
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            continue
+        href_map = _resource_href_map(root)
+        for item in root.iter():
+            if _local_name(item.tag) != "item":
+                continue
+            _title_el, title = _extract_item_title(item)
+            identifierref = (item.attrib.get("identifierref") or "").strip()
+            items.append(
+                {
+                    "title": title,
+                    "identifierref": identifierref,
+                    "href": href_map.get(identifierref, ""),
+                    "resource_code": _attr_local(item, "resource_code"),
+                    "condition_set": (item.attrib.get("condition_set") or "").strip(),
+                    "isvisible": (item.attrib.get("isvisible") or "").strip(),
+                    "resource_type_key": (item.attrib.get("resource_type_key") or "").strip(),
+                    "description": _attr_local(item, "description"),
+                }
+            )
+    return items
 
 
 def _append_html_fragment(existing_html: str, fragment: str) -> str:
@@ -1259,6 +1310,109 @@ _RUBRIC_SCORING_METHOD_LABELS: dict[str, str] = {
     "2": "level-based points (all criteria share the same level values)",
     "3": "custom points (per-criterion cell values)",
 }
+_COURSE_CONTENT_FILE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".html",
+        ".htm",
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".csv",
+        ".txt",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".svg",
+        ".webp",
+        ".mp4",
+        ".webm",
+        ".mov",
+        ".mp3",
+        ".wav",
+        ".m4a",
+        ".zip",
+    }
+)
+_COURSE_ALIGNMENT_DOC_EXTENSIONS: frozenset[str] = frozenset(
+    {".doc", ".docx", ".pdf", ".xls", ".xlsx"}
+)
+_PACKAGE_METADATA_BASENAMES: frozenset[str] = frozenset(
+    {
+        "imsmanifest.xml",
+        "orgunitconfig",
+        "questiondb.xml",
+        "module_meta.xml",
+        "files_meta.xml",
+        "course_settings.xml",
+        "context.xml",
+        "late_policy.xml",
+        "lti_context_controls.xml",
+        "media_tracks.xml",
+        "canvas_export.txt",
+    }
+)
+_PACKAGE_METADATA_TOP_LEVEL_DIRS: frozenset[str] = frozenset(
+    {
+        "course_settings",
+        "wiki_content",
+        "web_resources",
+        "templateassets",
+        "non_cc_assessments",
+    }
+)
+_D2L_EXPORT_METADATA_BASENAME_RE = re.compile(
+    r".*_d2l(?:_\d+)?\.xml$",
+    flags=re.IGNORECASE,
+)
+_QUIZ_MEDIA_REF_RE = re.compile(
+    r"""(?:src|uri)\s*=\s*["'](?P<ref>[^"']+\.(?:png|jpg|jpeg|gif|svg|webp)[^"']*)["']""",
+    flags=re.IGNORECASE,
+)
+_QUIZ_MEDIA_MARKER_RE = re.compile(
+    r"&lt;img\b|<img\b|<matimage\b|<object\b|quizimages/|"
+    r"(?:src|uri)\s*=\s*[\"'][^\"']+\.(?:png|jpg|jpeg|gif|svg|webp)[^\"']*[\"']",
+    flags=re.IGNORECASE,
+)
+
+
+def _load_rubric_name_map(raw: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for rub_m in re.finditer(r"<rubric\b[^>]*>.*?</rubric>", raw, re.DOTALL):
+        rub_xml = rub_m.group(0)
+        id_m = re.search(r'\bid="([^"]*)"', rub_xml)
+        name_m = re.search(r'\bname="([^"]*)"', rub_xml)
+        rubric_id = id_m.group(1).strip() if id_m else ""
+        rubric_name = name_m.group(1).strip() if name_m else ""
+        if rubric_id and rubric_name:
+            mapping[rubric_id] = rubric_name
+    return mapping
+
+
+def _is_package_metadata_file(path_text: str) -> bool:
+    normalized = path_text.strip().replace("\\", "/").lstrip("/")
+    if not normalized or normalized.endswith("/"):
+        return True
+    basename = Path(normalized).name.lower()
+    if basename in _PACKAGE_METADATA_BASENAMES:
+        return True
+    if _D2L_EXPORT_METADATA_BASENAME_RE.match(basename):
+        return True
+    top_level = normalized.split("/", 1)[0].lower()
+    return top_level in _PACKAGE_METADATA_TOP_LEVEL_DIRS
+
+
+def _is_course_content_file(path_text: str) -> bool:
+    normalized = path_text.strip().replace("\\", "/").lstrip("/")
+    if not normalized or normalized.endswith("/"):
+        return False
+    if _is_package_metadata_file(normalized):
+        return False
+    return Path(normalized).suffix.lower() in _COURSE_CONTENT_FILE_EXTENSIONS
 
 
 def _audit_rubrics(zip_path: Path) -> list[dict]:
@@ -1344,6 +1498,269 @@ def _audit_rubrics(zip_path: Path) -> list[dict]:
     return rows
 
 
+def _audit_course_alignment_docs(zip_path: Path) -> list[dict]:
+    """Return one advisory row when the export includes a course alignment document."""
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            matches: list[str] = []
+            for name in zf.namelist():
+                if not name or name.endswith("/"):
+                    continue
+                suffix = Path(name).suffix.lower()
+                if suffix not in _COURSE_ALIGNMENT_DOC_EXTENSIONS:
+                    continue
+                normalized = name.lower().replace("_", " ").replace("-", " ")
+                if (
+                    "course alignment" in normalized
+                    or "alignment document" in normalized
+                    or "curriculum map" in normalized
+                ):
+                    matches.append(name)
+            if matches:
+                rows.append(
+                    {
+                        "file": matches[0],
+                        "type": "d2l_xml_audit",
+                        "reason": (
+                            "Course alignment document detected — use during syllabus, module, and assessment verification"
+                        ),
+                        "evidence": " | ".join(sorted(matches)),
+                    }
+                )
+    except Exception:
+        pass
+    return rows
+
+
+def _audit_file_organization_risks(zip_path: Path) -> list[dict]:
+    """Flag packages whose source file layout should be preserved during migration.
+
+    The goal is advisory only: if the export has many loose top-level files or
+    duplicate basenames across folders, auto-reorganizing the package during
+    migration is more likely to break relative links or create collisions.
+    """
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            content_files: list[str] = []
+            top_level_loose_files: list[str] = []
+            by_basename: dict[str, list[str]] = {}
+
+            for name in zf.namelist():
+                normalized = name.strip().replace("\\", "/").lstrip("/")
+                if not _is_course_content_file(normalized):
+                    continue
+                content_files.append(normalized)
+                if "/" not in normalized:
+                    top_level_loose_files.append(normalized)
+                basename = Path(normalized).name.lower()
+                by_basename.setdefault(basename, []).append(normalized)
+
+            duplicate_groups = {
+                basename: sorted(paths)
+                for basename, paths in by_basename.items()
+                if len(paths) > 1
+                and len({str(Path(path).parent).lower() for path in paths}) > 1
+            }
+
+            if len(top_level_loose_files) >= 6:
+                evidence_parts = [
+                    f"top-level loose content files: {len(top_level_loose_files)}",
+                    f"total content files: {len(content_files)}",
+                    "sample loose files: "
+                    + ", ".join(sorted(top_level_loose_files)[:6]),
+                ]
+                if duplicate_groups:
+                    evidence_parts.append(
+                        f"duplicate basenames across folders: {len(duplicate_groups)}"
+                    )
+                rows.append(
+                    {
+                        "file": top_level_loose_files[0],
+                        "type": "d2l_xml_audit",
+                        "reason": (
+                            "Scattered D2L file organization detected — preserve file paths during migration and plan optional Canvas Files cleanup later"
+                        ),
+                        "evidence": " | ".join(evidence_parts),
+                    }
+                )
+
+            if duplicate_groups:
+                duplicate_samples = [
+                    f"{Path(paths[0]).name} ({len(paths)} copies)"
+                    for _basename, paths in sorted(duplicate_groups.items())[:5]
+                ]
+                rows.append(
+                    {
+                        "file": sorted(next(iter(duplicate_groups.values())))[0],
+                        "type": "d2l_xml_audit",
+                        "reason": (
+                            "Duplicate content filenames across D2L folders detected — avoid automatic file moves during migration"
+                        ),
+                        "evidence": " | ".join(
+                            [
+                                f"duplicate basenames across folders: {len(duplicate_groups)}",
+                                "sample duplicates: " + ", ".join(duplicate_samples),
+                            ]
+                        ),
+                    }
+                )
+    except Exception:
+        pass
+    return rows
+
+
+def _audit_instructor_only_manifest_items(zip_path: Path) -> list[dict]:
+    """Return one advisory row when the D2L manifest contains hidden/instructor-only items."""
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            manifest_items = _build_manifest_item_inventory(zf)
+    except Exception:
+        return rows
+
+    flagged_titles: list[str] = []
+    for item in manifest_items:
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+        title_lower = title.lower()
+        is_hidden = (item.get("isvisible") or "").strip().lower() == "false"
+        has_instructor_marker = any(
+            token in title_lower
+            for token in (
+                "for faculty use only",
+                "for instructor use only",
+                "faculty use only",
+                "instructor only",
+                "staff only",
+                "do not publish",
+            )
+        )
+        if is_hidden or has_instructor_marker:
+            flagged_titles.append(title)
+
+    unique_titles: list[str] = []
+    for title in flagged_titles:
+        if title not in unique_titles:
+            unique_titles.append(title)
+
+    if unique_titles:
+        evidence_parts = [f"items: {len(unique_titles)}"]
+        evidence_parts.append(
+            "sample titles: " + ", ".join(f'"{title}"' for title in unique_titles[:5])
+        )
+        rows.append(
+            {
+                "file": "imsmanifest.xml",
+                "type": "d2l_xml_audit",
+                "reason": (
+                    "Hidden or instructor-only D2L content detected — keep unpublished in Canvas"
+                ),
+                "evidence": " | ".join(evidence_parts),
+            }
+        )
+    return rows
+
+
+def _audit_quiz_release_conditions(zip_path: Path) -> list[dict]:
+    """Return one row per quiz-based D2L release rule that gated later content."""
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            manifest_items = _build_manifest_item_inventory(zf)
+            if not manifest_items:
+                return rows
+
+            titles_by_condition_set: dict[str, list[str]] = {}
+            quiz_title_by_rcode: dict[str, str] = {}
+            for item in manifest_items:
+                title = (item.get("title") or "").strip()
+                condition_set = (item.get("condition_set") or "").strip()
+                if title and condition_set:
+                    titles_by_condition_set.setdefault(condition_set, []).append(title)
+                href = (item.get("href") or "").strip()
+                if href:
+                    parsed = urlparse(href)
+                    query = parse_qs(parsed.query)
+                    if query.get("type", [""])[0].lower() == "quiz":
+                        rcode = query.get("rcode", [""])[0].strip()
+                        if rcode and title and rcode not in quiz_title_by_rcode:
+                            quiz_title_by_rcode[rcode] = title
+
+            grouped: dict[tuple[str, str], list[str]] = {}
+            release_files = [
+                n
+                for n in zf.namelist()
+                if re.match(r"conditionalrelease_d2l\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in release_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                raw = re.sub(r"<\?xml[^>]*\?>", "", raw, count=1)
+                try:
+                    root = ET.fromstring(raw)
+                except ET.ParseError:
+                    continue
+                for condition_set in root.iter("condition_set"):
+                    resource_code = (condition_set.get("resource_code") or "").strip()
+                    if not resource_code:
+                        continue
+                    target_titles = titles_by_condition_set.get(resource_code, [])
+                    for condition in condition_set.iter("condition"):
+                        if (condition.get("condition_type") or "").strip() != "3":
+                            continue
+                        quiz_rcode = (condition.get("quiz") or "").strip()
+                        if not quiz_rcode:
+                            continue
+                        threshold = (condition.get("percentage_value") or "").strip()
+                        grouped.setdefault((quiz_rcode, threshold), []).extend(target_titles)
+
+            for (quiz_rcode, threshold), target_titles in sorted(grouped.items()):
+                unique_titles: list[str] = []
+                for title in target_titles:
+                    if title and title not in unique_titles:
+                        unique_titles.append(title)
+                if not unique_titles:
+                    continue
+                quiz_title = quiz_title_by_rcode.get(quiz_rcode, "")
+                evidence_parts = [
+                    f'quiz: "{quiz_title}"' if quiz_title else f"quiz rCode: {quiz_rcode}"
+                ]
+                if threshold:
+                    try:
+                        threshold_value = float(threshold)
+                        threshold_label = (
+                            f"{int(threshold_value)}%"
+                            if threshold_value == int(threshold_value)
+                            else f"{threshold_value:.1f}%"
+                        )
+                    except ValueError:
+                        threshold_label = threshold
+                    evidence_parts.append(f"required score: {threshold_label}")
+                evidence_parts.append(f"gated items: {len(unique_titles)}")
+                evidence_parts.append(
+                    "sample targets: "
+                    + ", ".join(f'"{title}"' for title in unique_titles[:5])
+                )
+                rows.append(
+                    {
+                        "file": "conditionalrelease_d2l.xml",
+                        "type": "d2l_xml_audit",
+                        "reason": (
+                            "Quiz-based release condition detected — recreate module prerequisites/requirements in Canvas"
+                        ),
+                        "evidence": " | ".join(evidence_parts),
+                    }
+                )
+    except Exception:
+        pass
+    return rows
+
+
 def _audit_dropbox_folders(zip_path: Path) -> list[dict]:
     """Return one row per D2L Dropbox submission folder found in dropbox_d2l.xml.
 
@@ -1356,6 +1773,16 @@ def _audit_dropbox_folders(zip_path: Path) -> list[dict]:
     try:
         with ZipFile(zip_path) as zf:
             names = zf.namelist()
+            rubric_name_map: dict[str, str] = {}
+            rubric_files = [
+                n for n in names if re.match(r"rubrics_d2l\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for rubric_file in rubric_files:
+                try:
+                    rubric_raw = zf.read(rubric_file).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                rubric_name_map.update(_load_rubric_name_map(rubric_raw))
             dropbox_files = [
                 n for n in names if re.match(r"dropbox_d2l\.xml$", n.rsplit("/", 1)[-1])
             ]
@@ -1396,11 +1823,14 @@ def _audit_dropbox_folders(zip_path: Path) -> list[dict]:
 
                     # Rubric association
                     rubric_el = folder.find(".//rubric")
-                    rubric_note = (
-                        f" | rubric: {rubric_el.text.strip()}"
-                        if (rubric_el is not None and rubric_el.text)
-                        else ""
-                    )
+                    rubric_note = ""
+                    if rubric_el is not None and rubric_el.text:
+                        rubric_id = rubric_el.text.strip()
+                        rubric_name = rubric_name_map.get(rubric_id, "")
+                        if rubric_name:
+                            rubric_note = f' | rubric: {rubric_id} ("{rubric_name}")'
+                        else:
+                            rubric_note = f" | rubric: {rubric_id}"
 
                     # Build evidence string
                     evidence_parts = [f'folder: "{name}"']
@@ -1426,6 +1856,119 @@ def _audit_dropbox_folders(zip_path: Path) -> list[dict]:
                             "reason": (
                                 "D2L Dropbox assignment detected — "
                                 "verify Canvas imported as Assignment and configure submission settings"
+                            ),
+                            "evidence": " | ".join(evidence_parts),
+                        }
+                    )
+    except Exception:
+        pass
+    return rows
+
+
+def _build_questiondb_item_map(zf: ZipFile) -> dict[str, str]:
+    items: dict[str, str] = {}
+    for name in zf.namelist():
+        if name.split("/")[-1].lower() != "questiondb.xml":
+            continue
+        try:
+            raw = zf.read(name).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        for match in re.finditer(
+            r'<item\b[^>]*ident="(?P<ident>[^"]+)"[^>]*>.*?</item>',
+            raw,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            ident = match.group("ident").strip()
+            if ident and ident not in items:
+                items[ident] = match.group(0)
+    return items
+
+
+def _question_item_media_refs(item_xml: str) -> list[str]:
+    candidates: list[str] = []
+    decoded = html.unescape(item_xml)
+    for source in (item_xml, decoded):
+        for match in _QUIZ_MEDIA_REF_RE.finditer(source):
+            ref = match.group("ref").strip()
+            if ref and ref not in candidates:
+                candidates.append(ref)
+    return candidates
+
+
+def _question_item_contains_media(item_xml: str) -> bool:
+    decoded = html.unescape(item_xml)
+    return bool(
+        _QUIZ_MEDIA_MARKER_RE.search(item_xml) or _QUIZ_MEDIA_MARKER_RE.search(decoded)
+    )
+
+
+def _audit_quiz_embedded_media(zip_path: Path) -> list[dict]:
+    """Flag quizzes whose question stems/options include embedded images or media refs.
+
+    D2L often stores these in questiondb.xml as HTML-encoded <img> tags. Canvas New
+    Quizzes can require manual rebuilding/re-uploading to preserve layout and image
+    placement exactly.
+    """
+    rows: list[dict] = []
+    try:
+        with ZipFile(zip_path) as zf:
+            questiondb_items = _build_questiondb_item_map(zf)
+            names = zf.namelist()
+            quiz_files = [
+                n for n in names if re.match(r"quiz_d2l_\d+\.xml$", n.rsplit("/", 1)[-1])
+            ]
+            for fname in quiz_files:
+                try:
+                    raw = zf.read(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                title_m = re.search(r'<assessment\b[^>]*title="([^"]*)"', raw)
+                quiz_title = title_m.group(1).strip() if title_m else fname
+                question_xml_by_id: dict[str, str] = {}
+                for item_m in re.finditer(
+                    r'<item\b[^>]*ident="(?P<ident>[^"]+)"[^>]*>.*?</item>',
+                    raw,
+                    re.DOTALL | re.IGNORECASE,
+                ):
+                    ident = item_m.group("ident").strip()
+                    if ident:
+                        question_xml_by_id[ident] = item_m.group(0)
+                for itemref_m in re.finditer(
+                    r'<itemref\b[^>]*linkrefid="(?P<ident>[^"]+)"',
+                    raw,
+                    re.IGNORECASE,
+                ):
+                    ident = itemref_m.group("ident").strip()
+                    if ident and ident in questiondb_items and ident not in question_xml_by_id:
+                        question_xml_by_id[ident] = questiondb_items[ident]
+
+                media_question_ids: list[str] = []
+                sample_refs: list[str] = []
+                for ident, item_xml in question_xml_by_id.items():
+                    if not _question_item_contains_media(item_xml):
+                        continue
+                    media_question_ids.append(ident)
+                    for ref in _question_item_media_refs(item_xml):
+                        if ref not in sample_refs:
+                            sample_refs.append(ref)
+                        if len(sample_refs) >= 4:
+                            break
+
+                if media_question_ids:
+                    evidence_parts = [
+                        f'quiz: "{quiz_title}"',
+                        f"{len(media_question_ids)} question(s) with embedded images/media",
+                        "sample question ids: " + ", ".join(media_question_ids[:4]),
+                    ]
+                    if sample_refs:
+                        evidence_parts.append("sample refs: " + ", ".join(sample_refs[:4]))
+                    rows.append(
+                        {
+                            "file": fname,
+                            "type": "d2l_xml_audit",
+                            "reason": (
+                                "Quiz question images/media detected — rebuild or verify in Canvas New Quizzes"
                             ),
                             "evidence": " | ".join(evidence_parts),
                         }
@@ -1812,6 +2355,40 @@ def _audit_quiz_question_types(zip_path: Path) -> list[dict]:
     return rows
 
 
+def _audit_quiz_bank_usage(zip_path: Path) -> list[dict]:
+    """Return one row per quiz that uses questiondb-backed items or random question order."""
+    rows: list[dict] = []
+    try:
+        report = _audit_quizzes(zip_path)
+    except Exception:
+        return rows
+
+    for q in report.quizzes:
+        evidence_parts: list[str] = [f'quiz: "{q.title}"']
+        has_workflow_risk = False
+        if q.questiondb_item_count:
+            has_workflow_risk = True
+            evidence_parts.append(
+                f"questiondb-backed items: {q.questiondb_item_count}"
+            )
+        if q.random_question_order:
+            has_workflow_risk = True
+            evidence_parts.append("random question order: yes")
+        if not has_workflow_risk:
+            continue
+        rows.append(
+            {
+                "file": q.quiz_file,
+                "type": "d2l_xml_audit",
+                "reason": (
+                    "Question bank/randomization workflow detected — verify Item Banks and shuffle behavior in Canvas"
+                ),
+                "evidence": " | ".join(evidence_parts),
+            }
+        )
+    return rows
+
+
 def _audit_quiz_settings_inventory(zip_path: Path) -> list[dict]:
     """Return one row per quiz with a per-quiz settings inventory.
 
@@ -1862,9 +2439,18 @@ def _audit_quiz_settings_inventory(zip_path: Path) -> list[dict]:
 
 
 def _append_xml_audit_rows_to_csv(zip_path: Path, csv_path: Path) -> None:
-    """Append D2L XML audit rows (graded discussions, availability windows,
-    gradebook groups, rubrics, date-shift advisory) to the manual-review CSV."""
+    """Append package/XML audit rows to the manual-review CSV."""
+    rows = _collect_package_audit_rows(zip_path)
+    _append_package_audit_rows_to_csv(rows, csv_path)
+
+
+def _collect_package_audit_rows(zip_path: Path) -> list[dict]:
+    """Collect high-signal source-package audit rows for the manual-review CSV."""
     rows: list[dict] = []
+    rows.extend(_audit_course_alignment_docs(zip_path))
+    rows.extend(_audit_file_organization_risks(zip_path))
+    rows.extend(_audit_instructor_only_manifest_items(zip_path))
+    rows.extend(_audit_quiz_release_conditions(zip_path))
     rows.extend(_audit_graded_discussions(zip_path))
     rows.extend(_audit_availability_windows(zip_path))
     rows.extend(_audit_gradebook_groups(zip_path))
@@ -1874,12 +2460,259 @@ def _append_xml_audit_rows_to_csv(zip_path: Path, csv_path: Path) -> None:
     rows.extend(_audit_date_shift_items(zip_path))
     rows.extend(_audit_quiz_settings_inventory(zip_path))
     rows.extend(_audit_quiz_question_types(zip_path))
+    rows.extend(_audit_quiz_bank_usage(zip_path))
+    rows.extend(_audit_quiz_embedded_media(zip_path))
+    return rows
+
+
+def _append_package_audit_rows_to_csv(rows: list[dict], csv_path: Path) -> None:
+    """Append already-collected package audit rows to the manual-review CSV."""
     if not rows:
         return
     with csv_path.open("a", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=["file", "type", "reason", "evidence"])
         for row in rows:
             writer.writerow(row)
+
+
+def _build_course_kickoff_summary(report: dict, package_audit_rows: list[dict]) -> dict:
+    """Build a compact kickoff brief for the next manual migration pass."""
+    signal_defs = [
+        (
+            "course_alignment_docs",
+            "Course alignment docs",
+            ("course alignment document detected",),
+        ),
+        ("rubrics", "Rubrics", ("d2l rubric detected",)),
+        (
+            "instructor_only_content",
+            "Hidden/instructor-only content",
+            ("hidden or instructor-only d2l content detected",),
+        ),
+        (
+            "quiz_release_conditions",
+            "Quiz gating/release conditions",
+            ("quiz-based release condition detected",),
+        ),
+        (
+            "quiz_question_type_risks",
+            "Question-type rebuild risks",
+            ("new quizzes question-type compatibility risk",),
+        ),
+        (
+            "quiz_bank_randomization",
+            "Question bank/randomization workflows",
+            ("question bank/randomization workflow detected",),
+        ),
+        (
+            "quiz_embedded_media",
+            "Quiz embedded media",
+            ("quiz question images/media detected",),
+        ),
+        (
+            "quiz_settings_inventory",
+            "Quiz settings inventories",
+            ("quiz settings inventory",),
+        ),
+        (
+            "dropbox_assignments",
+            "Dropbox assignments",
+            ("d2l dropbox assignment detected",),
+        ),
+        (
+            "unresolvable_grade_items",
+            "Unresolvable grade items",
+            ("unresolvable grade item",),
+        ),
+        (
+            "gradebook_group_rules",
+            "Gradebook weight/drop rules",
+            (
+                "gradebook category with drop rule",
+                "gradebook category weight",
+            ),
+        ),
+        (
+            "extra_credit_items",
+            "Extra-credit items",
+            ("bonus/extra-credit grade item detected",),
+        ),
+        (
+            "file_organization_risks",
+            "File organization risks",
+            (
+                "scattered d2l file organization detected",
+                "duplicate content filenames across d2l folders detected",
+            ),
+        ),
+    ]
+
+    def _sanitize_evidence(value: str) -> str:
+        cleaned = re.sub(r"\s+", " ", value or "").strip()
+        return cleaned.replace(" | ", "; ")
+
+    signal_rows: dict[str, list[dict]] = {}
+    for key, _label, tokens in signal_defs:
+        signal_rows[key] = [
+            row
+            for row in package_audit_rows
+            if any(token in str(row.get("reason", "")).lower() for token in tokens)
+        ]
+
+    signals: list[dict] = []
+    for key, label, _tokens in signal_defs:
+        rows = signal_rows[key]
+        sample_evidence: list[str] = []
+        for row in rows:
+            evidence = _sanitize_evidence(str(row.get("evidence", "")))
+            if evidence and evidence not in sample_evidence:
+                sample_evidence.append(evidence)
+            if len(sample_evidence) >= 3:
+                break
+        signals.append(
+            {
+                "id": key,
+                "label": label,
+                "count": len(rows),
+                "sample_evidence": sample_evidence,
+            }
+        )
+
+    issue_summary = report.get("issue_summary", {})
+    top_manual_review = [
+        {
+            "reason": str(row.get("reason", "")).strip(),
+            "count": int(row.get("count", 0)),
+        }
+        for row in issue_summary.get("top_manual_review_reasons", [])[:5]
+        if isinstance(row, dict) and str(row.get("reason", "")).strip()
+    ]
+    top_accessibility = [
+        {
+            "reason": str(row.get("reason", "")).strip(),
+            "count": int(row.get("count", 0)),
+        }
+        for row in issue_summary.get("top_accessibility_reasons", [])[:5]
+        if isinstance(row, dict) and str(row.get("reason", "")).strip()
+    ]
+
+    recommendations: list[str] = []
+    if signal_rows["file_organization_risks"]:
+        recommendations.append(
+            "Preserve D2L file paths during migration. Treat Canvas Files cleanup as a post-import task, especially when duplicate filenames exist."
+        )
+    if signal_rows["course_alignment_docs"]:
+        recommendations.append(
+            "Use the course alignment document as the verification source for syllabus tables, module coverage, and assessment sequencing."
+        )
+    if signal_rows["rubrics"]:
+        recommendations.append(
+            "Plan a separate rubric pass. Canvas will need manual rubric recreation/attachment when D2L rubrics are present."
+        )
+    if signal_rows["quiz_release_conditions"]:
+        recommendations.append(
+            "Decide the Canvas gating strategy early. Recreate D2L release conditions with module prerequisites/requirements before final module cleanup."
+        )
+    if (
+        signal_rows["quiz_question_type_risks"]
+        or signal_rows["quiz_bank_randomization"]
+        or signal_rows["quiz_embedded_media"]
+        or signal_rows["quiz_settings_inventory"]
+    ):
+        recommendations.append(
+            "Budget a dedicated New Quizzes pass to rebuild unsupported question types, item-bank logic, media placement, and quiz settings."
+        )
+    if (
+        signal_rows["dropbox_assignments"]
+        or signal_rows["unresolvable_grade_items"]
+        or signal_rows["gradebook_group_rules"]
+        or signal_rows["extra_credit_items"]
+    ):
+        recommendations.append(
+            "Expect manual gradebook reconstruction. Verify assignment groups, weights, drop rules, extra credit, and any external-tool grade columns."
+        )
+    if signal_rows["instructor_only_content"]:
+        recommendations.append(
+            "Keep faculty-only or hidden D2L content unpublished after import and review it separately from student-facing modules."
+        )
+    if not recommendations:
+        recommendations.append(
+            "No package-specific high-signal risks were detected beyond the standard migration review. Proceed with the usual preflight and page review workflow."
+        )
+
+    return {
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "input_zip": report.get("input_zip", ""),
+        "output_zip": report.get("output_zip", ""),
+        "policy_profile_id": str(report.get("policy_profile", {}).get("id", "")),
+        "automated_summary": dict(report.get("summary", {})),
+        "signals": signals,
+        "top_manual_review": top_manual_review,
+        "top_accessibility": top_accessibility,
+        "recommendations": recommendations,
+    }
+
+
+def _write_course_kickoff_summary(
+    summary: dict, *, output_json_path: Path, output_markdown_path: Path
+) -> None:
+    output_json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    automated = summary.get("automated_summary", {})
+    lines = [
+        "# Course Kickoff Summary",
+        "",
+        f"- Input zip: `{summary.get('input_zip', '')}`",
+        f"- Output zip: `{summary.get('output_zip', '')}`",
+        f"- Policy profile: `{summary.get('policy_profile_id', '')}`",
+        f"- Generated (UTC): `{summary.get('generated_utc', '')}`",
+        "",
+        "## Migration Snapshot",
+        "",
+        f"- HTML files changed: {automated.get('html_files_changed', 0)}",
+        f"- Manual review issues: {automated.get('manual_review_issues', 0)}",
+        f"- Accessibility issues: {automated.get('accessibility_issues', 0)}",
+        "",
+        "## High-Signal Course Findings",
+        "",
+    ]
+
+    nonzero_signals = [
+        signal
+        for signal in summary.get("signals", [])
+        if isinstance(signal, dict) and int(signal.get("count", 0)) > 0
+    ]
+    if nonzero_signals:
+        for signal in nonzero_signals:
+            lines.append(f"- {signal.get('label', '')}: {signal.get('count', 0)}")
+            samples = signal.get("sample_evidence", [])
+            for sample in samples[:2]:
+                lines.append(f"  - {sample}")
+    else:
+        lines.append("- No high-signal source-package findings detected.")
+
+    lines.extend(["", "## Recommended Stance", ""])
+    for item in summary.get("recommendations", []):
+        lines.append(f"- {item}")
+
+    top_manual = summary.get("top_manual_review", [])
+    if top_manual:
+        lines.extend(["", "## Top Automated Review Findings", ""])
+        for row in top_manual:
+            lines.append(
+                f"- Manual: {row.get('count', 0)} × {row.get('reason', '')}"
+            )
+
+    top_accessibility = summary.get("top_accessibility", [])
+    if top_accessibility:
+        lines.extend(["", "## Top Accessibility Findings", ""])
+        for row in top_accessibility:
+            lines.append(
+                f"- Accessibility: {row.get('count', 0)} × {row.get('reason', '')}"
+            )
+
+    lines.append("")
+    output_markdown_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_manual_review_csv(file_results: list[FileResult], output_path: Path) -> None:
@@ -2200,7 +3033,19 @@ def run_migration(
     apply_template_divider_standards: bool = True,
     image_layout_mode: str = "safe-block",
     template_merge: bool = False,
+    full_template_shell: bool = False,
+    intro_checklist_handling: str = "rebuild-when-confident",
+    learning_activities_handling: str = "preserve",
 ) -> MigrationOutput:
+    if full_template_shell and not template_merge:
+        raise ValueError(
+            "Full template shell requires template merge to be enabled."
+        )
+    if full_template_shell and template_package is None:
+        raise ValueError(
+            "Full template shell requires a template package."
+        )
+
     rules = load_rules(rules_path)
     policy_profile = get_policy_profile(policy_profile_id, policy_profiles_path)
 
@@ -2212,6 +3057,8 @@ def run_migration(
     preflight_checklist = output_dir / f"{input_zip.stem}.preflight-checklist.md"
     quiz_audit_json = output_dir / f"{input_zip.stem}.quiz-audit.json"
     quiz_audit_md = output_dir / f"{input_zip.stem}.quiz-audit.md"
+    kickoff_summary_json = output_dir / f"{input_zip.stem}.kickoff-summary.json"
+    kickoff_summary_md = output_dir / f"{input_zip.stem}.kickoff-summary.md"
     template_overlay_report_json: Path | None = None
     template_overlay_report_payload: dict | None = None
     template_overlay_context = None
@@ -2920,8 +3767,10 @@ def run_migration(
             if manifest_changed:
                 tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
 
+        final_html_files = sorted(unpack_dir.rglob("*.html"))
+
         if best_practice_enforcer:
-            for html_file in html_files:
+            for html_file in final_html_files:
                 relative_html_path = str(html_file.relative_to(unpack_dir).as_posix())
                 original = _read_text(html_file)
                 updated, final_best_practice_changes, final_best_practice_issues = (
@@ -2982,6 +3831,36 @@ def run_migration(
                 )
 
         if template_overlay_context is not None:
+            for html_file in final_html_files:
+                relative_html_path = str(html_file.relative_to(unpack_dir).as_posix())
+                original = _read_text(html_file)
+                updated, divider_added = ensure_canonical_closing_divider(
+                    original,
+                    file_path=relative_html_path,
+                    apply_divider_standards=template_overlay_context.apply_divider_standards,
+                )
+                if not divider_added:
+                    continue
+                _write_text(html_file, updated)
+                _upsert_file_result(
+                    file_results,
+                    FileResult(
+                        path=relative_html_path,
+                        changed=True,
+                        applied_changes=[
+                            AppliedChange(
+                                category="template_overlay",
+                                description="Added canonical closing red divider to template content page",
+                                count=1,
+                            )
+                        ],
+                        manual_issues=[],
+                        a11y_issues=[],
+                    ),
+                    merge_applied_changes=True,
+                )
+
+        if template_overlay_context is not None:
             template_overlay_report_json = (
                 output_dir / f"{input_zip.stem}.template-overlay-report.json"
             )
@@ -2996,7 +3875,21 @@ def run_migration(
             run_template_merge(
                 unpack_dir=unpack_dir,
                 template_package=template_package,
+                intro_checklist_handling=intro_checklist_handling,
+                learning_activities_handling=learning_activities_handling,
+                full_template_shell=full_template_shell,
             )
+            if template_overlay_context is not None:
+                for html_file in sorted(unpack_dir.rglob("*.html")):
+                    relative_html_path = str(html_file.relative_to(unpack_dir).as_posix())
+                    original = _read_text(html_file)
+                    updated, divider_added = ensure_canonical_closing_divider(
+                        original,
+                        file_path=relative_html_path,
+                        apply_divider_standards=template_overlay_context.apply_divider_standards,
+                    )
+                    if divider_added:
+                        _write_text(html_file, updated)
 
         _zip_directory(unpack_dir, output_zip)
 
@@ -3058,6 +3951,8 @@ def run_migration(
     report_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _write_markdown_report(report, report_markdown)
     _write_manual_review_csv(file_results, manual_review_csv)
+    package_audit_rows = _collect_package_audit_rows(input_zip)
+    _append_package_audit_rows_to_csv(package_audit_rows, manual_review_csv)
 
     # Write standalone quiz-audit reports (supplement to preflight checklist)
     try:
@@ -3068,7 +3963,12 @@ def run_migration(
         quiz_audit_json = None  # type: ignore[assignment]
         quiz_audit_md = None  # type: ignore[assignment]
 
-    _append_xml_audit_rows_to_csv(input_zip, manual_review_csv)
+    kickoff_summary = _build_course_kickoff_summary(report, package_audit_rows)
+    _write_course_kickoff_summary(
+        kickoff_summary,
+        output_json_path=kickoff_summary_json,
+        output_markdown_path=kickoff_summary_md,
+    )
     _write_preflight_checklist(
         report, policy_profile, preflight_checklist, manual_review_csv
     )
@@ -3083,4 +3983,6 @@ def run_migration(
         template_overlay_report_json=template_overlay_report_json,
         quiz_audit_json=quiz_audit_json,
         quiz_audit_md=quiz_audit_md,
+        kickoff_summary_json=kickoff_summary_json,
+        kickoff_summary_md=kickoff_summary_md,
     )

@@ -53,7 +53,7 @@
       {
         "label": "Migrate ACC-2321 (pre-import)",
         "type": "shell",
-        "command": "source .venv/bin/activate && lms-migrate resources/incoming/acc-2321/before/d2l-export.zip --rules rules/default_rules.json --policy-profile strict --best-practice-enforcer --template-package resources/examples/template/elearn-standard-template-export-20260316.imscc --template-alias-map-json rules/template_asset_aliases.json --template-merge --output-dir output/acc-2321",
+        "command": "source .venv/bin/activate && lms-migrate resources/incoming/acc-2321/before/d2l-export.zip --rules rules/default_rules.json --policy-profile strict --best-practice-enforcer --template-package resources/examples/template/elearn-standard-template-export-20260324.imscc --template-alias-map-json rules/template_asset_aliases.json --template-merge --output-dir output/acc-2321",
         "group": "build",
         "presentation": { "reveal": "always", "panel": "new" },
         "problemMatcher": []
@@ -100,7 +100,7 @@
           "--rules", "rules/default_rules.json",
           "--policy-profile", "strict",
           "--best-practice-enforcer",
-          "--template-package", "resources/examples/template/elearn-standard-template-export-20260316.imscc",
+          "--template-package", "resources/examples/template/elearn-standard-template-export-20260324.imscc",
           "--template-alias-map-json", "rules/template_asset_aliases.json",
           "--output-dir", "output/acc-2321"
         ],

@@ -139,6 +139,17 @@ def _normalize(text: str) -> str:
     return lowered
 
 
+def _has_module_checklist_contact_guidance(text: str) -> bool:
+    normalized = _normalize(text).replace("&", " and ")
+    return bool(
+        re.search(
+            r"\bcontact your instructor\b.{0,160}?\bquestion(?:s)?\b",
+            normalized,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
 def _read_text(path: Path) -> str:
     return read_reference_text(path)
 
@@ -248,10 +259,7 @@ def _template_placeholder_analysis(page_template_text: str, syllabus_template_te
         if re.search(pattern, normalized, flags=re.IGNORECASE):
             matched.append(pattern)
 
-    has_required_mc_closer = (
-        _normalize("Contact your instructor with any questions or post in the Course Q&A.")
-        in normalized
-    )
+    has_required_mc_closer = _has_module_checklist_contact_guidance(full_text)
 
     return {
         "placeholder_patterns_detected": matched,

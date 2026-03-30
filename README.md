@@ -140,11 +140,20 @@ Outputs:
 - `output/<zip-name>.migration-report.md`
 - `output/<zip-name>.manual-review.csv`
 - `output/<zip-name>.preflight-checklist.md`
+- `output/<zip-name>.kickoff-summary.json`
+- `output/<zip-name>.kickoff-summary.md`
 - Optional: `output/<zip-name>.template-overlay-report.json`
+
+Recommended per-course workflow:
+
+- See [`docs/course-migration-runbook.md`](/Users/adam.haroff/Desktop/projects/codex/lms-migration/docs/course-migration-runbook.md) for the default migration sequence using the kickoff summary, preflight checklist, page-review shortlist, and HTML workbench.
 
 Template overlay notes:
 
 - Mapped template assets are materialized into `TemplateAssets/` inside the generated package.
+- When template overlay and template merge are enabled, the generated `*.canvas-ready.zip` is a template-derived D2L import package by default.
+- If full starter template shell mode is enabled, the generated package also includes the real starter-template shell modules/pages/resources from the template package.
+- `TemplateAssets/` may still be present even in full-shell mode because overlay-generated replacements on migrated D2L pages still use those localized assets.
 - Common Brightspace framework CSS/JS references are tracked as `ignored_unresolved_total` in the overlay report because they are intentionally removed by sanitizer logic.
 
 ## 1b) Generate non-sensitive summary from report JSON
@@ -300,6 +309,13 @@ Outputs:
 
 - `training-corpus-analysis.json`
 - `training-corpus-analysis.md`
+
+Corpus note:
+
+- `resources/examples/` is the curated example/reference corpus used by this command.
+- `resources/incoming/` is the active intake/reference area for real migration work.
+- `resources/training-corpus-v2/` is a separate training corpus used by other analysis tooling.
+- See [`docs/corpus-layout.md`](/Users/adam.haroff/Desktop/projects/codex/lms-migration/docs/corpus-layout.md) for the current folder roles.
 
 ## 4f) Analyze template IMSCC compatibility against Brightspace refs
 

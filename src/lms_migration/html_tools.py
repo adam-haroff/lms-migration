@@ -219,12 +219,30 @@ _DISPLAY_MATHML_RE = re.compile(
     r"<math\b[^>]*(?:\bdisplay\s*=\s*([\"'])block\1|\bmode\s*=\s*([\"'])display\2)[^>]*>.*?</math>",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_INSTRUCTOR_CONTACT_GUIDANCE_RE = re.compile(
+    r"\bcontact your instructor\b.{0,160}?\bquestion(?:s)?\b",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_COURSE_QNA_GUIDANCE_RE = re.compile(
+    r"\bcourse\s+q(?:\s|&|and){0,8}a\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _plain_text(value: str) -> str:
     cleaned = _STRIP_TAGS_RE.sub(" ", value)
     cleaned = html.unescape(cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _has_instructor_contact_guidance(value: str) -> bool:
+    return bool(_INSTRUCTOR_CONTACT_GUIDANCE_RE.search(_plain_text(value).lower()))
+
+
+def _has_course_qna_guidance(value: str) -> bool:
+    normalized = _plain_text(value).lower().replace("&", " and ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return bool(_COURSE_QNA_GUIDANCE_RE.search(normalized))
 
 
 def _extract_attr_value(tag_html: str, attr_name: str) -> str | None:
@@ -2634,15 +2652,11 @@ def apply_best_practice_enforcer(
             or "introduction and checklist" in normalized_file
             or "module checklist" in lowered
         )
-        required_closer_plain = (
-            "contact your instructor with any questions or post in the course q&a."
-        )
-        local_contact_plain = "contact your instructor with any course questions."
-        has_local_contact_guidance = local_contact_plain in lowered
-        has_activity_feed_guidance = "activity feed on the home page" in lowered
-        checklist_support_present = (
-            required_closer_plain in lowered or has_local_contact_guidance
-        )
+        canonical_qna_closer_present = _has_course_qna_guidance(updated)
+        has_local_contact_guidance = _has_instructor_contact_guidance(updated)
+        plain_lower = _plain_text(updated).lower()
+        has_activity_feed_guidance = "activity feed on the home page" in plain_lower
+        checklist_support_present = has_local_contact_guidance
         if is_intro_or_checklist:
             updated = re.sub(
                 r'<p\b[^>]*class\s*=\s*(["\'])migration-checklist-closer\1[^>]*>.*?</p>',
@@ -2651,11 +2665,11 @@ def apply_best_practice_enforcer(
                 flags=re.IGNORECASE | re.DOTALL,
             )
             lowered = html.unescape(updated).lower()
-            has_local_contact_guidance = local_contact_plain in lowered
-            has_activity_feed_guidance = "activity feed on the home page" in lowered
-            checklist_support_present = (
-                required_closer_plain in lowered or has_local_contact_guidance
-            )
+            canonical_qna_closer_present = _has_course_qna_guidance(updated)
+            has_local_contact_guidance = _has_instructor_contact_guidance(updated)
+            plain_lower = _plain_text(updated).lower()
+            has_activity_feed_guidance = "activity feed on the home page" in plain_lower
+            checklist_support_present = has_local_contact_guidance
         if is_intro_or_checklist and not checklist_support_present:
             applied.append(
                 AppliedChange(
@@ -2668,9 +2682,8 @@ def apply_best_practice_enforcer(
                 ManualReviewIssue(
                     reason=(
                         "Module Checklist is missing an instructor contact reminder"
-                        " — add \u2018Contact your instructor with any questions or"
-                        " post in the Course Q\u0026A.\u2019 as the final checklist"
-                        " bullet before publishing"
+                        " — add an approved instructor-support reminder as the"
+                        " final checklist bullet before publishing"
                     ),
                     evidence="No instructor contact guidance found under Module Checklist section",
                     category="content",
@@ -2682,7 +2695,7 @@ def apply_best_practice_enforcer(
         redundant_support_guidance = (
             has_local_contact_guidance
             and has_activity_feed_guidance
-            and required_closer_plain in lowered
+            and canonical_qna_closer_present
         )
         if is_intro_or_checklist and redundant_support_guidance:
             stale_qna_pattern = re.compile(

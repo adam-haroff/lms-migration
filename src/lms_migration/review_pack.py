@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import html
 import json
 import mimetypes
@@ -42,6 +43,19 @@ _SRC_ATTR_RE = re.compile(
 )
 _SPACE_RE = re.compile(r"\s+")
 _PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
+_FOCUS_LABELS = {
+    "layout-risk": "Layout Risk",
+    "content-loss": "Content Loss",
+    "manual-fix": "Manual Fix",
+    "accessibility": "Accessibility",
+}
+_LAYOUT_SANITIZER_SIGNAL_MAP: tuple[tuple[str, str], ...] = (
+    ("Removed position: absolute/fixed", "absolute/fixed positioning removed"),
+    ("Degraded display: flex/grid", "flex/grid layout degraded"),
+    ("Removed multi-column CSS layout properties", "multi-column layout removed"),
+    ("Wrapped floated content blocks", "floated blocks wrapped"),
+    ("Promoted Bootstrap grid classes to CSS flexbox", "bootstrap grid converted to flex"),
+)
 
 
 def _load_html_files(zip_path: Path) -> dict[str, str]:
@@ -132,6 +146,18 @@ def _content_metrics(value: str) -> dict[str, int]:
         ),
         "word_count": len(re.findall(r"\b\w+\b", plain)),
     }
+
+
+def _layout_sanitizer_flags(applied_changes: list[dict]) -> list[str]:
+    flags: list[str] = []
+    for change in applied_changes:
+        if not isinstance(change, dict):
+            continue
+        description = str(change.get("description", ""))
+        for needle, label in _LAYOUT_SANITIZER_SIGNAL_MAP:
+            if needle in description and label not in flags:
+                flags.append(label)
+    return flags
 
 
 def _extract_body_html(value: str) -> str:
@@ -401,6 +427,10 @@ def _metric_drift(original: dict[str, int], converted: dict[str, int]) -> list[s
         reasons.append(
             f"Table count changed {original['table_count']} -> {converted['table_count']}."
         )
+    if original["divider_count"] != converted["divider_count"]:
+        reasons.append(
+            f"Divider count changed {original['divider_count']} -> {converted['divider_count']}."
+        )
 
     original_words = original["word_count"]
     converted_words = converted["word_count"]
@@ -478,6 +508,72 @@ def _priority(
     return "low"
 
 
+def _review_focus_tags(
+    *,
+    manual_count: int,
+    accessibility_count: int,
+    layout_sanitizer_flags: list[str],
+    visual_reasons: list[str],
+    structural_reasons: list[str],
+    content_loss: bool,
+) -> list[str]:
+    tags: list[str] = []
+    if layout_sanitizer_flags or visual_reasons or structural_reasons:
+        tags.append("layout-risk")
+    if content_loss:
+        tags.append("content-loss")
+    if manual_count:
+        tags.append("manual-fix")
+    if accessibility_count:
+        tags.append("accessibility")
+    return tags
+
+
+def _review_reason_summary(
+    *,
+    layout_sanitizer_flags: list[str],
+    visual_reasons: list[str],
+    structural_reasons: list[str],
+    manual_issues: list[dict],
+    accessibility_issues: list[dict],
+    content_loss: bool,
+    missing_images: bool,
+    limit: int = 4,
+) -> list[str]:
+    reasons: list[str] = []
+
+    if content_loss:
+        reasons.append("possible text/content loss during conversion")
+    if missing_images:
+        reasons.append("original images may be missing from the converted page")
+
+    reasons.extend(str(item).strip() for item in layout_sanitizer_flags if str(item).strip())
+    reasons.extend(str(item).strip() for item in visual_reasons if str(item).strip())
+    reasons.extend(str(item).strip() for item in structural_reasons if str(item).strip())
+    reasons.extend(
+        reason
+        for reason in (_issue_reason_text(item) for item in manual_issues)
+        if reason
+    )
+    reasons.extend(
+        reason
+        for reason in (_issue_reason_text(item) for item in accessibility_issues)
+        if reason
+    )
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for reason in reasons:
+        normalized = reason.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(reason)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
 def _default_output_json(converted_zip: Path) -> Path:
     stem = converted_zip.name
     if stem.endswith(".canvas-ready.zip"):
@@ -493,6 +589,10 @@ def _default_output_markdown(output_json: Path) -> Path:
 
 def _default_output_html(output_json: Path) -> Path:
     return output_json.with_suffix(".html")
+
+
+def _default_output_shortlist_csv(output_json: Path) -> Path:
+    return output_json.with_name(f"{output_json.stem}-shortlist.csv")
 
 
 def _default_draft_filename(converted_zip: Path) -> str:
@@ -565,6 +665,7 @@ def build_review_pack(
         )
         if not isinstance(applied_changes, list):
             applied_changes = []
+        layout_sanitizer_flags = _layout_sanitizer_flags(applied_changes)
 
         structural_reasons = _metric_drift(original_metrics, converted_metrics)
         visual_reasons = _visual_reasons(
@@ -596,6 +697,7 @@ def build_review_pack(
             + len(structural_reasons)
             + (len(template_issues) * 2)
         )
+        score += min(len(layout_sanitizer_flags), 3)
         if preview_similarity and preview_similarity < 0.55:
             score += 2
         elif preview_similarity and preview_similarity < 0.72:
@@ -630,11 +732,49 @@ def build_review_pack(
             template_count=len(template_issues),
             content_loss=content_loss,
         )
+        layout_risk_score = (
+            (len(layout_sanitizer_flags) * 3)
+            + (len(visual_reasons) * 2)
+            + len(structural_reasons)
+        )
+        if preview_similarity and preview_similarity < 0.72:
+            layout_risk_score += 1
+        if orig_images > 0 and conv_images == 0:
+            layout_risk_score += 1
+
+        content_loss_score = 0
+        if content_loss:
+            content_loss_score += 3
+        missing_images = orig_images > 0 and conv_images == 0
+        if missing_images:
+            content_loss_score += 2
+
+        review_focus = _review_focus_tags(
+            manual_count=len(non_template_manual),
+            accessibility_count=len(accessibility_issues),
+            layout_sanitizer_flags=layout_sanitizer_flags,
+            visual_reasons=visual_reasons,
+            structural_reasons=structural_reasons,
+            content_loss=content_loss,
+        )
+        review_reason_summary = _review_reason_summary(
+            layout_sanitizer_flags=layout_sanitizer_flags,
+            visual_reasons=visual_reasons,
+            structural_reasons=structural_reasons,
+            manual_issues=non_template_manual,
+            accessibility_issues=accessibility_issues,
+            content_loss=content_loss,
+            missing_images=missing_images,
+        )
         files.append(
             {
                 "path": path,
                 "priority": priority,
                 "review_score": score,
+                "layout_risk_score": layout_risk_score,
+                "content_loss_score": content_loss_score,
+                "review_focus": review_focus,
+                "review_reason_summary": review_reason_summary,
                 "titles": {
                     "original": original_title,
                     "converted": converted_title,
@@ -650,6 +790,7 @@ def build_review_pack(
                 "template_issues": template_issues,
                 "accessibility_issues": accessibility_issues,
                 "applied_changes": applied_changes,
+                "layout_sanitizer_flags": layout_sanitizer_flags,
                 "structural_reasons": structural_reasons,
                 "visual_reasons": visual_reasons,
                 "content_loss": content_loss,
@@ -685,12 +826,40 @@ def build_review_pack(
         "files_with_accessibility_issues": sum(
             1 for row in files if row.get("accessibility_issues")
         ),
+        "files_with_layout_sanitizer_flags": sum(
+            1 for row in files if row.get("layout_sanitizer_flags")
+        ),
         "files_with_visual_flags": sum(1 for row in files if row.get("visual_reasons")),
         "files_with_structural_drift": sum(
             1 for row in files if row.get("structural_reasons")
         ),
         "files_with_content_loss": sum(1 for row in files if row.get("content_loss")),
     }
+
+    top_layout_risk_pages = sorted(
+        [row for row in files if int(row.get("layout_risk_score", 0) or 0) > 0],
+        key=lambda row: (
+            -int(row.get("layout_risk_score", 0) or 0),
+            -int(row.get("review_score", 0) or 0),
+            str(row.get("path", "")),
+        ),
+    )[:12]
+    top_content_loss_pages = sorted(
+        [row for row in files if int(row.get("content_loss_score", 0) or 0) > 0],
+        key=lambda row: (
+            -int(row.get("content_loss_score", 0) or 0),
+            -int(row.get("review_score", 0) or 0),
+            str(row.get("path", "")),
+        ),
+    )[:12]
+    top_manual_issue_pages = sorted(
+        [row for row in files if row.get("manual_review_issues")],
+        key=lambda row: (
+            -len(row.get("manual_review_issues", [])),
+            -int(row.get("review_score", 0) or 0),
+            str(row.get("path", "")),
+        ),
+    )[:12]
 
     report = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
@@ -706,15 +875,20 @@ def build_review_pack(
         },
         "summary": summary,
         "top_review_pages": files[:15],
+        "top_layout_risk_pages": top_layout_risk_pages,
+        "top_content_loss_pages": top_content_loss_pages,
+        "top_manual_issue_pages": top_manual_issue_pages,
         "files": files,
     }
 
     output_json = output_json_path or _default_output_json(converted_zip)
     output_markdown = output_markdown_path or _default_output_markdown(output_json)
     output_html = output_html_path or _default_output_html(output_json)
+    output_shortlist = _default_output_shortlist_csv(output_json)
 
     output_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _write_markdown(report, output_markdown)
+    _write_shortlist_csv(report, output_shortlist)
     _write_html(
         report,
         output_html,
@@ -744,6 +918,70 @@ def _issue_reason_text(issue: dict) -> str:
 
 
 def _write_markdown(report: dict, output_markdown: Path) -> None:
+    def _write_page_list(
+        lines: list[str], title: str, rows: list[dict], *, score_key: str
+    ) -> None:
+        lines.extend(["## " + title, ""])
+        if not rows:
+            lines.append("- None")
+            lines.append("")
+            return
+        for row in rows[:10]:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"- `{row.get('path', '')}` | priority={row.get('priority', 'low')} | "
+                f"score={row.get('review_score', 0)} | {score_key}={row.get(score_key, 0)}"
+            )
+            review_reason_summary = [
+                str(item).strip()
+                for item in row.get("review_reason_summary", [])
+                if str(item).strip()
+            ]
+            if review_reason_summary:
+                lines.append("  - Why: " + "; ".join(review_reason_summary[:3]))
+            layout_sanitizer_flags = row.get("layout_sanitizer_flags", [])
+            visual_reasons = row.get("visual_reasons", [])
+            structural_reasons = row.get("structural_reasons", [])
+            manual_issues = row.get("manual_review_issues", [])
+            accessibility_issues = row.get("accessibility_issues", [])
+            if score_key == "layout_risk_score" and (
+                layout_sanitizer_flags or visual_reasons or structural_reasons
+            ):
+                reasons = (
+                    [str(item) for item in layout_sanitizer_flags[:2]]
+                    + [str(item) for item in visual_reasons[:1]]
+                    + [str(item) for item in structural_reasons[:1]]
+                )
+                if reasons:
+                    lines.append("  - Signals: " + "; ".join(reasons))
+            if score_key == "content_loss_score" and row.get("content_loss"):
+                lines.append("  - Signals: content-loss heuristic triggered")
+            if score_key == "review_score" and manual_issues:
+                lines.append(
+                    "  - Manual: "
+                    + "; ".join(
+                        filter(
+                            None,
+                            (_issue_reason_text(item) for item in manual_issues[:3]),
+                        )
+                    )
+                )
+            if score_key == "review_score" and accessibility_issues:
+                lines.append(
+                    "  - Accessibility: "
+                    + "; ".join(
+                        filter(
+                            None,
+                            (
+                                _issue_reason_text(item)
+                                for item in accessibility_issues[:3]
+                            ),
+                        )
+                    )
+                )
+        lines.append("")
+
     summary = report.get("summary", {})
     lines = [
         "# Page Review Workbench",
@@ -755,60 +993,105 @@ def _write_markdown(report: dict, output_markdown: Path) -> None:
         f"- Medium-priority review pages: {summary.get('files_with_medium_priority_review', 0)}",
         f"- Pages with manual issues: {summary.get('files_with_manual_issues', 0)}",
         f"- Pages with accessibility issues: {summary.get('files_with_accessibility_issues', 0)}",
+        f"- Pages with layout sanitizer flags: {summary.get('files_with_layout_sanitizer_flags', 0)}",
         f"- Pages with visual flags: {summary.get('files_with_visual_flags', 0)}",
         f"- Pages with structural drift: {summary.get('files_with_structural_drift', 0)}",
         f"- Pages with content loss: {summary.get('files_with_content_loss', 0)}",
         "",
-        "## Top Review Pages",
-        "",
     ]
-    for row in report.get("top_review_pages", []):
-        if not isinstance(row, dict):
-            continue
-        lines.append(
-            f"- `{row.get('path', '')}` | priority={row.get('priority', 'low')} | "
-            f"score={row.get('review_score', 0)}"
-        )
-        manual_issues = row.get("manual_review_issues", [])
-        accessibility_issues = row.get("accessibility_issues", [])
-        visual_reasons = row.get("visual_reasons", [])
-        structural_reasons = row.get("structural_reasons", [])
-        if manual_issues:
-            lines.append(
-                "  - Manual: "
-                + "; ".join(
-                    filter(
-                        None, (_issue_reason_text(item) for item in manual_issues[:3])
-                    )
-                )
-            )
-        if accessibility_issues:
-            lines.append(
-                "  - Accessibility: "
-                + "; ".join(
-                    filter(
-                        None,
-                        (_issue_reason_text(item) for item in accessibility_issues[:3]),
-                    )
-                )
-            )
-        if visual_reasons:
-            lines.append(
-                "  - Visual: " + "; ".join(str(item) for item in visual_reasons[:3])
-            )
-        if structural_reasons:
-            lines.append(
-                "  - Structure: "
-                + "; ".join(str(item) for item in structural_reasons[:3])
-            )
-        converted_outline = row.get("converted_outline", [])
-        if converted_outline:
-            lines.append(
-                "  - Converted outline: "
-                + " | ".join(str(item) for item in converted_outline[:4])
-            )
-        lines.append("")
+
+    _write_page_list(
+        lines,
+        "Top Layout-Risk Pages",
+        report.get("top_layout_risk_pages", []),
+        score_key="layout_risk_score",
+    )
+    _write_page_list(
+        lines,
+        "Top Content-Loss Pages",
+        report.get("top_content_loss_pages", []),
+        score_key="content_loss_score",
+    )
+    _write_page_list(
+        lines,
+        "Top Review Pages",
+        report.get("top_review_pages", []),
+        score_key="review_score",
+    )
     output_markdown.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def _write_shortlist_csv(report: dict, output_csv: Path) -> None:
+    rows = [
+        row
+        for row in report.get("files", [])
+        if isinstance(row, dict)
+        and (
+            int(row.get("review_score", 0) or 0) > 0
+            or bool(row.get("review_focus"))
+        )
+    ]
+    fieldnames = [
+        "path",
+        "converted_title",
+        "priority",
+        "review_score",
+        "layout_risk_score",
+        "content_loss_score",
+        "review_focus",
+        "why_flagged",
+        "preview_similarity",
+        "manual_issue_count",
+        "accessibility_issue_count",
+        "layout_transform_count",
+        "visual_flag_count",
+        "structural_drift_count",
+        "original_dividers",
+        "converted_dividers",
+    ]
+    with output_csv.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            titles = row.get("titles") or {}
+            original_metrics = row.get("original_metrics") or {}
+            converted_metrics = row.get("converted_metrics") or {}
+            writer.writerow(
+                {
+                    "path": str(row.get("path", "")),
+                    "converted_title": str(titles.get("converted", "")),
+                    "priority": str(row.get("priority", "low")),
+                    "review_score": int(row.get("review_score", 0) or 0),
+                    "layout_risk_score": int(row.get("layout_risk_score", 0) or 0),
+                    "content_loss_score": int(row.get("content_loss_score", 0) or 0),
+                    "review_focus": "; ".join(
+                        str(item).strip()
+                        for item in row.get("review_focus", [])
+                        if str(item).strip()
+                    ),
+                    "why_flagged": "; ".join(
+                        str(item).strip()
+                        for item in row.get("review_reason_summary", [])
+                        if str(item).strip()
+                    ),
+                    "preview_similarity": row.get("preview_similarity", ""),
+                    "manual_issue_count": len(row.get("manual_review_issues", [])),
+                    "accessibility_issue_count": len(
+                        row.get("accessibility_issues", [])
+                    ),
+                    "layout_transform_count": len(
+                        row.get("layout_sanitizer_flags", [])
+                    ),
+                    "visual_flag_count": len(row.get("visual_reasons", [])),
+                    "structural_drift_count": len(row.get("structural_reasons", [])),
+                    "original_dividers": int(
+                        original_metrics.get("divider_count", 0) or 0
+                    ),
+                    "converted_dividers": int(
+                        converted_metrics.get("divider_count", 0) or 0
+                    ),
+                }
+            )
 
 
 def _badge(priority: str) -> str:
@@ -852,6 +1135,10 @@ def _write_html(
             "Accessibility issue pages",
             summary.get("files_with_accessibility_issues", 0),
         ),
+        (
+            "Layout transform pages",
+            summary.get("files_with_layout_sanitizer_flags", 0),
+        ),
         ("Visual flag pages", summary.get("files_with_visual_flags", 0)),
         ("Content loss pages", summary.get("files_with_content_loss", 0)),
     ]
@@ -894,25 +1181,26 @@ def _write_html(
         page_path = str(row.get("path", "")).strip()
         editor_payload = editor_payloads.get(page_path, {})
         raw_body_html = str(editor_payload.get("converted_body_html", "")).strip()
+        editor_body_html = raw_body_html
         # Pages with no icon-template heading (h* containing an <img>) get a
         # thick red hr prepended so Canvas sees the same visual divider that
         # icon-template pages get from their post-heading styled <hr>.
         # 10 px matches the border-bottom on Introduction-style h2 headings.
-        _stripped = raw_body_html.lstrip()
+        _stripped = editor_body_html.lstrip()
         _already_has_top_hr = (
             _stripped.startswith("<hr") and "border-top" in _stripped[:120]
         )
         _has_icon_heading = bool(
             re.search(
                 r"<h[1-6][^>]*>(?:(?!</h[1-6]>).){0,500}<img\b",
-                raw_body_html,
+                editor_body_html,
                 re.IGNORECASE | re.DOTALL,
             )
         )
         if not _has_icon_heading and not _already_has_top_hr:
-            raw_body_html = (
+            editor_body_html = (
                 '<hr style="border-top: 10px solid #AC1A2F; border-bottom: none;'
-                ' margin: 0 0 16px 0;">\n' + raw_body_html
+                ' margin: 0 0 16px 0;">\n' + editor_body_html
             )
         asset_map = _build_preview_asset_map(
             zip_path=converted_zip,
@@ -920,6 +1208,14 @@ def _write_html(
             body_html=raw_body_html,
         )
         preview_body_html = _apply_preview_asset_map(raw_body_html, asset_map)
+        editor_asset_map = _build_preview_asset_map(
+            zip_path=converted_zip,
+            page_path=page_path,
+            body_html=editor_body_html,
+        )
+        editor_preview_body_html = _apply_preview_asset_map(
+            editor_body_html, editor_asset_map
+        )
         # Build neutral-render iframes — strip class attrs so platform CSS doesn't fire;
         # inline style (float, flex, padding) is preserved and renders correctly in both.
         _orig_raw = str(editor_payload.get("original_body_html", "")).strip()
@@ -971,14 +1267,37 @@ def _write_html(
             for item in row.get("applied_changes", [])
             if isinstance(item, dict) and str(item.get("description", "")).strip()
         ]
+        review_focus = [
+            str(item)
+            for item in row.get("review_focus", [])
+            if str(item).strip() in _FOCUS_LABELS
+        ]
+        review_reason_summary = [
+            str(item).strip()
+            for item in row.get("review_reason_summary", [])
+            if str(item).strip()
+        ]
+        focus_pills_html = "".join(
+            f'<span class="focus-pill focus-pill--{html.escape(tag)}">{html.escape(_FOCUS_LABELS[tag])}</span>'
+            for tag in review_focus
+        )
+        focus_summary_html = (
+            '<p class="focus-summary"><strong>Why flagged:</strong> '
+            + html.escape("; ".join(review_reason_summary[:4]))
+            + "</p>"
+            if review_reason_summary
+            else ""
+        )
         _conv_m = row.get("converted_metrics") or {}
         rows.append(
             f"""
-            <section class="page-card" data-page-name="{html.escape(page_path, quote=True)}" data-priority="{html.escape(str(row.get('priority', 'low')), quote=True)}" data-has-images="{'1' if _conv_m.get('image_count', 0) > 0 else '0'}" data-has-accordions="{'1' if _conv_m.get('accordion_count', 0) > 0 else '0'}" data-has-tables="{'1' if _conv_m.get('table_count', 0) > 0 else '0'}" data-has-iframes="{'1' if _conv_m.get('iframe_count', 0) > 0 else '0'}">
+            <section class="page-card" data-page-name="{html.escape(page_path, quote=True)}" data-priority="{html.escape(str(row.get('priority', 'low')), quote=True)}" data-has-images="{'1' if _conv_m.get('image_count', 0) > 0 else '0'}" data-has-accordions="{'1' if _conv_m.get('accordion_count', 0) > 0 else '0'}" data-has-tables="{'1' if _conv_m.get('table_count', 0) > 0 else '0'}" data-has-iframes="{'1' if _conv_m.get('iframe_count', 0) > 0 else '0'}" data-has-layout-risk="{'1' if 'layout-risk' in review_focus else '0'}" data-has-content-loss="{'1' if 'content-loss' in review_focus else '0'}" data-has-manual-fix="{'1' if 'manual-fix' in review_focus else '0'}" data-has-accessibility="{'1' if 'accessibility' in review_focus else '0'}">
               <div class="page-head">
                 <div>
                   <h2>{html.escape(page_path)}</h2>
                   <p class="title-row">{html.escape(str(((row.get("titles") or {}).get("converted", ""))))}</p>
+                  <div class="focus-pills">{focus_pills_html}</div>
+                  {focus_summary_html}
                 </div>
                 <div class="page-meta">
                   {_badge(str(row.get("priority", "low")))}
@@ -991,6 +1310,7 @@ def _write_html(
                 <div><strong>Accordions</strong><span>{html.escape(_metric_cell(row, "accordion_count"))}</span></div>
                 <div><strong>Iframes</strong><span>{html.escape(_metric_cell(row, "iframe_count"))}</span></div>
                 <div><strong>Tables</strong><span>{html.escape(_metric_cell(row, "table_count"))}</span></div>
+                <div><strong>Dividers</strong><span>{html.escape(_metric_cell(row, "divider_count"))}</span></div>
                 <div><strong>Lists</strong><span>{html.escape(_metric_cell(row, "list_count"))}</span></div>
                 <div><strong>Words</strong><span>{html.escape(_metric_cell(row, "word_count"))}</span></div>
               </div>
@@ -998,6 +1318,7 @@ def _write_html(
                 {_render_issue_list("Manual Review", manual_items[:5])}
                 {_render_issue_list("Template Issues", template_items[:5], category="template")}
                 {_render_issue_list("Accessibility", accessibility_items[:5])}
+                {_render_issue_list("Layout Transforms", [str(item) for item in row.get("layout_sanitizer_flags", [])[:5]])}
                 {_render_issue_list("Visual Flags", [str(item) for item in row.get("visual_reasons", [])[:5]])}
                 {_render_issue_list("Structural Drift", [str(item) for item in row.get("structural_reasons", [])[:5]])}
                 {_render_issue_list("Deterministic Changes Applied", change_items[:5])}
@@ -1085,10 +1406,10 @@ def _write_html(
                 </div>
                 <div class="editor-status" data-editor-status>Click inside the white editor area below, then use the toolbar buttons</div>
                 <div class="editor-surface" contenteditable="true"></div>
-                <script type="application/json" class="editor-preview-html">{json.dumps(preview_body_html)}</script>
-                <textarea class="editor-source is-hidden" spellcheck="false">{html.escape(raw_body_html)}</textarea>
-                <textarea class="editor-initial-source is-hidden" spellcheck="false">{html.escape(raw_body_html)}</textarea>
-                <script type="application/json" class="editor-asset-map">{json.dumps(asset_map)}</script>
+                <script type="application/json" class="editor-preview-html">{json.dumps(editor_preview_body_html)}</script>
+                <textarea class="editor-source is-hidden" spellcheck="false">{html.escape(editor_body_html)}</textarea>
+                <textarea class="editor-initial-source is-hidden" spellcheck="false">{html.escape(editor_body_html)}</textarea>
+                <script type="application/json" class="editor-asset-map">{json.dumps(editor_asset_map)}</script>
               </div>
             </section>
             """
@@ -1238,6 +1559,45 @@ def _write_html(
     .title-row {{
       color: var(--muted);
       margin: 0;
+    }}
+    .focus-pills {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }}
+    .focus-pill {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      background: #efe7d7;
+      color: #5a4a27;
+    }}
+    .focus-pill--layout-risk {{
+      background: #f6ddd9;
+      color: #8a2130;
+    }}
+    .focus-pill--content-loss {{
+      background: #fbe4cf;
+      color: #9a4b00;
+    }}
+    .focus-pill--manual-fix {{
+      background: #e6eefc;
+      color: #1d4ed8;
+    }}
+    .focus-pill--accessibility {{
+      background: #e0f2e8;
+      color: #166534;
+    }}
+    .focus-summary {{
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.45;
+      max-width: 70ch;
     }}
     .page-meta {{
       display: flex;
@@ -1577,7 +1937,7 @@ def _write_html(
   <main class="page">
     <section class="intro">
       <h1>Page Review Workbench</h1>
-      <p>Deterministic before/after review plus a lightweight local editor for top-priority Canvas page bodies. Focus on the pages at the top of this list first, then export a review draft for write-back in the app.</p>
+      <p>Deterministic before/after review plus a lightweight local editor for top-priority Canvas page bodies. Use the Layout Risk and Content Loss filters first, then export a review draft for write-back in the app.</p>
       <div class="page-actions">
         <button type="button" class="draft-button" data-export-draft>Export Review Draft</button>
         <span class="draft-status" data-draft-status>No draft exported yet.</span>
@@ -1591,6 +1951,11 @@ def _write_html(
         <button class="chip chip-priority" data-filter-priority="high">High</button>
         <button class="chip chip-priority" data-filter-priority="medium">Medium</button>
         <button class="chip chip-priority" data-filter-priority="low">Low</button>
+        <span class="filter-sep">|</span>
+        <button class="chip" data-filter-focus="layout-risk">Layout Risk</button>
+        <button class="chip" data-filter-focus="content-loss">Content Loss</button>
+        <button class="chip" data-filter-focus="manual-fix">Manual Fix</button>
+        <button class="chip" data-filter-focus="accessibility">Accessibility</button>
         <span class="filter-sep">|</span>
         <button class="chip" data-filter-content="images">Has Images</button>
         <button class="chip" data-filter-content="accordions">Has Accordions</button>
@@ -2565,6 +2930,7 @@ def _write_html(
       const filterCountEl = document.querySelector('[data-filter-count]');
       let activePriority = 'all';
       const activeContentFilters = new Set();
+      const activeFocusFilters = new Set();
 
       function applyPageFilters() {{
         const query = (searchInput?.value || '').toLowerCase();
@@ -2575,6 +2941,10 @@ def _write_html(
           const passes = (
             (!query || name.includes(query)) &&
             (activePriority === 'all' || priority === activePriority) &&
+            (!activeFocusFilters.has('layout-risk')   || card.getAttribute('data-has-layout-risk')   === '1') &&
+            (!activeFocusFilters.has('content-loss')  || card.getAttribute('data-has-content-loss')  === '1') &&
+            (!activeFocusFilters.has('manual-fix')    || card.getAttribute('data-has-manual-fix')    === '1') &&
+            (!activeFocusFilters.has('accessibility') || card.getAttribute('data-has-accessibility') === '1') &&
             (!activeContentFilters.has('images')     || card.getAttribute('data-has-images')     === '1') &&
             (!activeContentFilters.has('accordions') || card.getAttribute('data-has-accordions') === '1') &&
             (!activeContentFilters.has('tables')     || card.getAttribute('data-has-tables')     === '1') &&
@@ -2591,6 +2961,19 @@ def _write_html(
         btn.addEventListener('click', () => {{
           activePriority = btn.getAttribute('data-filter-priority') || 'all';
           document.querySelectorAll('.chip-priority').forEach((b) => b.classList.toggle('is-active', b === btn));
+          applyPageFilters();
+        }});
+      }});
+      document.querySelectorAll('[data-filter-focus]').forEach((btn) => {{
+        btn.addEventListener('click', () => {{
+          const key = btn.getAttribute('data-filter-focus');
+          if (activeFocusFilters.has(key)) {{
+            activeFocusFilters.delete(key);
+            btn.classList.remove('is-active');
+          }} else {{
+            activeFocusFilters.add(key);
+            btn.classList.add('is-active');
+          }}
           applyPageFilters();
         }});
       }});
@@ -2677,6 +3060,7 @@ def main() -> None:
     print(f"Review pack JSON: {json_path}")
     print(f"Review pack Markdown: {markdown_path}")
     print(f"Review pack HTML: {html_path}")
+    print(f"Review pack shortlist CSV: {_default_output_shortlist_csv(json_path)}")
 
 
 if __name__ == "__main__":
