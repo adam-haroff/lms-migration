@@ -1523,6 +1523,56 @@ class TestModuleChecklistCloserFlaggedNotInjected:
 
 
 # ===========================================================================
+# External link normalization — Canvas-friendly link markup
+# ===========================================================================
+
+
+class TestExternalLinkNormalization:
+    def _run(self, html: str):
+        policy = BestPracticeEnforcerPolicy(
+            enabled=True,
+            enforce_module_checklist_closer=False,
+            ensure_external_links_new_tab=True,
+        )
+        return apply_best_practice_enforcer(html, file_path="course_data/Page.html", policy=policy)
+
+    def test_adds_inline_disabled_target_and_rel_to_external_links(self):
+        html = (
+            '<html><body><p><a href="https://www.youtube.com/watch?v=abc123">'
+            "Video Link</a></p></body></html>"
+        )
+        updated, changes, issues = self._run(html)
+        assert 'class="inline_disabled"' in updated
+        assert 'target="_blank"' in updated
+        assert 'rel="noopener noreferrer"' in updated
+        assert issues == []
+        assert any("external links" in change.description.lower() for change in changes)
+
+    def test_preserves_existing_classes_and_appends_inline_disabled(self):
+        html = (
+            '<html><body><p><a class="existing-link" href="https://example.com">'
+            "Example</a></p></body></html>"
+        )
+        updated, _, _ = self._run(html)
+        assert 'class="existing-link inline_disabled"' in updated
+
+    def test_does_not_duplicate_inline_disabled(self):
+        html = (
+            '<html><body><p><a class="inline_disabled" href="https://example.com"'
+            ' target="_blank" rel="noopener">Example</a></p></body></html>'
+        )
+        updated, _, _ = self._run(html)
+        assert updated.count("inline_disabled") == 1
+        assert 'rel="noopener noreferrer"' in updated
+
+    def test_non_http_links_are_untouched(self):
+        html = '<html><body><p><a href="mailto:test@example.com">Email</a></p></body></html>'
+        updated, _, _ = self._run(html)
+        assert 'class="inline_disabled"' not in updated
+        assert 'target="_blank"' not in updated
+
+
+# ===========================================================================
 # inject_accent_divider — pipeline HR injection
 # ===========================================================================
 

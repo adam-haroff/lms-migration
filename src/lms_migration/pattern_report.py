@@ -23,7 +23,7 @@ _TITLE_RE = re.compile(
 )
 _TAG_RE = re.compile(r"<[^>]+>")
 _TEMPLATE_ASSET_RE = re.compile(
-    r"(?:TemplateAssets|templateassets|template-images/(?:icons|sample-images))/"
+    r"(?:TemplateAssets|templateassets|web_resources/template-images|template-images/(?:icons|sample-images|banners))/"
     r"(?P<basename>[^\"'#?/\s>]+)",
     flags=re.IGNORECASE,
 )
@@ -52,7 +52,7 @@ _SAFE_BLOCK_IMAGE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _HEADING_WITH_TEMPLATE_ICON_RE = re.compile(
-    r"<h[1-6]\b[^>]*>.*?(?:TemplateAssets|templateassets|template-images/icons)/[^<]+.*?[A-Za-z].*?</h[1-6]>",
+    r"<h[1-6]\b[^>]*>.*?(?:TemplateAssets|templateassets|web_resources/template-images/icons|template-images/icons)/[^<]+.*?[A-Za-z].*?</h[1-6]>",
     flags=re.IGNORECASE | re.DOTALL,
 )
 _STANDARD_DIVIDER_RE = re.compile(
@@ -69,7 +69,7 @@ _HEADING_BLOCK_RE = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 _TEMPLATE_ICON_RE = re.compile(
-    r"(?:TemplateAssets|templateassets|template-images/icons)/(?P<basename>[^\"'#?/\s>]+)",
+    r"(?:TemplateAssets|templateassets|web_resources/template-images/icons|template-images/icons)/(?P<basename>[^\"'#?/\s>]+)",
     flags=re.IGNORECASE,
 )
 _STANDARD_ICON_BLOCK_RE = re.compile(
@@ -116,13 +116,13 @@ _CONSENSUS_TRANSFORMS = (
     },
     {
         "key": "shared_template_to_local_assets",
-        "label": "Brightspace shared template references become local TemplateAssets references",
+        "label": "Brightspace shared template references become local template-course asset references",
         "applicable": lambda before, after: before.get("shared_template_refs", 0) > 0,
         "matched": lambda before, after: after.get("shared_template_refs", 0) == 0
         and after.get("template_asset_refs", 0) > 0,
         "sample": lambda row: (
             f"{row['course_code']}: shared refs {row['before']['shared_template_refs']} -> "
-            f"local TemplateAssets {row['after']['template_asset_refs']}"
+            f"local template assets {row['after']['template_asset_refs']}"
         ),
     },
     {

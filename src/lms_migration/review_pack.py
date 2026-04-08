@@ -42,6 +42,10 @@ _SRC_ATTR_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _SPACE_RE = re.compile(r"\s+")
+_TEMPLATE_ASSET_RE = re.compile(
+    r"(?:templateassets|web_resources/template-images|template-images)/(?:icons|banners|sample-images)?",
+    flags=re.IGNORECASE,
+)
 _PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 _FOCUS_LABELS = {
     "layout-risk": "Layout Risk",
@@ -83,6 +87,15 @@ def _strip_html(value: str) -> str:
     cleaned = _TAG_RE.sub(" ", cleaned)
     cleaned = html.unescape(cleaned)
     return _SPACE_RE.sub(" ", cleaned).strip()
+
+
+def _is_template_asset_ref(value: str) -> bool:
+    cleaned = value.strip()
+    if not cleaned:
+        return False
+    parsed = urlparse(cleaned)
+    path = unquote((parsed.path or cleaned).strip()).replace("\\", "/")
+    return bool(_TEMPLATE_ASSET_RE.search(path))
 
 
 def _normalize_text(value: str) -> str:
@@ -142,7 +155,11 @@ def _content_metrics(value: str) -> dict[str, int]:
         "divider_count": len(re.findall(r"<hr\b", value, flags=re.IGNORECASE)),
         "link_count": len(re.findall(r"<a\b", value, flags=re.IGNORECASE)),
         "template_icon_count": len(
-            re.findall(r"<img\b[^>]*templateassets/[^>]*>", value, flags=re.IGNORECASE)
+            re.findall(
+                r"<img\b[^>]*(?:templateassets|web_resources/template-images|template-images)/[^>]*>",
+                value,
+                flags=re.IGNORECASE,
+            )
         ),
         "word_count": len(re.findall(r"\b\w+\b", plain)),
     }
@@ -231,21 +248,26 @@ _ICON_CATALOG: list[tuple[str, str]] = [
 def _build_icon_catalog(zip_path: Path) -> list[dict]:
     """Return label+data-URI for every icon that exists in *zip_path*.
 
-    Each entry: ``{"basename": "book.png", "label": "Read", "data_uri": "data:..."}``
+    Each entry: ``{"basename": "book.png", "label": "Read", "asset_path": "web_resources/.../book.png", "data_uri": "data:..."}``
     Icons not present in the zip are still included but with ``data_uri: ""``.
     """
     catalog: list[dict] = []
     with ZipFile(zip_path, "r") as zf:
-        name_set_lower = {n.lower() for n in zf.namelist()}
+        names = [n for n in zf.namelist() if not n.endswith("/")]
         for basename, label in _ICON_CATALOG:
             data_uri = ""
-            candidate = f"templateassets/{basename.lower()}"
-            # Find the actual cased path
+            asset_path = ""
             actual = next(
-                (n for n in zf.namelist() if n.lower() == candidate),
+                (
+                    n
+                    for n in names
+                    if n.lower().endswith(f"/{basename.lower()}")
+                    and _is_template_asset_ref(n)
+                ),
                 None,
             )
             if actual:
+                asset_path = actual
                 mime_type, _ = mimetypes.guess_type(basename)
                 if mime_type and mime_type.startswith("image/"):
                     try:
@@ -254,7 +276,14 @@ def _build_icon_catalog(zip_path: Path) -> list[dict]:
                         data_uri = f"data:{mime_type};base64,{encoded}"
                     except KeyError:
                         pass
-            catalog.append({"basename": basename, "label": label, "data_uri": data_uri})
+            catalog.append(
+                {
+                    "basename": basename,
+                    "label": label,
+                    "asset_path": asset_path,
+                    "data_uri": data_uri,
+                }
+            )
     return catalog
 
 
@@ -314,7 +343,7 @@ def _build_banner_catalog(zip_path: Path) -> dict[str, dict[str, str]]:
 
     Returns a dict keyed by bare filename (e.g. ``"banner-3.png"``) with entries::
 
-        {"raw_ref": "../TemplateAssets/banner-3.png",
+        {"asset_path": "web_resources/template-images/banners/banner-3.png",
          "data_uri": "data:image/png;base64,...",
          "label": "3"}
     """
@@ -331,7 +360,6 @@ def _build_banner_catalog(zip_path: Path) -> dict[str, dict[str, str]]:
             ):
                 continue
             filename = name.split("/")[-1]
-            raw_ref = f"../TemplateAssets/{filename}"
             mime_type, _ = mimetypes.guess_type(filename)
             if not mime_type or not mime_type.startswith("image/"):
                 continue
@@ -341,7 +369,7 @@ def _build_banner_catalog(zip_path: Path) -> dict[str, dict[str, str]]:
                 continue
             encoded = base64.b64encode(data).decode("ascii")
             catalog[filename] = {
-                "raw_ref": raw_ref,
+                "asset_path": name,
                 "data_uri": f"data:{mime_type};base64,{encoded}",
                 "label": _banner_label(filename),
             }
@@ -2007,6 +2035,34 @@ def _write_html(
         }}
       }}
 
+      function normalizePagePath(shell) {{
+        const raw = shell.getAttribute('data-page-path') || '';
+        return raw.split('::')[0].replace(/\\\\/g, '/');
+      }}
+
+      function isTemplateAssetRef(rawRef) {{
+        const lower = (rawRef || '').toLowerCase();
+        return (
+          lower.includes('templateassets/') ||
+          lower.includes('template-images/icons/') ||
+          lower.includes('template-images/banners/') ||
+          lower.includes('template-images/sample-images/')
+        );
+      }}
+
+      function buildTemplateAssetRawRef(shell, assetPath) {{
+        const normalizedAsset = (assetPath || '').replace(/\\\\/g, '/').replace(/^\\.\\//, '');
+        if (!normalizedAsset) return '';
+        const pagePath = normalizePagePath(shell);
+        const pageParts = pagePath ? pagePath.split('/').slice(0, -1) : [];
+        const assetParts = normalizedAsset.split('/');
+        while (pageParts.length && assetParts.length && pageParts[0] === assetParts[0]) {{
+          pageParts.shift();
+          assetParts.shift();
+        }}
+        return '../'.repeat(pageParts.length) + assetParts.join('/');
+      }}
+
       function getSurface(shell) {{
         return shell.querySelector('.editor-surface');
       }}
@@ -2384,9 +2440,9 @@ def _write_html(
       }}
 
       function applyIconChange(shell, basename) {{
-        // Locate the first icon heading in the editor that has a templateassets img.
-        // In the editor-surface all TemplateAssets/ image srcs are replaced with
-        // base64 data URIs, so we reverse-map via assetMap instead of checking src paths.
+        // Locate the first icon heading in the editor that has a template-course
+        // icon image. In the editor surface those refs are often replaced with
+        // data URIs, so we reverse-map via assetMap instead of relying on src paths.
         const surface = getSurface(shell);
         if (!surface) return false;
         const catalog = iconCatalog();
@@ -2394,17 +2450,17 @@ def _write_html(
         if (!entry) return false;
         const assetMap = parseAssetMap(shell);
 
-        // Build a set of data-URI values that correspond to TemplateAssets paths
+        // Build a set of data-URI values that correspond to template asset paths.
         const templateAssetDataUris = new Set(
           Object.entries(assetMap)
-            .filter(([rawRef]) => rawRef.toLowerCase().includes('templateassets'))
+            .filter(([rawRef]) => isTemplateAssetRef(rawRef))
             .map(([, dataUri]) => dataUri)
         );
-        // An img is a template-assets icon if its src is one of those data URIs,
-        // or (fallback for newly-regenerated pages) if the src itself references TemplateAssets
+        // An img is a template icon if its src is one of those data URIs,
+        // or if its src itself references the template asset tree.
         const isIconImg = (img) =>
           templateAssetDataUris.has(img.src) ||
-          img.src.toLowerCase().includes('templateassets');
+          isTemplateAssetRef(img.getAttribute('src') || '');
 
         const headings = Array.from(surface.querySelectorAll('h1, h2, h3, h4, h5, h6'));
         // Priority 1: heading nearest last cursor position (savedRanges)
@@ -2465,7 +2521,10 @@ def _write_html(
         // Find existing icon img (using the same data-URI-aware matcher)
         const iconImg = Array.from(targetHeading.querySelectorAll('img')).find(isIconImg) || null;
         // Build a raw ref + preview src for the new icon
-        const rawRef = `../TemplateAssets/${{basename}}`;
+        const rawRef = buildTemplateAssetRawRef(
+          shell,
+          entry.asset_path || `web_resources/template-images/icons/${{basename}}`
+        );
         const previewSrc = entry.data_uri || rawRef;
         if (iconImg) {{
           // Swap the existing icon src and update alt text
@@ -2719,7 +2778,8 @@ def _write_html(
           const catalog = bannerCatalog();
           const assetMapData = parseAssetMap(shell);
           for (const [filename, entry] of Object.entries(catalog)) {{
-            if (assetMapData[entry.raw_ref]) {{
+            const rawRef = buildTemplateAssetRawRef(shell, entry.asset_path || `web_resources/template-images/banners/${{filename}}`);
+            if (assetMapData[rawRef]) {{
               bannerSelect.value = filename;
               break;
             }}
@@ -2867,7 +2927,7 @@ def _write_html(
         }}
         if (!bannerImg) {{
           bannerImg = Array.from(surface.querySelectorAll('img')).find((img) =>
-            /TemplateAssets.*banner/i.test(img.getAttribute('src') || '') ||
+            /(?:TemplateAssets|template-images|web_resources\\/template-images).*banner/i.test(img.getAttribute('src') || '') ||
             /banner.*[.](png|jpg)/i.test(img.getAttribute('src') || '')
           ) || null;
         }}
@@ -2897,9 +2957,11 @@ def _write_html(
         const assetMapEl = shell.querySelector('.editor-asset-map');
         const assetMap = parseAssetMap(shell);
         for (const [fn, entry] of Object.entries(catalog)) {{
-          delete assetMap[entry.raw_ref];
+          const oldRawRef = buildTemplateAssetRawRef(shell, entry.asset_path || `web_resources/template-images/banners/${{fn}}`);
+          delete assetMap[oldRawRef];
         }}
-        assetMap[newEntry.raw_ref] = newEntry.data_uri;
+        const newRawRef = buildTemplateAssetRawRef(shell, newEntry.asset_path || `web_resources/template-images/banners/${{filename}}`);
+        assetMap[newRawRef] = newEntry.data_uri;
         assetMapEl.textContent = JSON.stringify(assetMap);
         // Update the img src and sync the source textarea
         bannerImg.src = newEntry.data_uri;

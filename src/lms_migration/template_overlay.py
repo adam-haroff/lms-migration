@@ -39,7 +39,8 @@ _SUPPORTED_TEMPLATE_EXTENSIONS = {
     ".xls",
     ".xlsx",
 }
-_MATERIALIZED_ASSET_DIR = "TemplateAssets"
+_TEMPLATE_WEB_ASSET_ROOT = "web_resources/template-images"
+_TEMPLATE_WEB_ICON_DIR = f"{_TEMPLATE_WEB_ASSET_ROOT}/icons"
 _IGNORED_UNRESOLVED_BASENAMES = {
     "all.min.css",
     "bootstrap.min.css",
@@ -110,10 +111,14 @@ _INTRO_HEADING_SPECS = {
         "styles": _SECTION_HEADING_STYLE,
     },
 }
+_TEMPLATE_ASSET_REF_PATTERN = (
+    r"(?:templateassets|web_resources/template-images(?:/(?:icons|banners|sample-images))?|"
+    r"template-images(?:/(?:icons|banners|sample-images))?)/"
+)
 _ICON_BLOCK_PATTERN = (
     r"<(?P<wrapper>p|div)\b[^>]*>\s*"
     r"(?:\s|&nbsp;|</?(?:span|strong|em|b)\b[^>]*>)*"
-    r"(?P<img><img\b[^>]*src\s*=\s*[\"'][^\"']*templateassets/[^\"']+[\"'][^>]*>)"
+    rf"(?P<img><img\b[^>]*src\s*=\s*[\"'][^\"']*{_TEMPLATE_ASSET_REF_PATTERN}[^\"']+[\"'][^>]*>)"
     r"(?:\s|&nbsp;|</?(?:span|strong|em|b)\b[^>]*>)*"
     r"</(?P=wrapper)>"
 )
@@ -125,6 +130,79 @@ _HEADING_PATTERN = re.compile(
 
 def _normalize_basename(value: str) -> str:
     return posixpath.basename(value.strip().replace("\\", "/")).strip().lower()
+
+
+def _extract_tag_attr_value(tag_html: str, attr_name: str) -> str:
+    match = re.search(
+        rf'(?<=\s){attr_name}\s*=\s*(["\'])(?P<value>[^"\']*)\1',
+        tag_html,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return ""
+    return match.group("value").strip()
+
+
+def _normalize_overlay_file_path(file_path: str) -> str:
+    return file_path.split("::", 1)[0].strip().replace("\\", "/")
+
+
+def _is_template_asset_url(url: str) -> bool:
+    cleaned = html.unescape(url.strip())
+    parsed = urlparse(cleaned)
+    path_text = unquote((parsed.path or cleaned).strip()).replace("\\", "/").lower()
+    return (
+        "templateassets/" in path_text
+        or "template-images/icons/" in path_text
+        or "template-images/banners/" in path_text
+        or "template-images/sample-images/" in path_text
+    )
+
+
+def _preferred_asset_path(paths: list[str]) -> str:
+    if not paths:
+        return ""
+    preferred = [
+        path
+        for path in paths
+        if path.lower().startswith(f"{_TEMPLATE_WEB_ASSET_ROOT}/")
+    ]
+    candidates = preferred or paths
+    unique: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        lowered = candidate.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        unique.append(candidate)
+    if len(unique) == 1:
+        return unique[0]
+    return ""
+
+
+def _resolve_template_asset_path(
+    *,
+    basename: str,
+    context: "TemplateOverlayContext",
+) -> str:
+    return _preferred_asset_path(context.assets_by_basename.get(_normalize_basename(basename), []))
+
+
+def _build_template_asset_ref(
+    *,
+    basename: str,
+    file_path: str,
+    context: "TemplateOverlayContext",
+) -> str:
+    asset_path = _resolve_template_asset_path(basename=basename, context=context)
+    if not asset_path:
+        return f"{_TEMPLATE_WEB_ICON_DIR}/{_normalize_basename(basename)}"
+    relative_path = _normalize_overlay_file_path(file_path)
+    parent = posixpath.dirname(relative_path)
+    if not parent:
+        return asset_path
+    return posixpath.relpath(asset_path, parent)
 
 
 def _is_brightspace_template_url(url: str) -> bool:
@@ -707,16 +785,25 @@ def _merge_style_attr(
     return working_attrs
 
 
-def _build_heading_icon_tag(*, basename: str) -> str:
+def _build_heading_icon_tag(
+    *,
+    basename: str,
+    file_path: str,
+    context: "TemplateOverlayContext",
+) -> str:
     return (
-        f'<img src="TemplateAssets/{basename}" role="presentation" alt="" '
+        f'<img src="{_build_template_asset_ref(basename=basename, file_path=file_path, context=context)}" role="presentation" alt="" '
         f'style="{_TEMPLATE_HEADING_ICON_STYLE}">'
     )
 
 
 def _extract_non_template_heading_images(body: str) -> list[str]:
     images = re.findall(r"<img\b[^>]*>", body, flags=re.IGNORECASE)
-    return [image for image in images if "templateassets/" not in image.lower()]
+    return [
+        image
+        for image in images
+        if not _is_template_asset_url(_extract_tag_attr_value(image, "src"))
+    ]
 
 
 def _extract_heading_title_and_media(body: str) -> tuple[str, list[str]]:
@@ -1064,7 +1151,11 @@ def apply_template_overlay(
                 # doesn't contain broken Brightspace-hosted image URLs.
                 if posixpath.splitext(source_basename)[1].lower() in _IMAGE_EXTENSIONS:
                     icon_fallback_basenames.append(source_basename)
-                    rebuilt = f"{_MATERIALIZED_ASSET_DIR}/{_ICON_UNRESOLVABLE_FALLBACK}"
+                    rebuilt = _build_template_asset_ref(
+                        basename=_ICON_UNRESOLVABLE_FALLBACK,
+                        file_path=file_path,
+                        context=context,
+                    )
                     return (
                         f'{match.group("prefix")}{match.group("quote")}'
                         f'{rebuilt}{match.group("quote")}'
@@ -1072,7 +1163,11 @@ def apply_template_overlay(
             return match.group(0)
 
         parsed = urlparse(original_url)
-        rebuilt = f"{_MATERIALIZED_ASSET_DIR}/{target_basename}"
+        rebuilt = _build_template_asset_ref(
+            basename=target_basename,
+            file_path=file_path,
+            context=context,
+        )
         if parsed.query:
             rebuilt = f"{rebuilt}?{parsed.query}"
         if parsed.fragment:
@@ -1151,7 +1246,7 @@ def apply_template_overlay(
             src_basename = _normalize_basename(unquote(parsed_src.path))
             if not src_basename:
                 return tag
-            is_template_asset = "templateassets/" in lowered_src
+            is_template_asset = _is_template_asset_url(src_value)
             is_known_visual_asset = src_basename in known_visual_basenames
             canonical_icon_label = context.icon_label_by_basename.get(src_basename, "")
             raw_icon_label = _extract_img_heading_label(tag)
@@ -1179,7 +1274,11 @@ def apply_template_overlay(
                     )
                     if semantic_basename not in context.assets_by_basename:
                         semantic_basename = target_basename
-                    rebuilt = f"{_MATERIALIZED_ASSET_DIR}/{semantic_basename}"
+                    rebuilt = _build_template_asset_ref(
+                        basename=semantic_basename,
+                        file_path=file_path,
+                        context=context,
+                    )
                     tag = re.sub(
                         r'(\bsrc\s*=\s*)(["\'])([^"\']+)(\2)',
                         rf"\1\2{rebuilt}\4",
@@ -1564,7 +1663,11 @@ def apply_template_overlay(
             replacement = _render_icon_heading_block(
                 level=template_section_level(int(match.group("level"))),
                 attrs=heading_attrs,
-                img_tag=_build_heading_icon_tag(basename=src_basename),
+                img_tag=_build_heading_icon_tag(
+                    basename=src_basename,
+                    file_path=file_path,
+                    context=context,
+                ),
                 canonical_label=label,
             )
             if replacement != full_heading:
@@ -1579,7 +1682,7 @@ def apply_template_overlay(
         )
 
         def normalize_icon_only_paragraph(match: re.Match[str]) -> str:
-            """Convert a <p> containing only a TemplateAssets icon into a proper
+            """Convert a paragraph containing only a template icon into a proper
             icon+label heading, matching the template icon placement guidelines."""
             nonlocal icon_label_heading_updates
             img_tag = match.group("img")
@@ -1597,16 +1700,20 @@ def apply_template_overlay(
             replacement = _render_icon_heading_block(
                 level=template_section_level(3),
                 attrs=attrs,
-                img_tag=_build_heading_icon_tag(basename=src_basename),
+                img_tag=_build_heading_icon_tag(
+                    basename=src_basename,
+                    file_path=file_path,
+                    context=context,
+                ),
                 canonical_label=label,
             )
             icon_label_heading_updates += 1
             return replacement
 
-        # Match <p> or <div> that contains ONLY a TemplateAssets icon (already
-        # remapped from standardImages), with no surrounding text content.
+        # Match <p> or <div> that contains ONLY a template-course icon
+        # (already remapped from standardImages), with no surrounding text.
         updated = re.sub(
-            r"<(?P<wrapper>p|div)\b[^>]*>\s*(?P<img><img\b[^>]*templateassets/[^>]+>)\s*</(?P=wrapper)>",
+            rf"<(?P<wrapper>p|div)\b[^>]*>\s*(?P<img><img\b[^>]*{_TEMPLATE_ASSET_REF_PATTERN}[^>]+>)\s*</(?P=wrapper)>",
             normalize_icon_only_paragraph,
             updated,
             flags=re.IGNORECASE | re.DOTALL,
@@ -1647,7 +1754,11 @@ def apply_template_overlay(
                 attrs=(
                     ' style="color: #ac1a2f;"' if context.apply_color_standards else ""
                 ),
-                img_tag=_build_heading_icon_tag(basename=icon_basename),
+                img_tag=_build_heading_icon_tag(
+                    basename=icon_basename,
+                    file_path=file_path,
+                    context=context,
+                ),
                 canonical_label=canonical_label,
                 original_title=label_text,
             )
@@ -1696,7 +1807,11 @@ def apply_template_overlay(
             replacement = _render_icon_heading_block(
                 level=template_section_level(int(match.group("level"))),
                 attrs=heading_attrs,
-                img_tag=_build_heading_icon_tag(basename=resolved_icon_basename),
+                img_tag=_build_heading_icon_tag(
+                    basename=resolved_icon_basename,
+                    file_path=file_path,
+                    context=context,
+                ),
                 canonical_label=canonical_label,
                 original_title=original_title,
             )
@@ -1723,7 +1838,7 @@ def apply_template_overlay(
         def promote_template_icon_heading(match: re.Match[str]) -> str:
             nonlocal promoted_icon_headings
             level = int(match.group("level"))
-            if level != 4 or "templateassets/" not in match.group("body").lower():
+            if level != 4 or not _is_template_asset_url(match.group("body")):
                 return match.group(0)
             promoted_icon_headings += 1
             attrs = _template_heading_attrs(match.group("attrs"), context=context)
@@ -1779,7 +1894,7 @@ def apply_template_overlay(
                 heading_text = html.escape(str(spec["label"]))
                 _, heading_media = _extract_heading_title_and_media(match.group("body"))
                 replacement = (
-                    f'<h2{attrs}>{_build_heading_icon_tag(basename=str(spec["icon_basename"]))}'
+                    f'<h2{attrs}>{_build_heading_icon_tag(basename=str(spec["icon_basename"]), file_path=file_path, context=context)}'
                     f"<strong>{heading_text}</strong></h2>"
                 )
                 replacement += _render_heading_media_blocks(heading_media)
@@ -1798,7 +1913,7 @@ def apply_template_overlay(
                 nonlocal page_title_done
                 if page_title_done:
                     return match.group(0)
-                if "templateassets/" in match.group("body").lower():
+                if _is_template_asset_url(match.group("body")):
                     return match.group(0)
                 heading_text = _plain_text(match.group("body"))
                 if not heading_text:
@@ -1812,7 +1927,7 @@ def apply_template_overlay(
                     remove_style_keys=_template_remove_style_keys(context=context),
                 )
                 replacement = (
-                    f'<h2{attrs}><strong>{_build_heading_icon_tag(basename="bookmark.png")}'
+                    f'<h2{attrs}><strong>{_build_heading_icon_tag(basename="bookmark.png", file_path=file_path, context=context)}'
                     f"{html.escape(heading_text)}</strong></h2>"
                 )
                 if replacement != match.group(0):
@@ -1825,7 +1940,9 @@ def apply_template_overlay(
 
     if context.inject_default_banner:
         if not re.search(
-            r"<img\b[^>]*TemplateAssets/banner", updated, flags=re.IGNORECASE
+            r"<img\b[^>]*(?:TemplateAssets|template-images(?:/banners)?|web_resources/template-images/banners)/banner",
+            updated,
+            flags=re.IGNORECASE,
         ):
             banner_basename = next(
                 (
@@ -1836,9 +1953,14 @@ def apply_template_overlay(
                 None,
             )
             if banner_basename:
+                banner_ref = _build_template_asset_ref(
+                    basename=banner_basename,
+                    file_path=file_path,
+                    context=context,
+                )
                 banner_tag = (
                     f'<img role="presentation" alt="" '
-                    f'src="TemplateAssets/{banner_basename}" '
+                    f'src="{banner_ref}" '
                     f'style="width: 100%; height: auto; display: block;">'
                 )
                 updated = re.sub(
@@ -2053,35 +2175,32 @@ def materialize_template_assets(
     context: TemplateOverlayContext,
     destination_root: Path,
 ) -> dict:
-    output_dir = destination_root / _MATERIALIZED_ASSET_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     copied = 0
     skipped_collisions = 0
     skipped_existing = 0
-    copied_basenames: list[str] = []
+    copied_paths: list[str] = []
 
     with ZipFile(context.template_package, "r") as zf:
         for basename, paths in sorted(context.assets_by_basename.items()):
-            if len(paths) != 1:
+            source_name = _preferred_asset_path(paths)
+            if not source_name:
                 skipped_collisions += 1
                 continue
-            source_name = paths[0]
-            target = output_dir / basename
+            target = destination_root / source_name
             if target.exists():
                 skipped_existing += 1
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(zf.read(source_name))
             copied += 1
-            copied_basenames.append(basename)
+            copied_paths.append(source_name)
 
     return {
-        "asset_dir": _MATERIALIZED_ASSET_DIR,
+        "asset_dir": _TEMPLATE_WEB_ASSET_ROOT,
         "assets_copied": copied,
         "assets_skipped_collisions": skipped_collisions,
         "assets_skipped_existing": skipped_existing,
-        "copied_basenames_sample": copied_basenames[:30],
+        "copied_paths_sample": copied_paths[:30],
     }
 
 

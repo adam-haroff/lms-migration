@@ -28,12 +28,12 @@ All other pages
     Passed through unchanged.
 
 Module ordering (Canvas module_meta.xml)
-    ``course_settings/module_meta.xml`` is written into the package.  It places
-    the template shell modules (Instructor Module, Start Here) first, the D2L
-    content modules in the middle, and the Course Conclusion module last.
-    Canvas uses this file when importing a Canvas Common Cartridge to define
-    module titles, positions, and published states.  D2L modules whose title
-    matches a template shell are excluded (they map to the template positions).
+    ``course_settings/module_meta.xml`` is written into the package. In
+    curated mode, it places the template shell modules first, the D2L content
+    modules in the middle, and the Course Conclusion module last. In full
+    template-course mode, it preserves the template modules in order, inserts
+    the D2L content modules before the Course Conclusion module, and keeps the
+    template sample/reference modules available for faculty use.
 
 Home page auto-selection
     The course code prefix (e.g. "ACC", "COM", "PSY") is extracted from the
@@ -54,9 +54,9 @@ Home page auto-selection
 Notes
 -----
 * ``$IMS-CC-FILEBASE$/template-images/...`` URLs in injected template HTML are
-  rewritten to ``../TemplateAssets/{basename}`` so they resolve once Canvas
-  imports the package.  The ``TemplateAssets/`` folder is already materialised
-  by ``materialize_template_assets()`` earlier in the pipeline.
+  rewritten to relative ``web_resources/template-images/...`` paths so they
+  resolve against the real template-course asset tree that is materialised
+  earlier in the pipeline.
 """
 
 from __future__ import annotations
@@ -545,6 +545,16 @@ def _read_d2l_module_titles(unpack_dir: Path) -> list[str]:
     the D2L manifest ``<organization>``.  Shell/carryover modules are
     excluded — only the genuine course content modules are returned.
     """
+    return _read_d2l_module_titles_for_mode(unpack_dir)
+
+
+def _read_d2l_module_titles_for_mode(
+    unpack_dir: Path,
+    *,
+    exclude_shell_titles: bool = True,
+    exclude_exact_titles: Iterable[str] = (),
+) -> list[str]:
+    """Return top-level D2L module titles with configurable filtering."""
     manifest_path = next(unpack_dir.rglob("imsmanifest.xml"), None)
     if manifest_path is None:
         return []
@@ -562,6 +572,7 @@ def _read_d2l_module_titles(unpack_dir: Path) -> list[str]:
     if org is None:
         return []
 
+    excluded = {title.strip() for title in exclude_exact_titles if title.strip()}
     titles: list[str] = []
     for item in org:
         if _local_name(item.tag) != "item":
@@ -573,8 +584,9 @@ def _read_d2l_module_titles(unpack_dir: Path) -> list[str]:
                 break
         if not title:
             continue
-        # Skip D2L shell/carryover modules — they map to template positions
-        if title.lower() in _D2L_SHELL_MODULE_TITLES:
+        if exclude_shell_titles and title.lower() in _D2L_SHELL_MODULE_TITLES:
+            continue
+        if title in excluded:
             continue
         titles.append(title)
     return titles
@@ -609,11 +621,19 @@ def _build_module_element(
     return m
 
 
+def _module_title(module_el: ET.Element) -> str:
+    for child in list(module_el):
+        if _local_name(child.tag) == "title":
+            return (child.text or "").strip()
+    return ""
+
+
 def _build_module_meta_xml(
     d2l_module_titles: list[str],
     *,
     ns: str = _MODULE_META_NS,
     template_shell_modules: dict[str, ET.Element] | None = None,
+    template_modules_in_order: list[ET.Element] | None = None,
 ) -> str:
     """Build the ``module_meta.xml`` content string.
 
@@ -652,6 +672,47 @@ def _build_module_meta_xml(
         return module_copy
 
     shell_modules = template_shell_modules or {}
+
+    if template_modules_in_order:
+        template_titles = [
+            _module_title(module_el)
+            for module_el in template_modules_in_order
+            if _module_title(module_el)
+        ]
+        conclusion_module = None
+        ordered_template_modules: list[ET.Element] = []
+        for module_el in template_modules_in_order:
+            title = _module_title(module_el)
+            if not title:
+                continue
+            if title == _TEMPLATE_CONCLUSION_TITLE:
+                conclusion_module = module_el
+                continue
+            ordered_template_modules.append(module_el)
+
+        position = 1
+        for module_el in ordered_template_modules:
+            root.append(_position_module(module_el, position))
+            position += 1
+
+        for title in d2l_module_titles:
+            root.append(
+                _build_module_element(
+                    ns,
+                    _make_module_id(title),
+                    title,
+                    position=position,
+                )
+            )
+            position += 1
+
+        if conclusion_module is not None:
+            root.append(_position_module(conclusion_module, position))
+
+        ET.indent(root, space="  ")
+        return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+            root, encoding="unicode"
+        )
 
     instructor_module = shell_modules.get(_TEMPLATE_INSTRUCTOR_MODULE_TITLE)
     if instructor_module is not None:
@@ -718,19 +779,23 @@ def _write_module_meta(
     d2l_module_titles: list[str],
     *,
     template_shell_modules: dict[str, ET.Element] | None = None,
+    template_modules_in_order: list[ET.Element] | None = None,
+    overwrite: bool = False,
 ) -> None:
     """Generate and write ``course_settings/module_meta.xml``.
 
-    Only writes if the file does not already exist (idempotent).
+    By default this is idempotent. When ``overwrite`` is true, the existing
+    file is replaced with a merged module ordering.
     """
     cs_dir = unpack_dir / "course_settings"
     meta_path = cs_dir / "module_meta.xml"
-    if meta_path.exists():
+    if meta_path.exists() and not overwrite:
         return
     cs_dir.mkdir(parents=True, exist_ok=True)
     xml = _build_module_meta_xml(
         d2l_module_titles,
         template_shell_modules=template_shell_modules,
+        template_modules_in_order=template_modules_in_order,
     )
     meta_path.write_text(xml, encoding="utf-8")
 
@@ -873,6 +938,17 @@ def _copy_template_web_resources(template_package: Path, unpack_dir: Path) -> se
     return _copy_template_paths(template_package, unpack_dir, web_resource_paths)
 
 
+def _copy_full_template_payload(template_package: Path, unpack_dir: Path) -> set[str]:
+    """Copy every template package file except the root manifest."""
+    with ZipFile(template_package, "r") as zf:
+        template_paths = [
+            name
+            for name in zf.namelist()
+            if name and not name.endswith("/") and name != "imsmanifest.xml"
+        ]
+    return _copy_template_paths(template_package, unpack_dir, template_paths)
+
+
 def _template_resource_ids_by_href(root: ET.Element) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for resource_id, resource in _resource_elements_by_id(root).items():
@@ -880,6 +956,72 @@ def _template_resource_ids_by_href(root: ET.Element) -> dict[str, str]:
         if href:
             mapping[href] = resource_id
     return mapping
+
+
+def _all_template_resource_ids(root: ET.Element) -> set[str]:
+    return set(_resource_elements_by_id(root).keys())
+
+
+def _template_course_settings_resource_ids(
+    template_package: Path,
+    template_root: ET.Element,
+) -> set[str]:
+    """Return template resource identifiers referenced by course settings files.
+
+    Full-shell mode copies ``course_settings/course_settings.xml`` and
+    ``course_settings/syllabus.html`` from the template. Those files can
+    reference resources that are not part of the shell module items
+    themselves, such as the course card image and the linked syllabus page.
+    """
+    resource_ids: set[str] = set()
+    resource_ids_by_href = _template_resource_ids_by_href(template_root)
+
+    with ZipFile(template_package, "r") as zf:
+        try:
+            course_settings_xml = zf.read("course_settings/course_settings.xml").decode(
+                "utf-8", errors="replace"
+            )
+        except KeyError:
+            course_settings_xml = ""
+
+        if course_settings_xml:
+            try:
+                settings_root = ET.fromstring(course_settings_xml)
+            except ET.ParseError:
+                settings_root = None
+            if settings_root is not None:
+                for element in settings_root.iter():
+                    if not _local_name(element.tag).endswith("identifier_ref"):
+                        continue
+                    ref = (element.text or "").strip()
+                    if ref:
+                        resource_ids.add(ref)
+
+        try:
+            syllabus_html = zf.read("course_settings/syllabus.html").decode(
+                "utf-8", errors="replace"
+            )
+        except KeyError:
+            syllabus_html = ""
+
+    if syllabus_html:
+        for match in re.findall(
+            r"\$WIKI_REFERENCE\$/pages/([A-Za-z0-9_-]+)",
+            syllabus_html,
+            flags=re.IGNORECASE,
+        ):
+            resource_ids.add(match)
+        for match in re.findall(
+            r"\$IMS-CC-FILEBASE\$/([^\"'<>\\s]+)",
+            syllabus_html,
+            flags=re.IGNORECASE,
+        ):
+            href = f"web_resources/{match.lstrip('/')}".replace("\\", "/")
+            resource_id = resource_ids_by_href.get(href)
+            if resource_id:
+                resource_ids.add(resource_id)
+
+    return resource_ids
 
 
 def _inject_template_resources_into_manifest(
@@ -919,6 +1061,75 @@ def _inject_template_resources_into_manifest(
 
     if appended:
         tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+
+
+def _extract_template_top_level_items(template_organization: ET.Element) -> list[ET.Element]:
+    """Return the template's visible top-level items in order.
+
+    The template manifest uses a single untitled wrapper item around the
+    top-level modules. When that structure is present, flatten it so we can
+    merge the visible modules directly into the destination organization.
+    """
+    items = [child for child in list(template_organization) if _local_name(child.tag) == "item"]
+    if len(items) == 1:
+        title = _extract_item_title(items[0])[1].strip()
+        nested_items = [
+            child for child in list(items[0]) if _local_name(child.tag) == "item"
+        ]
+        if not title and nested_items:
+            return nested_items
+    return items
+
+
+def _inject_full_template_items_into_manifest(
+    unpack_dir: Path,
+    template_root: ET.Element,
+) -> None:
+    """Inject the full template-course top-level items into the D2L manifest."""
+    manifest_path = unpack_dir / "imsmanifest.xml"
+    if not manifest_path.exists():
+        return
+    tree = ET.parse(manifest_path)
+    root = tree.getroot()
+    organization = _find_first_organization(root)
+    template_organization = _find_first_organization(template_root)
+    if organization is None or template_organization is None:
+        return
+
+    existing_titles = {
+        _extract_item_title(item)[1].strip()
+        for item in organization
+        if _local_name(item.tag) == "item"
+    }
+    template_items = _extract_template_top_level_items(template_organization)
+    if not template_items:
+        return
+
+    prepend_items: list[ET.Element] = []
+    append_items: list[ET.Element] = []
+    for item in template_items:
+        title = _extract_item_title(item)[1].strip()
+        if title in existing_titles:
+            continue
+        if title == _TEMPLATE_CONCLUSION_TITLE:
+            append_items.append(_clone_element(item))
+        else:
+            prepend_items.append(_clone_element(item))
+
+    if not prepend_items and not append_items:
+        return
+
+    existing_children = list(organization)
+    for child in existing_children:
+        organization.remove(child)
+    for item in prepend_items:
+        organization.append(item)
+    for child in existing_children:
+        organization.append(child)
+    for item in append_items:
+        organization.append(item)
+
+    tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
 
 
 def _inject_template_shell_items_into_manifest(
@@ -987,6 +1198,17 @@ def _load_template_shell_modules(template_package: Path) -> dict[str, ET.Element
     return modules
 
 
+def _load_template_modules_in_order(template_package: Path) -> list[ET.Element]:
+    modules: list[ET.Element] = []
+    with ZipFile(template_package, "r") as zf:
+        root = ET.fromstring(zf.read("course_settings/module_meta.xml"))
+    for module in list(root):
+        if _local_name(module.tag) != "module":
+            continue
+        modules.append(_clone_element(module))
+    return modules
+
+
 def _load_template_shell_payload(
     template_package: Path,
 ) -> tuple[ET.Element, dict[str, ET.Element], set[str]]:
@@ -1007,6 +1229,10 @@ def _load_template_shell_payload(
         resource_id = resource_ids_by_href.get(href)
         if resource_id:
             selected_resource_ids.add(resource_id)
+
+    selected_resource_ids.update(
+        _template_course_settings_resource_ids(template_package, template_root)
+    )
 
     resources_by_id = _resource_elements_by_id(template_root)
     selected_resource_ids = _resource_dependency_closure(
@@ -1126,19 +1352,17 @@ def _relative_path_prefix(path: str) -> str:
 def _template_asset_prefix(
     path: str,
     *,
-    use_template_web_resources: bool = False,
+    use_template_web_resources: bool = True,
 ) -> str:
     prefix = _relative_path_prefix(path)
-    if use_template_web_resources:
-        return f"{prefix}web_resources/template-images/icons/"
-    return f"{prefix}TemplateAssets/"
+    return f"{prefix}web_resources/template-images/icons/"
 
 
 def _rewrite_template_asset_urls(
     html: str,
     *,
     relative_path: str,
-    use_template_web_resources: bool = False,
+    use_template_web_resources: bool = True,
 ) -> str:
     """Rewrite ``$IMS-CC-FILEBASE$/template-images/...`` to relative paths.
 
@@ -1146,23 +1370,12 @@ def _rewrite_template_asset_urls(
         html: HTML text to process.
         relative_path: Relative file path within the generated package.
     """
-    if use_template_web_resources:
-        prefix = f"{_relative_path_prefix(relative_path)}web_resources/"
+    prefix = f"{_relative_path_prefix(relative_path)}web_resources/"
 
-        def _sub_full(m: re.Match) -> str:
-            return prefix + m.group(1)
-
-        return _TEMPLATE_FILEBASE_URL_RE.sub(_sub_full, html)
-
-    prefix = _template_asset_prefix(
-        relative_path,
-        use_template_web_resources=False,
-    )
-
-    def _sub_basename(m: re.Match) -> str:
+    def _sub_full(m: re.Match) -> str:
         return prefix + m.group(1)
 
-    return _TEMPLATE_ASSET_URL_RE.sub(_sub_basename, html)
+    return _TEMPLATE_FILEBASE_URL_RE.sub(_sub_full, html)
 
 
 def _clean_d2l_scaffold(body: str) -> str:
@@ -1365,7 +1578,8 @@ def _extract_do_this_items_from_learning_activities(body: str) -> list[str]:
 # Module intro  template filling
 # ---------------------------------------------------------------------------
 
-# Template body for module intro shell — icons use TemplateAssets/*
+# Template body for module intro shell — icons use template-course
+# web_resources/template-images/*
 # We build this once with a placeholder and fill sections at runtime.
 # (No need to read the template HTML for every module — the body structure
 #  is stable; only the icon filenames and content differ.)
@@ -1702,41 +1916,23 @@ def run_template_merge(
 
     # Load template wiki pages (used as shells / for standalone additions)
     template_pages = _load_template_wiki_pages(template_package)
-    use_template_web_resources = bool(full_template_shell)
+    use_template_web_resources = True
     template_root: ET.Element | None = None
     template_shell_modules: dict[str, ET.Element] | None = None
-    selected_resource_ids: set[str] = set()
+    template_modules_in_order: list[ET.Element] | None = None
     if full_template_shell:
-        (
-            template_root,
-            template_shell_modules,
-            selected_resource_ids,
-        ) = _load_template_shell_payload(template_package)
-        # Copy the actual resource file paths referenced by the selected shell
-        # resources, plus the template web_resources tree so icon/button/banner
-        # references resolve without a synthetic TemplateAssets folder.
-        resource_paths: set[str] = set()
-        if template_root is not None:
-            resources_by_id = _resource_elements_by_id(template_root)
-            for resource_id in selected_resource_ids:
-                resource = resources_by_id.get(resource_id)
-                if resource is None:
-                    continue
-                resource_paths.update(_resource_file_hrefs(resource))
-        copied_paths = _copy_template_paths(
-            template_package,
-            unpack_dir,
-            resource_paths,
-        )
-        copied_paths.update(_copy_template_web_resources(template_package, unpack_dir))
+        template_root = _load_template_manifest_root(template_package)
+        template_shell_modules = _load_template_shell_modules(template_package)
+        template_modules_in_order = _load_template_modules_in_order(template_package)
+        copied_paths = _copy_full_template_payload(template_package, unpack_dir)
         _rewrite_copied_template_filebase_refs(unpack_dir, copied_paths)
         if template_root is not None:
             _inject_template_resources_into_manifest(
                 unpack_dir,
                 template_root,
-                selected_resource_ids,
+                _all_template_resource_ids(template_root),
             )
-            _inject_template_shell_items_into_manifest(unpack_dir, template_root)
+            _inject_full_template_items_into_manifest(unpack_dir, template_root)
 
     # Survey all HTML files
     html_files = sorted(unpack_dir.rglob("*.html")) + sorted(unpack_dir.rglob("*.htm"))
@@ -1773,6 +1969,16 @@ def run_template_merge(
         module_number = page.module_number
         chapter_title = page.chapter_title
         html_file = page.html_file
+
+        if full_template_shell and rel.startswith("wiki_content/"):
+            result.pages.append(
+                MergedPageRecord(
+                    original_path=rel,
+                    role=PageRole.STANDALONE,
+                    action="passthrough",
+                )
+            )
+            continue
 
         if role == PageRole.MODULE_INTRO:
             if intro_checklist_handling == "preserve":
@@ -1951,11 +2157,21 @@ def run_template_merge(
     # ── Module ordering (Canvas module_meta.xml) ───────────────────────────
     # Read the D2L manifest to get the ordered list of content modules, then
     # build module_meta.xml that places them between the template shell modules.
-    d2l_modules = _read_d2l_module_titles(unpack_dir)
+    d2l_modules = _read_d2l_module_titles_for_mode(
+        unpack_dir,
+        exclude_shell_titles=not full_template_shell,
+        exclude_exact_titles=(
+            {_module_title(module_el) for module_el in (template_modules_in_order or [])}
+            if full_template_shell
+            else ()
+        ),
+    )
     _write_module_meta(
         unpack_dir,
         d2l_modules,
         template_shell_modules=template_shell_modules,
+        template_modules_in_order=template_modules_in_order if full_template_shell else None,
+        overwrite=full_template_shell,
     )
 
     return result

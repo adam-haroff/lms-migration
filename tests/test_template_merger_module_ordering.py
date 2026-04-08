@@ -404,8 +404,8 @@ class TestLearningActivitiesRebuild:
             path_seed="Learning Activities.html",
         )
         assert rebuilt is not None
-        assert "TemplateAssets/paper.png" in rebuilt
-        assert "TemplateAssets/folder.png" in rebuilt
+        assert "web_resources/template-images/icons/paper.png" in rebuilt
+        assert "web_resources/template-images/icons/folder.png" in rebuilt
         assert "Do This" in rebuilt
         assert "Explore This" in rebuilt
         assert "<li>Read Chapter 1</li>" in rebuilt
@@ -424,7 +424,7 @@ class TestLearningActivitiesRebuild:
         )
         assert rebuilt is not None
         assert "View This" in rebuilt
-        assert "TemplateAssets/video.png" in rebuilt
+        assert "web_resources/template-images/icons/video.png" in rebuilt
 
 
 # ---------------------------------------------------------------------------
@@ -566,6 +566,40 @@ class TestFullTemplateShell:
         assert "wiki_content/home-page.html" in manifest
         assert "course_settings/syllabus.html" in manifest
 
+    def test_full_template_shell_injects_course_settings_dependencies(
+        self, tmp_path: Path
+    ):
+        _write_minimal_d2l_manifest(tmp_path)
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            full_template_shell=True,
+        )
+
+        manifest = (tmp_path / "imsmanifest.xml").read_text(encoding="utf-8")
+        assert "web_resources/course_image/course-card.png" in manifest
+        assert "wiki_content/syllabus-2.html" in manifest
+
+    def test_full_template_shell_copies_reference_template_pages(
+        self, tmp_path: Path
+    ):
+        _write_minimal_d2l_manifest(tmp_path)
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            full_template_shell=True,
+        )
+
+        assert (tmp_path / "wiki_content" / "module-1-introduction-and-checklist.html").exists()
+        assert (tmp_path / "wiki_content" / "module-1-learning-activities.html").exists()
+        assert (tmp_path / "wiki_content" / "module-1-lesson-title.html").exists()
+        assert (tmp_path / "wiki_content" / "module-1-review.html").exists()
+        assert (tmp_path / "wiki_content" / "course-summary.html").exists()
+        assert (tmp_path / "wiki_content" / "syllabus-f2f.html").exists()
+        assert (tmp_path / "wiki_content" / "home-page-bps.html").exists()
+
     def test_full_template_shell_writes_real_shell_module_meta_and_web_resources(
         self, tmp_path: Path
     ):
@@ -584,6 +618,7 @@ class TestFullTemplateShell:
         assert "Canvas Resources for Instructors" in module_meta
         assert "Syllabus Quiz" in module_meta
         assert "Course Q&amp;A" in module_meta
+        assert "Module 1: [Title or Theme Here]" in module_meta
         assert "Module 16: Introduction and Checklist" in module_meta
 
         home_page = (tmp_path / "wiki_content" / "home-page.html").read_text(
@@ -591,6 +626,23 @@ class TestFullTemplateShell:
         )
         assert "../web_resources/" in home_page
         assert "TemplateAssets/" not in home_page
+
+    def test_full_template_shell_rebuilds_module_meta_with_d2l_modules(
+        self, tmp_path: Path
+    ):
+        _write_minimal_d2l_manifest(tmp_path)
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            full_template_shell=True,
+        )
+
+        module_meta = (tmp_path / "course_settings" / "module_meta.xml").read_text(
+            encoding="utf-8"
+        )
+        assert "Module 1: Sample" in module_meta
+        assert "Module 16: Course Conclusion" in module_meta
 
     def test_idempotent_if_already_exists(self, tmp_path: Path):
         _write_module_meta(tmp_path, ["Module 1"])

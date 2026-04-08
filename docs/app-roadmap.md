@@ -129,6 +129,52 @@ step-by-step `action` field that appears in the generated Markdown and CSV repor
 
 ---
 
+## Phase 4 additions (from BIS 1400 + ACC 2321 post-import cleanup, 2026-04-08)
+
+These came from live-course cleanup after import, not just pre-import analysis. The
+goal is to reduce the manual Canvas-side cleanup that still happened even when the
+package imported successfully.
+
+- **Canonical starter-template asset mapping** — Stop treating starter-template icons,
+  banners, and shared support files as disposable package-local duplicates when a full
+  starter shell is already being injected. Add a canonical asset manifest for the
+  approved template course and rewrite generated page HTML to that one approved asset
+  set. This should prevent duplicate `template-images`, duplicate `course-card` files,
+  and later broken references caused by deleting the wrong copy in Canvas Files.
+
+- **Clean output file structure matching live Blueprint practice** — Add a post-build
+  package organization pass so generated files land in a predictable Sinclair-style
+  layout from the start (for example `template-images`, `course_image`, course-specific
+  content folders, and PowerPoints) instead of mixing template artifacts, D2L remnants,
+  and generated content under `web_resources/` and scattered import folders. Preserve
+  path safety, but emit the cleaner final structure by default when no collisions exist.
+
+- **Template-aware description injection for assignments, discussions, and quizzes** —
+  Extend the existing page templating logic so supported D2L discussions, assignments,
+  and quiz descriptions are converted directly into the Canvas template wrappers during
+  package generation. This should eliminate the current manual copy/paste step from
+  generated snippets into the live course for common overview/instructions/technical
+  support blocks.
+
+- **Post-import duplicate/orphan audit** — Add an API-backed validation pass that flags:
+  duplicate modules from accidental re-imports, duplicate pages by title/slug,
+  published-but-unlinked pages, empty folders after file cleanup, duplicate template
+  assets where only one is referenced, and legacy D2L carryover content that is still
+  published. This should generate a cleanup report before manual review begins.
+
+- **Course-image and template reserve handling** — Add a rule for course image files
+  and template reserve assets (alternate banners, optional sample images) so the tool
+  distinguishes between "unused but intentionally kept" and "safe to delete". This
+  avoids over-cleaning template reserves while still identifying real leftovers.
+
+- **Template shell course-number hydration** — When starting from the clean Canvas
+  starter template, hydrate course-specific links and known template references with the
+  destination course number before downstream content injection. Generated HTML should
+  then reuse those resolved references consistently instead of introducing a second
+  layer of template-file IDs later.
+
+---
+
 ## Non-negotiable engineering controls
 
 - Deterministic transforms (same input + rules => same output).

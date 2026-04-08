@@ -108,7 +108,7 @@ def build_visual_audit(*, original_zip: Path, converted_zip: Path) -> dict:
             and "ac1a2f" not in tag.lower()
         )
         icon_tags = re.findall(
-            r'<img\b[^>]*src\s*=\s*["\'][^"\']*templateassets/[^"\']+["\'][^>]*>',
+            r'<img\b[^>]*src\s*=\s*["\'][^"\']*(?:templateassets|web_resources/template-images|template-images)/[^"\']+["\'][^>]*>',
             converted,
             flags=re.IGNORECASE,
         )

@@ -1665,7 +1665,7 @@ def apply_canvas_sanitizer(
             )
 
         decorative_template_assets_pattern = re.compile(
-            r"<img\b[^>]*\bsrc\s*=\s*([\"'])[^\"']*templateassets/(?P<name>footer\.png|course-card\.png)(?:[?#][^\"']*)?\1[^>]*>",
+            r"<img\b[^>]*\bsrc\s*=\s*([\"'])[^\"']*(?:templateassets|web_resources/template-images|template-images)/(?P<name>footer\.png|course-card\.png)(?:[?#][^\"']*)?\1[^>]*>",
             flags=re.IGNORECASE,
         )
         removed_decorative_template_assets = 0
@@ -2059,7 +2059,12 @@ def apply_canvas_sanitizer(
         if "max-width" in style_lower:
             return tag
         src_lower = (_extract_attr_value(tag, "src") or "").lower()
-        if "templateassets/" in src_lower:
+        if (
+            "templateassets/" in src_lower
+            or "template-images/icons/" in src_lower
+            or "template-images/banners/" in src_lower
+            or "template-images/sample-images/" in src_lower
+        ):
             return tag
         updated_tag, changed = _merge_inline_style(
             tag, {"max-width": "100%", "height": "auto"}
@@ -2770,6 +2775,26 @@ def apply_best_practice_enforcer(
                 return tag
 
             original = tag
+            class_match = re.search(
+                r'\bclass\s*=\s*(["\'])(?P<class>[^"\']*)\1',
+                tag,
+                flags=re.IGNORECASE,
+            )
+            if class_match is None:
+                tag = tag[:-1] + ' class="inline_disabled">'
+            else:
+                class_tokens = [
+                    token for token in class_match.group("class").split() if token
+                ]
+                class_lower = {token.lower() for token in class_tokens}
+                if "inline_disabled" not in class_lower:
+                    updated_classes = " ".join([*class_tokens, "inline_disabled"])
+                    tag = (
+                        tag[: class_match.start("class")]
+                        + updated_classes
+                        + tag[class_match.end("class") :]
+                    )
+
             if re.search(r"\btarget\s*=", tag, flags=re.IGNORECASE) is None:
                 tag = tag[:-1] + ' target="_blank">'
 
