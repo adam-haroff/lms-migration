@@ -82,6 +82,19 @@ def fetch_course_files(
     return _fetch_paginated_list(first_url=first_url, token=token)
 
 
+def fetch_course_folders(
+    *,
+    base_url: str,
+    course_id: str,
+    token: str,
+    per_page: int = 100,
+) -> list[dict[str, Any]]:
+    base = normalize_base_url(base_url)
+    path = f"/api/v1/courses/{course_id}/folders"
+    first_url = _build_url(base, path, {"per_page": per_page})
+    return _fetch_paginated_list(first_url=first_url, token=token)
+
+
 def fetch_course_pages(
     *,
     base_url: str,
@@ -121,6 +134,27 @@ def fetch_course_assignments(
     return _fetch_paginated_list(first_url=first_url, token=token)
 
 
+def update_course_assignment_description(
+    *,
+    base_url: str,
+    course_id: str,
+    assignment_id: str | int,
+    description_html: str,
+    token: str,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/courses/{course_id}/assignments/{assignment_id}"
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="PUT",
+        form_data={"assignment[description]": description_html},
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas assignment update response format.")
+    return payload
+
+
 def fetch_course_discussion_topics(
     *,
     base_url: str,
@@ -132,6 +166,27 @@ def fetch_course_discussion_topics(
     path = f"/api/v1/courses/{course_id}/discussion_topics"
     first_url = _build_url(base, path, {"per_page": per_page})
     return _fetch_paginated_list(first_url=first_url, token=token)
+
+
+def update_discussion_topic_message(
+    *,
+    base_url: str,
+    course_id: str,
+    topic_id: str | int,
+    message_html: str,
+    token: str,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/courses/{course_id}/discussion_topics/{topic_id}"
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="PUT",
+        form_data={"message": message_html},
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas discussion update response format.")
+    return payload
 
 
 def fetch_course_announcements(

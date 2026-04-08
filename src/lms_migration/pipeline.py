@@ -819,6 +819,7 @@ def _build_report(
     math_handling: str = "preserve-semantic",
     reference_alignment: dict | None = None,
     template_overlay: dict | None = None,
+    file_layout: dict | None = None,
 ) -> dict:
     total_files = len(file_results)
     changed_files = sum(1 for result in file_results if result.changed)
@@ -876,6 +877,8 @@ def _build_report(
         report["reference_alignment"] = reference_alignment
     if template_overlay is not None:
         report["template_overlay"] = template_overlay
+    if file_layout is not None:
+        report["file_layout"] = file_layout
 
     return report
 
@@ -936,6 +939,7 @@ def _load_reference_alignment(reference_audit_json: Path | None) -> dict | None:
 
 def _write_markdown_report(report: dict, output_path: Path) -> None:
     summary = report["summary"]
+    file_layout = report.get("file_layout")
     lines = [
         "# LMS Migration Pilot Report",
         "",
@@ -956,6 +960,20 @@ def _write_markdown_report(report: dict, output_path: Path) -> None:
         f"- Accessibility issues: {summary['accessibility_issues']}",
         "",
     ]
+    if isinstance(file_layout, dict):
+        lines.extend(
+            [
+                "## File Layout",
+                "",
+                f"- Course-content root: `{file_layout.get('course_content_root', '') or 'course-content'}`",
+                f"- Loose support files considered: {file_layout.get('loose_files_considered', 0)}",
+                f"- Loose support files relocated: {file_layout.get('files_relocated', 0)}",
+                f"- Collisions skipped: {file_layout.get('collisions_skipped', 0)}",
+                f"- Manifest files changed: {file_layout.get('manifest_files_changed', 0)}",
+                f"- Manifest hrefs rewritten: {file_layout.get('manifest_hrefs_rewritten', 0)}",
+                "",
+            ]
+        )
 
     issue_summary = report.get("issue_summary", {})
     top_manual_reasons = issue_summary.get("top_manual_review_reasons", [])
@@ -1338,6 +1356,23 @@ _COURSE_CONTENT_FILE_EXTENSIONS: frozenset[str] = frozenset(
         ".zip",
     }
 )
+_COURSE_CONTENT_RELOCATABLE_EXTENSIONS: frozenset[str] = frozenset(
+    _COURSE_CONTENT_FILE_EXTENSIONS - {".html", ".htm", ".zip"}
+)
+_COURSE_CONTENT_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+)
+_COURSE_CONTENT_POWERPOINT_EXTENSIONS: frozenset[str] = frozenset({".ppt", ".pptx"})
+_COURSE_CONTENT_ROOT_FOLDER = "course-content"
+_COURSE_CONTENT_IMAGES_FOLDER = "course-images"
+_COURSE_CONTENT_POWERPOINTS_FOLDER = "powerpoints"
+_COURSE_CONTENT_MYSTERY_SHOP_FOLDER = "mystery-shop"
+_MYSTERY_SHOP_FILE_MARKERS: tuple[str, ...] = (
+    "mystery shop",
+    "mystery-shop",
+    "mystery_shop",
+    "mysteryshop",
+)
 _COURSE_ALIGNMENT_DOC_EXTENSIONS: frozenset[str] = frozenset(
     {".doc", ".docx", ".pdf", ".xls", ".xlsx"}
 )
@@ -1413,6 +1448,128 @@ def _is_course_content_file(path_text: str) -> bool:
     if _is_package_metadata_file(normalized):
         return False
     return Path(normalized).suffix.lower() in _COURSE_CONTENT_FILE_EXTENSIONS
+
+
+def _recommended_course_content_destination(
+    path_text: str,
+    *,
+    course_content_root: str = _COURSE_CONTENT_ROOT_FOLDER,
+) -> str | None:
+    normalized = path_text.strip().replace("\\", "/").lstrip("/")
+    if not normalized or normalized.endswith("/") or "/" in normalized:
+        return None
+    if _is_package_metadata_file(normalized):
+        return None
+
+    basename = Path(normalized).name
+    suffix = Path(basename).suffix.lower()
+    if suffix not in _COURSE_CONTENT_RELOCATABLE_EXTENSIONS:
+        return None
+
+    lowered_basename = basename.lower()
+    if suffix in _COURSE_CONTENT_IMAGE_EXTENSIONS:
+        return (
+            f"{course_content_root}/{_COURSE_CONTENT_IMAGES_FOLDER}/{basename}"
+        )
+    if suffix in _COURSE_CONTENT_POWERPOINT_EXTENSIONS:
+        return (
+            f"{course_content_root}/{_COURSE_CONTENT_POWERPOINTS_FOLDER}/{basename}"
+        )
+    if any(marker in lowered_basename for marker in _MYSTERY_SHOP_FILE_MARKERS):
+        return (
+            f"{course_content_root}/{_COURSE_CONTENT_MYSTERY_SHOP_FOLDER}/{basename}"
+        )
+    return f"{course_content_root}/{basename}"
+
+
+def _normalize_loose_course_content_layout(
+    unpack_dir: Path,
+    *,
+    course_content_root: str = _COURSE_CONTENT_ROOT_FOLDER,
+) -> tuple[dict[str, str], dict]:
+    relocated: dict[str, str] = {}
+    relocated_samples: list[str] = []
+    collision_samples: list[str] = []
+    loose_files_considered = 0
+    collisions_skipped = 0
+
+    for file_path in sorted(unpack_dir.iterdir(), key=lambda item: item.name.lower()):
+        if not file_path.is_file():
+            continue
+        destination_relative = _recommended_course_content_destination(
+            file_path.name,
+            course_content_root=course_content_root,
+        )
+        if not destination_relative:
+            continue
+
+        loose_files_considered += 1
+        destination_path = unpack_dir / Path(destination_relative)
+        if destination_path.exists():
+            collisions_skipped += 1
+            if len(collision_samples) < 10:
+                collision_samples.append(
+                    f"{file_path.name} -> {destination_relative}"
+                )
+            continue
+
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.rename(destination_path)
+        relocated[file_path.name] = destination_relative
+        if len(relocated_samples) < 10:
+            relocated_samples.append(f"{file_path.name} -> {destination_relative}")
+
+    summary = {
+        "enabled": True,
+        "course_content_root": course_content_root,
+        "loose_files_considered": loose_files_considered,
+        "files_relocated": len(relocated),
+        "collisions_skipped": collisions_skipped,
+        "relocated_paths_sample": relocated_samples,
+        "collision_paths_sample": collision_samples,
+    }
+    return relocated, summary
+
+
+def _rewrite_manifest_hrefs_for_moved_files(
+    unpack_dir: Path,
+    moved_paths: dict[str, str],
+) -> dict:
+    if not moved_paths:
+        return {"manifest_files_changed": 0, "manifest_hrefs_rewritten": 0}
+
+    manifest_files_changed = 0
+    manifest_hrefs_rewritten = 0
+
+    for manifest_path in sorted(unpack_dir.rglob("imsmanifest.xml")):
+        if not manifest_path.is_file():
+            continue
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+        manifest_changed = False
+        rewritten_here = 0
+
+        for element in root.iter():
+            for key, value in list(element.attrib.items()):
+                if _local_name(key) != "href":
+                    continue
+                normalized_value = value.strip().replace("\\", "/").lstrip("./")
+                replacement = moved_paths.get(normalized_value)
+                if not replacement or replacement == value:
+                    continue
+                element.set(key, replacement)
+                manifest_changed = True
+                rewritten_here += 1
+
+        if manifest_changed:
+            tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+            manifest_files_changed += 1
+            manifest_hrefs_rewritten += rewritten_here
+
+    return {
+        "manifest_files_changed": manifest_files_changed,
+        "manifest_hrefs_rewritten": manifest_hrefs_rewritten,
+    }
 
 
 def _audit_rubrics(zip_path: Path) -> list[dict]:
@@ -3034,6 +3191,7 @@ def run_migration(
     image_layout_mode: str = "safe-block",
     template_merge: bool = False,
     full_template_shell: bool = False,
+    seeded_starter_course: bool = False,
     intro_checklist_handling: str = "rebuild-when-confident",
     learning_activities_handling: str = "preserve",
 ) -> MigrationOutput:
@@ -3044,6 +3202,10 @@ def run_migration(
     if full_template_shell and template_package is None:
         raise ValueError(
             "Full template shell requires a template package."
+        )
+    if full_template_shell and seeded_starter_course:
+        raise ValueError(
+            "Seeded starter course mode cannot be combined with full template shell packaging."
         )
 
     rules = load_rules(rules_path)
@@ -3063,6 +3225,7 @@ def run_migration(
     template_overlay_report_payload: dict | None = None
     template_overlay_context = None
     template_materialization_summary: dict | None = None
+    file_layout_summary: dict | None = None
     if template_package is not None:
         template_overlay_context = build_template_overlay_context(
             TemplateOverlayConfig(
@@ -3074,6 +3237,7 @@ def run_migration(
                 apply_divider_standards=apply_template_visual_standards
                 and apply_template_divider_standards,
                 image_layout_mode=image_layout_mode,
+                use_template_web_resources=bool(full_template_shell),
             )
         )
 
@@ -3086,10 +3250,29 @@ def run_migration(
             zf.extractall(unpack_dir)
 
         if template_overlay_context is not None:
-            template_materialization_summary = materialize_template_assets(
-                context=template_overlay_context,
-                destination_root=unpack_dir,
-            )
+            if seeded_starter_course and not full_template_shell:
+                template_materialization_summary = {
+                    "asset_dir": "starter-course-assets",
+                    "assets_copied": 0,
+                    "assets_skipped_collisions": 0,
+                    "assets_skipped_existing": 0,
+                    "copied_paths_sample": [],
+                    "skipped_materialization": True,
+                    "mode": "seeded-starter-course",
+                }
+            else:
+                template_materialization_summary = materialize_template_assets(
+                    context=template_overlay_context,
+                    destination_root=unpack_dir,
+                )
+
+        moved_course_files, file_layout_summary = _normalize_loose_course_content_layout(
+            unpack_dir,
+            course_content_root=_COURSE_CONTENT_ROOT_FOLDER,
+        )
+        file_layout_summary.update(
+            _rewrite_manifest_hrefs_for_moved_files(unpack_dir, moved_course_files)
+        )
 
         manifest_found = any(unpack_dir.rglob("imsmanifest.xml"))
 
@@ -3878,6 +4061,7 @@ def run_migration(
                 intro_checklist_handling=intro_checklist_handling,
                 learning_activities_handling=learning_activities_handling,
                 full_template_shell=full_template_shell,
+                seeded_starter_course=seeded_starter_course,
             )
             if template_overlay_context is not None:
                 for html_file in sorted(unpack_dir.rglob("*.html")):
@@ -3920,6 +4104,7 @@ def run_migration(
                     "apply_divider_standards": bool(apply_template_divider_standards),
                     "image_layout_mode": image_layout_mode,
                     "apply_module_structure": bool(apply_template_module_structure),
+                    "seeded_starter_course": bool(seeded_starter_course),
                 }
                 if template_overlay_context is not None
                 else {
@@ -3928,6 +4113,7 @@ def run_migration(
                     "apply_divider_standards": bool(apply_template_divider_standards),
                     "image_layout_mode": image_layout_mode,
                     "apply_module_structure": bool(apply_template_module_structure),
+                    "seeded_starter_course": bool(seeded_starter_course),
                 }
             ),
             "summary": (
@@ -3946,6 +4132,7 @@ def run_migration(
                 else ""
             ),
         },
+        file_layout=file_layout_summary,
     )
 
     report_json.write_text(json.dumps(report, indent=2), encoding="utf-8")

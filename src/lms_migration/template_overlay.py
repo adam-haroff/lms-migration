@@ -41,6 +41,8 @@ _SUPPORTED_TEMPLATE_EXTENSIONS = {
 }
 _TEMPLATE_WEB_ASSET_ROOT = "web_resources/template-images"
 _TEMPLATE_WEB_ICON_DIR = f"{_TEMPLATE_WEB_ASSET_ROOT}/icons"
+_TEMPLATE_CANONICAL_ASSET_ROOT = "template-images"
+_TEMPLATE_CANONICAL_ICON_DIR = f"{_TEMPLATE_CANONICAL_ASSET_ROOT}/icons"
 _IGNORED_UNRESOLVED_BASENAMES = {
     "all.min.css",
     "bootstrap.min.css",
@@ -181,6 +183,21 @@ def _preferred_asset_path(paths: list[str]) -> str:
     return ""
 
 
+def _canonicalize_template_asset_path(
+    path: str,
+    *,
+    use_template_web_resources: bool,
+) -> str:
+    normalized = path.strip().replace("\\", "/").lstrip("/")
+    if use_template_web_resources:
+        return normalized
+    if normalized.startswith("web_resources/template-images/"):
+        return normalized[len("web_resources/") :]
+    if normalized.startswith("web_resources/course_image/"):
+        return normalized[len("web_resources/") :]
+    return normalized
+
+
 def _resolve_template_asset_path(
     *,
     basename: str,
@@ -197,7 +214,16 @@ def _build_template_asset_ref(
 ) -> str:
     asset_path = _resolve_template_asset_path(basename=basename, context=context)
     if not asset_path:
-        return f"{_TEMPLATE_WEB_ICON_DIR}/{_normalize_basename(basename)}"
+        icon_root = (
+            _TEMPLATE_WEB_ICON_DIR
+            if context.use_template_web_resources
+            else _TEMPLATE_CANONICAL_ICON_DIR
+        )
+        return f"{icon_root}/{_normalize_basename(basename)}"
+    asset_path = _canonicalize_template_asset_path(
+        asset_path,
+        use_template_web_resources=context.use_template_web_resources,
+    )
     relative_path = _normalize_overlay_file_path(file_path)
     parent = posixpath.dirname(relative_path)
     if not parent:
@@ -914,6 +940,7 @@ class TemplateOverlayConfig:
     apply_divider_standards: bool = True
     image_layout_mode: str = "safe-block"
     inject_default_banner: bool = False
+    use_template_web_resources: bool = True
 
 
 @dataclass
@@ -929,6 +956,7 @@ class TemplateOverlayContext:
     apply_divider_standards: bool
     image_layout_mode: str
     inject_default_banner: bool = False
+    use_template_web_resources: bool = True
 
 
 def build_template_overlay_context(
@@ -961,6 +989,7 @@ def build_template_overlay_context(
         apply_divider_standards=bool(config.apply_divider_standards),
         image_layout_mode=str(config.image_layout_mode or "safe-block").strip().lower(),
         inject_default_banner=bool(config.inject_default_banner),
+        use_template_web_resources=bool(config.use_template_web_resources),
     )
 
 
@@ -2186,17 +2215,25 @@ def materialize_template_assets(
             if not source_name:
                 skipped_collisions += 1
                 continue
-            target = destination_root / source_name
+            target_rel = _canonicalize_template_asset_path(
+                source_name,
+                use_template_web_resources=context.use_template_web_resources,
+            )
+            target = destination_root / target_rel
             if target.exists():
                 skipped_existing += 1
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(zf.read(source_name))
             copied += 1
-            copied_paths.append(source_name)
+            copied_paths.append(target_rel)
 
     return {
-        "asset_dir": _TEMPLATE_WEB_ASSET_ROOT,
+        "asset_dir": (
+            _TEMPLATE_WEB_ASSET_ROOT
+            if context.use_template_web_resources
+            else _TEMPLATE_CANONICAL_ASSET_ROOT
+        ),
         "assets_copied": copied,
         "assets_skipped_collisions": skipped_collisions,
         "assets_skipped_existing": skipped_existing,

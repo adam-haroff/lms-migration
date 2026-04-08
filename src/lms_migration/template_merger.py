@@ -54,9 +54,10 @@ Home page auto-selection
 Notes
 -----
 * ``$IMS-CC-FILEBASE$/template-images/...`` URLs in injected template HTML are
-  rewritten to relative ``web_resources/template-images/...`` paths so they
-  resolve against the real template-course asset tree that is materialised
-  earlier in the pipeline.
+  rewritten either to relative ``web_resources/template-images/...`` paths in
+  full starter-shell mode, or to canonical ``template-images/...`` paths in
+  overlay-only mode so the generated package better matches the final Canvas
+  file organization.
 """
 
 from __future__ import annotations
@@ -634,6 +635,7 @@ def _build_module_meta_xml(
     ns: str = _MODULE_META_NS,
     template_shell_modules: dict[str, ET.Element] | None = None,
     template_modules_in_order: list[ET.Element] | None = None,
+    include_default_template_shell: bool = True,
 ) -> str:
     """Build the ``module_meta.xml`` content string.
 
@@ -714,58 +716,69 @@ def _build_module_meta_xml(
             root, encoding="unicode"
         )
 
-    instructor_module = shell_modules.get(_TEMPLATE_INSTRUCTOR_MODULE_TITLE)
-    if instructor_module is not None:
-        root.append(_position_module(instructor_module, 1))
-    else:
-        root.append(
-            _build_module_element(
-                ns,
-                _TEMPLATE_INSTRUCTOR_MODULE_ID,
-                _TEMPLATE_INSTRUCTOR_MODULE_TITLE,
-                position=1,
-                workflow_state="unpublished",
+    if include_default_template_shell:
+        instructor_module = shell_modules.get(_TEMPLATE_INSTRUCTOR_MODULE_TITLE)
+        if instructor_module is not None:
+            root.append(_position_module(instructor_module, 1))
+        else:
+            root.append(
+                _build_module_element(
+                    ns,
+                    _TEMPLATE_INSTRUCTOR_MODULE_ID,
+                    _TEMPLATE_INSTRUCTOR_MODULE_TITLE,
+                    position=1,
+                    workflow_state="unpublished",
+                )
             )
-        )
 
-    start_here_module = shell_modules.get(_TEMPLATE_START_HERE_TITLE)
-    if start_here_module is not None:
-        root.append(_position_module(start_here_module, 2))
-    else:
-        root.append(
-            _build_module_element(
-                ns,
-                _TEMPLATE_START_HERE_ID,
-                _TEMPLATE_START_HERE_TITLE,
-                position=2,
+        start_here_module = shell_modules.get(_TEMPLATE_START_HERE_TITLE)
+        if start_here_module is not None:
+            root.append(_position_module(start_here_module, 2))
+        else:
+            root.append(
+                _build_module_element(
+                    ns,
+                    _TEMPLATE_START_HERE_ID,
+                    _TEMPLATE_START_HERE_TITLE,
+                    position=2,
+                )
             )
-        )
 
-    # 3 … N. D2L content modules
-    for idx, title in enumerate(d2l_module_titles, start=3):
-        root.append(
-            _build_module_element(
-                ns,
-                _make_module_id(title),
-                title,
-                position=idx,
+        # 3 … N. D2L content modules
+        for idx, title in enumerate(d2l_module_titles, start=3):
+            root.append(
+                _build_module_element(
+                    ns,
+                    _make_module_id(title),
+                    title,
+                    position=idx,
+                )
             )
-        )
 
-    # N+1. Course Conclusion
-    conclusion_pos = len(d2l_module_titles) + 3
-    conclusion_module = shell_modules.get(_TEMPLATE_CONCLUSION_TITLE)
-    if conclusion_module is not None:
-        root.append(_position_module(conclusion_module, conclusion_pos))
-    else:
-        root.append(
-            _build_module_element(
-                ns,
-                _TEMPLATE_CONCLUSION_ID,
-                _TEMPLATE_CONCLUSION_TITLE,
-                position=conclusion_pos,
+        # N+1. Course Conclusion
+        conclusion_pos = len(d2l_module_titles) + 3
+        conclusion_module = shell_modules.get(_TEMPLATE_CONCLUSION_TITLE)
+        if conclusion_module is not None:
+            root.append(_position_module(conclusion_module, conclusion_pos))
+        else:
+            root.append(
+                _build_module_element(
+                    ns,
+                    _TEMPLATE_CONCLUSION_ID,
+                    _TEMPLATE_CONCLUSION_TITLE,
+                    position=conclusion_pos,
+                )
             )
-        )
+    else:
+        for idx, title in enumerate(d2l_module_titles, start=1):
+            root.append(
+                _build_module_element(
+                    ns,
+                    _make_module_id(title),
+                    title,
+                    position=idx,
+                )
+            )
 
     # Pretty serialisation
     ET.indent(root, space="  ")
@@ -780,6 +793,7 @@ def _write_module_meta(
     *,
     template_shell_modules: dict[str, ET.Element] | None = None,
     template_modules_in_order: list[ET.Element] | None = None,
+    include_default_template_shell: bool = True,
     overwrite: bool = False,
 ) -> None:
     """Generate and write ``course_settings/module_meta.xml``.
@@ -796,6 +810,7 @@ def _write_module_meta(
         d2l_module_titles,
         template_shell_modules=template_shell_modules,
         template_modules_in_order=template_modules_in_order,
+        include_default_template_shell=include_default_template_shell,
     )
     meta_path.write_text(xml, encoding="utf-8")
 
@@ -1355,7 +1370,12 @@ def _template_asset_prefix(
     use_template_web_resources: bool = True,
 ) -> str:
     prefix = _relative_path_prefix(path)
-    return f"{prefix}web_resources/template-images/icons/"
+    asset_root = (
+        "web_resources/template-images/icons/"
+        if use_template_web_resources
+        else "template-images/icons/"
+    )
+    return f"{prefix}{asset_root}"
 
 
 def _rewrite_template_asset_urls(
@@ -1370,7 +1390,9 @@ def _rewrite_template_asset_urls(
         html: HTML text to process.
         relative_path: Relative file path within the generated package.
     """
-    prefix = f"{_relative_path_prefix(relative_path)}web_resources/"
+    prefix = _relative_path_prefix(relative_path)
+    if use_template_web_resources:
+        prefix = f"{prefix}web_resources/"
 
     def _sub_full(m: re.Match) -> str:
         return prefix + m.group(1)
@@ -1899,6 +1921,7 @@ def run_template_merge(
     intro_checklist_handling: str = "rebuild-when-confident",
     learning_activities_handling: str = "preserve",
     full_template_shell: bool = False,
+    seeded_starter_course: bool = False,
 ) -> TemplateMergeResult:
     """Apply the template shell merger to processed HTML files in *unpack_dir*.
 
@@ -1913,10 +1936,14 @@ def run_template_merge(
         :class:`TemplateMergeResult` summarising what was changed.
     """
     result = TemplateMergeResult()
+    if full_template_shell and seeded_starter_course:
+        raise ValueError(
+            "Seeded starter course mode cannot be combined with full template shell packaging."
+        )
 
     # Load template wiki pages (used as shells / for standalone additions)
     template_pages = _load_template_wiki_pages(template_package)
-    use_template_web_resources = True
+    use_template_web_resources = bool(full_template_shell)
     template_root: ET.Element | None = None
     template_shell_modules: dict[str, ET.Element] | None = None
     template_modules_in_order: list[ET.Element] | None = None
@@ -2051,6 +2078,15 @@ def run_template_merge(
             )
 
         elif role == PageRole.WELCOME_INSTRUCTOR:
+            if seeded_starter_course:
+                result.pages.append(
+                    MergedPageRecord(
+                        original_path=rel,
+                        role=role,
+                        action="passthrough",
+                    )
+                )
+                continue
             welcome_path = rel
             welcome_content = content
             result.pages.append(
@@ -2072,7 +2108,11 @@ def run_template_merge(
             )
 
     # Build about-the-instructor if we found a welcome page
-    if welcome_path is not None and "about-the-instructor.html" in template_pages:
+    if (
+        not seeded_starter_course
+        and welcome_path is not None
+        and "about-the-instructor.html" in template_pages
+    ):
         about_html = _fill_about_instructor(
             welcome_d2l_html=welcome_content,  # type: ignore[possibly-undefined]
             template_html=template_pages["about-the-instructor.html"],
@@ -2109,7 +2149,9 @@ def run_template_merge(
         welcome_file.write_text(redirect_html, encoding="utf-8")
 
     # Add standalone template pages (only if not already present)
-    for dest_rel in ([] if full_template_shell else _STANDALONE_TEMPLATE_PAGES):
+    for dest_rel in (
+        [] if full_template_shell or seeded_starter_course else _STANDALONE_TEMPLATE_PAGES
+    ):
         dest = unpack_dir / dest_rel
         dest_basename = Path(dest_rel).name
 
@@ -2143,12 +2185,14 @@ def run_template_merge(
     # correct divisional home-page template.
     manifest_path = next(unpack_dir.rglob("imsmanifest.xml"), None)
     course_prefix = _course_prefix_from_manifest(manifest_path) if manifest_path else ""
-    home_variant = _inject_home_page(
-        unpack_dir,
-        template_pages,
-        course_prefix,
-        use_template_web_resources=use_template_web_resources,
-    )
+    home_variant = None
+    if not seeded_starter_course:
+        home_variant = _inject_home_page(
+            unpack_dir,
+            template_pages,
+            course_prefix,
+            use_template_web_resources=use_template_web_resources,
+        )
     if home_variant:
         result.added_template_pages.append(
             f"wiki_content/home-page.html ({home_variant})"
@@ -2171,6 +2215,7 @@ def run_template_merge(
         d2l_modules,
         template_shell_modules=template_shell_modules,
         template_modules_in_order=template_modules_in_order if full_template_shell else None,
+        include_default_template_shell=not seeded_starter_course,
         overwrite=full_template_shell,
     )
 

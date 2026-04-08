@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlparse
 
 from .canvas_api import (
     fetch_course_files,
+    fetch_course_folders,
     fetch_course_page,
     normalize_base_url,
     update_course_page_body,
@@ -29,10 +30,15 @@ _ANCHOR_TAG_PATTERN = re.compile(r"<a\b[^>]*>", flags=re.IGNORECASE)
 class _FileRef:
     file_id: str
     name: str
+    folder_path: str = ""
 
 
 def _normalize_basename(value: str) -> str:
     return posixpath.basename(value.strip().replace("\\", "/")).strip().lower()
+
+
+def _normalize_folder_path(value: str) -> str:
+    return value.strip().replace("\\", "/").strip("/").lower()
 
 
 def _is_local_candidate(url: str) -> bool:
@@ -47,8 +53,83 @@ def _is_local_candidate(url: str) -> bool:
     return True
 
 
-def _build_file_index(files: list[dict]) -> tuple[dict[str, list[_FileRef]], dict[str, int]]:
+def _build_folder_path_index(folders: list[dict]) -> dict[str, str]:
+    folder_paths: dict[str, str] = {}
+    for item in folders:
+        if not isinstance(item, dict):
+            continue
+        folder_id = str(item.get("id", "")).strip()
+        if not folder_id:
+            continue
+        full_name = str(item.get("full_name") or item.get("name") or "").strip()
+        if not full_name:
+            continue
+        folder_paths[folder_id] = _normalize_folder_path(full_name)
+    return folder_paths
+
+
+def _file_ref_preference_rank(file_ref: _FileRef) -> tuple[int, int, str]:
+    folder_path = _normalize_folder_path(file_ref.folder_path)
+    canonical_prefixes = (
+        "course files/course_image",
+        "course files/course-content/course-images",
+        "course files/course_content/course-images",
+        "course files/course-content/powerpoints",
+        "course files/course_content/powerpoints",
+        "course files/course-content/mystery-shop",
+        "course files/course_content/mystery-shop",
+        "course files/course-content",
+        "course files/course_content",
+        "course files/template-images/icons",
+        "course files/template-images/banners",
+        "course files/template-images/buttons",
+        "course files/template-images/footers",
+        "course files/template-images/sample-images",
+    )
+    deprioritized_prefixes = (
+        "course files/web_resources/template-images",
+        "course files/web_resources/course_image",
+        "course files/web_resources",
+        "course files/course_content/d2l-images",
+    )
+
+    if not folder_path:
+        priority = 50
+    elif any(folder_path.startswith(prefix) for prefix in canonical_prefixes):
+        priority = 0
+    elif any(folder_path.startswith(prefix) for prefix in deprioritized_prefixes):
+        priority = 20
+    else:
+        priority = 10
+
+    return priority, len(folder_path), folder_path
+
+
+def _preferred_file_ref(matches: list[_FileRef]) -> _FileRef | None:
+    if len(matches) <= 1:
+        return matches[0] if matches else None
+
+    ranked = sorted(matches, key=_file_ref_preference_rank)
+    if not ranked:
+        return None
+
+    best = ranked[0]
+    best_priority = _file_ref_preference_rank(best)[0]
+    best_candidates = [
+        match for match in ranked if _file_ref_preference_rank(match)[0] == best_priority
+    ]
+    if len(best_candidates) == 1:
+        return best
+    return None
+
+
+def _build_file_index(
+    files: list[dict],
+    *,
+    folder_paths: dict[str, str] | None = None,
+) -> tuple[dict[str, list[_FileRef]], dict[str, int]]:
     by_basename: dict[str, list[_FileRef]] = defaultdict(list)
+    resolved_folder_paths = folder_paths or {}
     for item in files:
         if not isinstance(item, dict):
             continue
@@ -61,10 +142,26 @@ def _build_file_index(files: list[dict]) -> tuple[dict[str, list[_FileRef]], dic
         basename = _normalize_basename(name)
         if not basename:
             continue
-        by_basename[basename].append(_FileRef(file_id=file_id, name=name))
+        folder_id = str(item.get("folder_id", "")).strip()
+        by_basename[basename].append(
+            _FileRef(
+                file_id=file_id,
+                name=name,
+                folder_path=resolved_folder_paths.get(folder_id, ""),
+            )
+        )
 
-    collisions = {name: len(matches) for name, matches in by_basename.items() if len(matches) > 1}
-    return dict(by_basename), collisions
+    collisions: dict[str, int] = {}
+    resolved: dict[str, list[_FileRef]] = {}
+    for basename, matches in by_basename.items():
+        preferred = _preferred_file_ref(matches)
+        if preferred is not None:
+            resolved[basename] = [preferred]
+        else:
+            resolved[basename] = matches
+        if len(matches) > 1:
+            collisions[basename] = len(matches)
+    return resolved, collisions
 
 
 def _extract_issue_pages(issues: list[dict]) -> list[str]:
@@ -270,7 +367,13 @@ def auto_relink_missing_links(
         course_id=course_id,
         token=token,
     )
-    file_index, collisions = _build_file_index(files)
+    folders = fetch_course_folders(
+        base_url=base_url,
+        course_id=course_id,
+        token=token,
+    )
+    folder_paths = _build_folder_path_index(folders)
+    file_index, collisions = _build_file_index(files, folder_paths=folder_paths)
     alias_map, alias_map_source = _load_alias_map(alias_map_json_path)
 
     page_results: list[dict] = []

@@ -404,8 +404,8 @@ class TestLearningActivitiesRebuild:
             path_seed="Learning Activities.html",
         )
         assert rebuilt is not None
-        assert "web_resources/template-images/icons/paper.png" in rebuilt
-        assert "web_resources/template-images/icons/folder.png" in rebuilt
+        assert "template-images/icons/paper.png" in rebuilt
+        assert "template-images/icons/folder.png" in rebuilt
         assert "Do This" in rebuilt
         assert "Explore This" in rebuilt
         assert "<li>Read Chapter 1</li>" in rebuilt
@@ -424,7 +424,7 @@ class TestLearningActivitiesRebuild:
         )
         assert rebuilt is not None
         assert "View This" in rebuilt
-        assert "web_resources/template-images/icons/video.png" in rebuilt
+        assert "template-images/icons/video.png" in rebuilt
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +626,77 @@ class TestFullTemplateShell:
         )
         assert "../web_resources/" in home_page
         assert "TemplateAssets/" not in home_page
+
+
+class TestSeededStarterCourse:
+    def test_seeded_starter_course_skips_shell_pages_and_home_page(
+        self, tmp_path: Path
+    ):
+        _write_minimal_d2l_manifest(tmp_path)
+        welcome_dir = tmp_path / "CourseOverview"
+        welcome_dir.mkdir(parents=True, exist_ok=True)
+        welcome_page = welcome_dir / "Welcome From the Instructor.html"
+        welcome_page.write_text(
+            textwrap.dedent(
+                """\
+                <html>
+                  <head><title>Welcome From the Instructor</title></head>
+                  <body><p>Welcome from faculty.</p></body>
+                </html>
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            seeded_starter_course=True,
+        )
+
+        assert not (tmp_path / "wiki_content" / "home-page.html").exists()
+        assert not (tmp_path / "CourseOverview" / "About the Instructor.html").exists()
+        assert "Welcome from faculty." in welcome_page.read_text(encoding="utf-8")
+
+    def test_seeded_starter_course_module_meta_contains_only_content_modules(
+        self, tmp_path: Path
+    ):
+        manifest = tmp_path / "imsmanifest.xml"
+        manifest.write_text(
+            textwrap.dedent(
+                """\
+                <?xml version="1.0" encoding="UTF-8"?>
+                <manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+                  <organizations>
+                    <organization identifier="d2l_org">
+                      <item identifier="module1"><title>Module 1: Sample</title></item>
+                      <item identifier="module2"><title>Module 2: Another</title></item>
+                    </organization>
+                  </organizations>
+                  <resources />
+                </manifest>
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            seeded_starter_course=True,
+        )
+
+        module_meta = (tmp_path / "course_settings" / "module_meta.xml").read_text(
+            encoding="utf-8"
+        )
+        assert "Module 1: Sample" in module_meta
+        assert "Module 2: Another" in module_meta
+        assert _TEMPLATE_INSTRUCTOR_MODULE_TITLE not in module_meta
+        assert _TEMPLATE_START_HERE_TITLE not in module_meta
+        assert _TEMPLATE_CONCLUSION_TITLE not in module_meta
+
+
+class TestTemplateMergeModuleMeta:
 
     def test_full_template_shell_rebuilds_module_meta_with_d2l_modules(
         self, tmp_path: Path

@@ -16,12 +16,18 @@ from .canvas_api import (
     fetch_course_assignments,
     fetch_course_discussion_topics,
     fetch_course_files,
+    fetch_course_folders,
     fetch_course_page,
     fetch_course_pages,
     normalize_base_url,
     update_course_page_body,
 )
-from .canvas_post_import import _build_file_index, _load_alias_map, _rewrite_page_body
+from .canvas_post_import import (
+    _build_file_index,
+    _build_folder_path_index,
+    _load_alias_map,
+    _rewrite_page_body,
+)
 
 
 _LEGACY_D2L_RE = re.compile(r"^/?(?:d2l/|content/enforced/)", flags=re.IGNORECASE)
@@ -419,7 +425,13 @@ def run_live_link_audit(
         course_id=course_id,
         token=token,
     )
-    file_index, collisions = _build_file_index(files)
+    folders = fetch_course_folders(
+        base_url=normalized_base,
+        course_id=course_id,
+        token=token,
+    )
+    folder_paths = _build_folder_path_index(folders)
+    file_index, collisions = _build_file_index(files, folder_paths=folder_paths)
     alias_map, alias_source = _load_alias_map(alias_map_json_path)
 
     page_summaries = fetch_course_pages(

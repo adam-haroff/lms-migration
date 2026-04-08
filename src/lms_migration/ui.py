@@ -24,8 +24,10 @@ from .canvas_api import (
     fetch_migration_issues,
     normalize_base_url,
 )
+from .canvas_cleanup_audit import run_canvas_cleanup_audit
 from .canvas_preview import CanvasPreviewError, run_preview
 from .canvas_post_import import auto_relink_missing_links
+from .canvas_assessment_templates import auto_wrap_assessment_descriptions
 from .canvas_live_audit import run_live_link_audit
 from .canvas_snapshot import snapshot_canvas_course
 from .fix_checklist import build_fix_checklist
@@ -134,6 +136,7 @@ class LMSMigrationUI:
         self.enable_template_overlay_var = tk.BooleanVar(value=True)
         self.template_merge_var = tk.BooleanVar(value=True)
         self.full_template_shell_var = tk.BooleanVar(value=False)
+        self.seeded_starter_course_var = tk.BooleanVar(value=False)
         self.template_package_var = tk.StringVar(
             value=(
                 str(default_template_package)
@@ -209,6 +212,7 @@ class LMSMigrationUI:
         )
         self.use_template_alias_map_var = tk.BooleanVar(value=True)
         self.live_audit_apply_safe_fixes_var = tk.BooleanVar(value=True)
+        self.post_import_wrap_assessments_var = tk.BooleanVar(value=True)
         self.ab_variant_var = tk.StringVar(value="A")
         self.ab_include_auto_relink_var = tk.BooleanVar(value=True)
         self.show_canvas_advanced_var = tk.BooleanVar(value=False)
@@ -883,6 +887,14 @@ class LMSMigrationUI:
         self.full_template_shell_check.grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
+        self.seeded_starter_course_check = ttk.Checkbutton(
+            tmpl_row,
+            text="Target existing starter template course (reuse shell/assets post-import)",
+            variable=self.seeded_starter_course_var,
+        )
+        self.seeded_starter_course_check.grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
 
         # Conversion options
         opts = ttk.LabelFrame(parent, text="Conversion Options", padding=10)
@@ -1470,9 +1482,14 @@ class LMSMigrationUI:
             text="Use template alias map during auto-relink",
             variable=self.use_template_alias_map_var,
         ).grid(row=3, column=1, sticky="w", pady=(0, 3))
+        ttk.Checkbutton(
+            self.canvas_advanced_frame,
+            text="Apply template wrappers to assignments, discussions, and quizzes",
+            variable=self.post_import_wrap_assessments_var,
+        ).grid(row=4, column=1, sticky="w", pady=(0, 3))
 
         ab_row = ttk.Frame(self.canvas_advanced_frame)
-        ab_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(2, 4))
+        ab_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(2, 4))
         ttk.Label(ab_row, text="A/B variant").grid(row=0, column=0, sticky="w")
         self.ab_variant_combo = ttk.Combobox(
             ab_row,
@@ -1493,7 +1510,7 @@ class LMSMigrationUI:
         self.run_ab_variant_cycle_btn.grid(row=0, column=3, sticky="e", padx=(12, 0))
 
         sec_btns = ttk.Frame(self.canvas_advanced_frame)
-        sec_btns.grid(row=5, column=0, columnspan=3, sticky="e", pady=(4, 0))
+        sec_btns.grid(row=6, column=0, columnspan=3, sticky="e", pady=(4, 0))
         self.fetch_canvas_imports_btn = ttk.Button(
             sec_btns,
             text="Find Latest Import",
@@ -1925,6 +1942,7 @@ class LMSMigrationUI:
         template_overlay_enabled = bool(self.enable_template_overlay_var.get())
         template_merge_enabled = bool(self.template_merge_var.get())
         full_template_shell = bool(self.full_template_shell_var.get())
+        seeded_starter_course = bool(self.seeded_starter_course_var.get())
         intro_checklist_handling = (
             self.intro_checklist_handling_var.get().strip().lower()
             or "rebuild-when-confident"
@@ -1979,6 +1997,12 @@ class LMSMigrationUI:
                 "Enable Apply Template Merge to use Full Starter Template Shell.",
             )
             return None
+        if full_template_shell and seeded_starter_course:
+            messagebox.showwarning(
+                "Choose one template mode",
+                "Full Starter Template Shell cannot be combined with Target existing starter template course.",
+            )
+            return None
 
         if not self.visual_original_zip_var.get().strip():
             self.visual_original_zip_var.set(str(input_zip))
@@ -2003,6 +2027,7 @@ class LMSMigrationUI:
             "image_layout_mode": image_layout_mode,
             "template_merge": template_merge_enabled,
             "full_template_shell": full_template_shell,
+            "seeded_starter_course": seeded_starter_course,
             "intro_checklist_handling": intro_checklist_handling,
             "learning_activities_handling": learning_activities_handling,
             "template_package": template_package,
@@ -2046,6 +2071,7 @@ class LMSMigrationUI:
                 image_layout_mode=request["image_layout_mode"],
                 template_merge=request["template_merge"],
                 full_template_shell=request["full_template_shell"],
+                seeded_starter_course=request["seeded_starter_course"],
                 intro_checklist_handling=request["intro_checklist_handling"],
                 learning_activities_handling=request[
                     "learning_activities_handling"
@@ -2096,6 +2122,7 @@ class LMSMigrationUI:
                 image_layout_mode=request["image_layout_mode"],
                 template_merge=request["template_merge"],
                 full_template_shell=request["full_template_shell"],
+                seeded_starter_course=request["seeded_starter_course"],
                 intro_checklist_handling=request["intro_checklist_handling"],
                 learning_activities_handling=request[
                     "learning_activities_handling"
@@ -2475,6 +2502,9 @@ class LMSMigrationUI:
             relink_report_path = (
                 output_dir / f"{artifact_prefix}.canvas-auto-relink-report.json"
             )
+            assessment_wrap_report_path = (
+                output_dir / f"{artifact_prefix}.canvas-assessment-wrap-report.json"
+            )
             live_audit_json = (
                 output_dir / f"{artifact_prefix}.canvas-live-link-audit.json"
             )
@@ -2482,12 +2512,17 @@ class LMSMigrationUI:
             pre_issues_path = output_dir / "canvas-migration-issues-pre.json"
             post_issues_path = output_dir / "canvas-migration-issues-post.json"
             relink_report_path = output_dir / "canvas-auto-relink-report.json"
+            assessment_wrap_report_path = (
+                output_dir / "canvas-assessment-wrap-report.json"
+            )
             live_audit_json = output_dir / "canvas-live-link-audit.json"
+        cleanup_audit_json = output_dir / "canvas-cleanup-audit.json"
         live_audit_md = live_audit_json.with_suffix(".md")
         live_audit_csv = live_audit_json.with_suffix(".csv")
 
         include_auto_relink = bool(self.ab_include_auto_relink_var.get())
         apply_safe_fixes = bool(self.live_audit_apply_safe_fixes_var.get())
+        wrap_assessments = bool(self.post_import_wrap_assessments_var.get())
         alias_map_path = self._resolve_alias_map_path(show_warning=True)
         if self.use_template_alias_map_var.get() and alias_map_path is None:
             return
@@ -2503,6 +2538,10 @@ class LMSMigrationUI:
         update_actions: list[str] = []
         if include_auto_relink:
             update_actions.append("auto-relink missing page/file links")
+        if wrap_assessments:
+            update_actions.append(
+                "apply template wrappers to assignments/discussions/quizzes"
+            )
         if apply_safe_fixes:
             update_actions.append("live-audit safe fixes")
         if update_actions:
@@ -2562,6 +2601,67 @@ class LMSMigrationUI:
                     0,
                     lambda: self._log(
                         "[Full Post-Import] Auto-relink skipped by toggle."
+                    ),
+                )
+
+            assessment_wrap_report = None
+            assessment_wrap_error = ""
+            if wrap_assessments:
+                try:
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            "[Full Post-Import] Applying assessment template wrappers..."
+                        ),
+                    )
+                    report_path = auto_wrap_assessment_descriptions(
+                        base_url=base_url,
+                        course_id=course_id,
+                        token=token,
+                        output_json_path=assessment_wrap_report_path,
+                        dry_run=False,
+                    )
+                    assessment_wrap_report = json.loads(
+                        report_path.read_text(encoding="utf-8")
+                    )
+                except Exception as exc:  # pragma: no cover - network/runtime dependent
+                    assessment_wrap_error = str(exc)
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            f"[WARN] [Full Post-Import] Assessment wrapping failed; continuing with live audit + post export: {exc}"
+                        ),
+                    )
+            else:
+                self.root.after(
+                    0,
+                    lambda: self._log(
+                        "[Full Post-Import] Assessment template wrapping skipped by toggle."
+                    ),
+                )
+
+            cleanup_audit_report = None
+            cleanup_audit_error = ""
+            try:
+                self.root.after(
+                    0,
+                    lambda: self._log("[Full Post-Import] Running cleanup audit..."),
+                )
+                cleanup_report_path = run_canvas_cleanup_audit(
+                    base_url=base_url,
+                    course_id=course_id,
+                    token=token,
+                    output_json_path=cleanup_audit_json,
+                )
+                cleanup_audit_report = json.loads(
+                    cleanup_report_path.read_text(encoding="utf-8")
+                )
+            except Exception as exc:  # pragma: no cover - network/runtime dependent
+                cleanup_audit_error = str(exc)
+                self.root.after(
+                    0,
+                    lambda: self._log(
+                        f"[WARN] [Full Post-Import] Cleanup audit failed; continuing with post export: {exc}"
                     ),
                 )
 
@@ -2634,6 +2734,14 @@ class LMSMigrationUI:
                     relink_report_path if include_auto_relink else None
                 ),
                 "relink_error": relink_error,
+                "assessment_wrap_report": assessment_wrap_report,
+                "assessment_wrap_report_path": (
+                    assessment_wrap_report_path if wrap_assessments else None
+                ),
+                "assessment_wrap_error": assessment_wrap_error,
+                "cleanup_audit_json_path": cleanup_audit_json,
+                "cleanup_audit_report": cleanup_audit_report,
+                "cleanup_audit_error": cleanup_audit_error,
                 "live_audit_json_path": live_json_path,
                 "live_audit_md_path": live_md_path,
                 "live_audit_csv_path": live_csv_path,
@@ -2651,6 +2759,12 @@ class LMSMigrationUI:
         relink_report = payload.get("relink_report")
         relink_report_path = payload.get("relink_report_path")
         relink_error = str(payload.get("relink_error", "")).strip()
+        assessment_wrap_report = payload.get("assessment_wrap_report")
+        assessment_wrap_report_path = payload.get("assessment_wrap_report_path")
+        assessment_wrap_error = str(payload.get("assessment_wrap_error", "")).strip()
+        cleanup_audit_json_path = payload.get("cleanup_audit_json_path")
+        cleanup_audit_report = payload.get("cleanup_audit_report")
+        cleanup_audit_error = str(payload.get("cleanup_audit_error", "")).strip()
         live_audit_report = payload.get("live_audit_report", {})
         live_audit_json_path = payload.get("live_audit_json_path")
         live_audit_md_path = payload.get("live_audit_md_path")
@@ -2691,6 +2805,36 @@ class LMSMigrationUI:
             )
         if relink_error:
             self._log(f"[WARN] Auto-relink error: {relink_error}")
+
+        if assessment_wrap_report_path:
+            self._log(f"Assessment wrap report JSON: {assessment_wrap_report_path}")
+        if isinstance(assessment_wrap_report, dict):
+            summary = assessment_wrap_report.get("summary", {})
+            self._log(
+                "Assessment wrapper summary: "
+                f"assignments_updated={summary.get('assignments_updated', 0)} | "
+                f"discussions_updated={summary.get('discussions_updated', 0)} | "
+                f"assignments_scanned={summary.get('assignments_scanned', 0)} | "
+                f"discussions_scanned={summary.get('discussions_scanned', 0)}"
+            )
+        if assessment_wrap_error:
+            self._log(f"[WARN] Assessment wrap error: {assessment_wrap_error}")
+
+        if cleanup_audit_json_path:
+            self._log(f"Cleanup audit JSON: {cleanup_audit_json_path}")
+        if isinstance(cleanup_audit_report, dict):
+            summary = cleanup_audit_report.get("summary", {})
+            self._log(
+                "Cleanup audit summary: "
+                f"duplicate_modules={summary.get('duplicate_modules', 0)} | "
+                f"duplicate_page_titles={summary.get('duplicate_page_titles', 0)} | "
+                f"published_unlinked_pages={summary.get('published_unlinked_pages', 0)} | "
+                f"duplicate_file_basenames={summary.get('duplicate_file_basenames', 0)} | "
+                f"empty_folders={summary.get('empty_folders', 0)} | "
+                f"unused_files={summary.get('unused_files', 0)}"
+            )
+        if cleanup_audit_error:
+            self._log(f"[WARN] Cleanup audit error: {cleanup_audit_error}")
 
         self._log(f"Live audit JSON: {live_audit_json_path}")
         self._log(f"Live audit Markdown: {live_audit_md_path}")

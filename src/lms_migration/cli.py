@@ -145,6 +145,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--seeded-starter-course",
+        action="store_true",
+        default=False,
+        help=(
+            "Target an already-seeded Canvas starter/template course. Skip packaging "
+            "duplicate template assets and shell pages, then rely on post-import "
+            "relinking + templating to reuse the live starter-course shell."
+        ),
+    )
+    parser.add_argument(
         "--intro-checklist-handling",
         type=str,
         choices=("preserve", "rebuild-when-confident"),
@@ -220,6 +230,7 @@ def main() -> None:
             image_layout_mode=args.image_layout_mode,
             template_merge=bool(args.template_merge),
             full_template_shell=bool(args.full_template_shell),
+            seeded_starter_course=bool(args.seeded_starter_course),
             intro_checklist_handling=args.intro_checklist_handling,
             learning_activities_handling=args.learning_activities_handling,
         )
