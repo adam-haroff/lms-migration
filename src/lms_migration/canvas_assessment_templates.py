@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 from pathlib import Path
@@ -28,6 +29,11 @@ def _normalize_html_body(value: str) -> str:
     return (value or "").strip()
 
 
+def _strip_tags_text(value: str) -> str:
+    plain = re.sub(r"<[^>]+>", " ", value or "", flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", html.unescape(plain)).strip()
+
+
 def _first_paragraph_and_remainder(html_text: str) -> tuple[str, str]:
     match = re.search(r"\A\s*(<p\b[^>]*>.*?</p>)", html_text, flags=re.IGNORECASE | re.DOTALL)
     if match is None:
@@ -40,6 +46,79 @@ def _first_paragraph_and_remainder(html_text: str) -> tuple[str, str]:
 def _looks_templated(html_text: str, *, overview_label: str) -> bool:
     lowered = html_text.lower()
     return overview_label.lower() in lowered or "technical support" in lowered
+
+
+def _looks_like_support_discussion(*, title: str, body_html: str) -> bool:
+    lowered_title = html.unescape(title or "").lower()
+    lowered_body = _strip_tags_text(body_html).lower()
+    if "course q&a" in lowered_title or "course q and a" in lowered_title:
+        return True
+    if "help" in lowered_title and (
+        "course-related question" in lowered_body
+        or "classmate" in lowered_body
+        or "post answers to your questions" in lowered_body
+    ):
+        return True
+    return False
+
+
+def _looks_like_discussion_guideline_paragraph(paragraph_html: str) -> bool:
+    lowered = _strip_tags_text(paragraph_html).lower()
+    patterns = (
+        r"\bpost your answer\b",
+        r"\bpost your responses?\b",
+        r"\bafter submitting\b",
+        r"\brespond to .* classmates?\b",
+        r"\brepl(?:y|ies)\b",
+        r"\bpost first\b",
+        r"\bdue by\b",
+        r"\btuesday\b",
+        r"\bfriday\b",
+        r"\bworth \d+ points?\b",
+        r"\bassignment is worth\b",
+    )
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def _split_discussion_guidelines_and_prompt(html_text: str) -> tuple[str, str]:
+    list_match = re.search(
+        r"(<(?:ul|ol)\b[^>]*>.*?</(?:ul|ol)>)",
+        html_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if list_match is None:
+        return "", html_text.strip()
+
+    before = html_text[: list_match.start()].strip()
+    prompt_parts = [list_match.group(1).strip()]
+    after = html_text[list_match.end() :].strip()
+    guideline_parts: list[str] = []
+    if before:
+        guideline_parts.append(before)
+
+    if after:
+        para_matches = list(
+            re.finditer(r"<p\b[^>]*>.*?</p>", after, flags=re.IGNORECASE | re.DOTALL)
+        )
+        stripped_after = re.sub(
+            r"<p\b[^>]*>.*?</p>",
+            "",
+            after,
+            flags=re.IGNORECASE | re.DOTALL,
+        ).strip()
+        if para_matches and not stripped_after:
+            for match in para_matches:
+                paragraph_html = match.group(0).strip()
+                if _looks_like_discussion_guideline_paragraph(paragraph_html):
+                    guideline_parts.append(paragraph_html)
+                else:
+                    prompt_parts.append(paragraph_html)
+        else:
+            prompt_parts.append(after)
+
+    return "\n".join(part for part in guideline_parts if part.strip()), "\n".join(
+        part for part in prompt_parts if part.strip()
+    )
 
 
 def _icon_url(file_index: dict[str, list], course_id: str, basename: str) -> str:
@@ -115,19 +194,26 @@ def wrap_assignment_description(
 def wrap_discussion_message(
     *,
     body_html: str,
+    title: str = "",
     course_id: str,
     file_index: dict[str, list],
 ) -> str:
     body = _normalize_html_body(body_html)
     if not body or _looks_templated(body, overview_label="Discussion Overview"):
         return body
+    if _looks_like_support_discussion(title=title, body_html=body):
+        return body
 
-    first, remainder = _first_paragraph_and_remainder(body)
-    overview = (
-        first
-        or "<p>Review the discussion instructions below and post your response in Canvas.</p>"
-    )
-    prompt = remainder or body
+    guidelines, prompt = _split_discussion_guidelines_and_prompt(body)
+    if guidelines:
+        overview = "<p>Review the discussion guidelines and prompt below before posting in Canvas.</p>"
+    else:
+        first, remainder = _first_paragraph_and_remainder(body)
+        overview = (
+            first
+            or "<p>Review the discussion instructions below and post your response in Canvas.</p>"
+        )
+        prompt = remainder or body
 
     parts = [
         _heading(
@@ -137,6 +223,8 @@ def wrap_discussion_message(
         ),
         overview,
     ]
+    if guidelines.strip():
+        parts.extend(["<h3>Guidelines</h3>", guidelines])
     if prompt.strip():
         parts.extend(["<h3>Prompt</h3>", prompt, "<hr />"])
     parts.append(
@@ -284,6 +372,7 @@ def auto_wrap_assessment_descriptions(
             continue
         wrapped = wrap_discussion_message(
             body_html=body,
+            title=title,
             course_id=str(course_id),
             file_index=file_index,
         )

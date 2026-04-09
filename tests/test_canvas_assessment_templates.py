@@ -45,15 +45,55 @@ def test_wrap_assignment_description_adds_template_sections() -> None:
 def test_wrap_discussion_message_adds_overview_prompt_and_support() -> None:
     wrapped = wrap_discussion_message(
         body_html="<p>Read the article first.</p><ol><li>Respond to the prompt.</li></ol>",
+        title="Communication Theory - Discussion",
         course_id="17038",
         file_index=_file_index(),
     )
 
     assert "Discussion Overview" in wrapped
+    assert "<h3>Guidelines</h3>" in wrapped
     assert "<h3>Prompt</h3>" in wrapped
     assert "Technical Support" in wrapped
     assert '/courses/17038/files/101/preview' in wrapped
     assert '/courses/17038/files/104/preview' in wrapped
+
+
+def test_wrap_discussion_message_moves_due_and_reply_text_into_guidelines() -> None:
+    wrapped = wrap_discussion_message(
+        body_html=(
+            "<p>Post your answer to the question below.</p>"
+            "<ul><li>Explain the theory.</li></ul>"
+            "<p>This assignment is worth 10 points.</p>"
+            "<p>Remember your Post First is due by 5:00 PM on Tuesday.</p>"
+        ),
+        title="Symbolic Interaction Theory - Discussion",
+        course_id="17038",
+        file_index=_file_index(),
+    )
+
+    assert "<h3>Guidelines</h3>" in wrapped
+    assert "<h3>Prompt</h3>" in wrapped
+    guidelines_section = wrapped.split("<h3>Guidelines</h3>", 1)[1].split("<h3>Prompt</h3>", 1)[0]
+    prompt_section = wrapped.split("<h3>Prompt</h3>", 1)[1]
+    assert "This assignment is worth 10 points." in guidelines_section
+    assert "Post First is due" in guidelines_section
+    assert "<li>Explain the theory.</li>" in prompt_section
+
+
+def test_wrap_discussion_message_skips_support_discussions() -> None:
+    body = (
+        "<p>This is an ungraded discussion area that you can use to post general class questions.</p>"
+        "<p>If you know the answer to a classmate's question, please feel free to post the answer.</p>"
+    )
+    assert (
+        wrap_discussion_message(
+            body_html=body,
+            title="Course Q&A",
+            course_id="17038",
+            file_index=_file_index(),
+        )
+        == body
+    )
 
 
 def test_wrap_quiz_description_uses_quiz_heading() -> None:
