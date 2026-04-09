@@ -95,6 +95,79 @@ def fetch_course_folders(
     return _fetch_paginated_list(first_url=first_url, token=token)
 
 
+def create_course_folder(
+    *,
+    base_url: str,
+    course_id: str,
+    token: str,
+    name: str,
+    parent_folder_id: str | int | None = None,
+    parent_folder_path: str | None = None,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    if parent_folder_id is not None:
+        url = f"{base}/api/v1/folders/{parent_folder_id}/folders"
+    else:
+        url = f"{base}/api/v1/courses/{course_id}/folders"
+    form_data: dict[str, Any] = {"name": name}
+    if parent_folder_path:
+        form_data["parent_folder_path"] = parent_folder_path
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="POST",
+        form_data=form_data,
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas folder creation response format.")
+    return payload
+
+
+def move_course_file(
+    *,
+    base_url: str,
+    file_id: str | int,
+    token: str,
+    parent_folder_id: str | int,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/files/{file_id}"
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="PUT",
+        form_data={"parent_folder_id": str(parent_folder_id)},
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas file update response format.")
+    return payload
+
+
+def delete_canvas_folder(
+    *,
+    base_url: str,
+    folder_id: str | int,
+    token: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = _build_url(
+        base,
+        f"/api/v1/folders/{folder_id}",
+        {"force": "true"} if force else None,
+    )
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="DELETE",
+    )
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, list) and not payload:
+        return {}
+    raise CanvasAPIError("Unexpected Canvas folder delete response format.")
+
+
 def fetch_course_pages(
     *,
     base_url: str,

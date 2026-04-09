@@ -362,6 +362,321 @@ def _remove_inline_style_keys(tag_html: str, keys: set[str]) -> tuple[str, bool]
     return rebuilt, True
 
 
+def _extract_inline_style_map(tag_html: str) -> dict[str, str]:
+    style_text = _extract_attr_value(tag_html, "style") or ""
+    style_map: dict[str, str] = {}
+    for chunk in style_text.split(";"):
+        piece = chunk.strip()
+        if not piece or ":" not in piece:
+            continue
+        key, raw_value = piece.split(":", 1)
+        lowered = key.strip().lower()
+        value = raw_value.strip()
+        if not lowered or not value:
+            continue
+        style_map[lowered] = value
+    return style_map
+
+
+def _extract_numeric_pixels(value: str | None) -> int | None:
+    if value is None:
+        return None
+    text = html.unescape(str(value)).strip().lower()
+    if not text:
+        return None
+    match = re.match(r"^(?P<num>\d+(?:\.\d+)?)\s*(?:px)?$", text)
+    if match is None:
+        return None
+    try:
+        return int(float(match.group("num")))
+    except ValueError:
+        return None
+
+
+def _looks_like_small_icon(tag_html: str) -> bool:
+    style_map = _extract_inline_style_map(tag_html)
+    candidates = [
+        _extract_numeric_pixels(_extract_attr_value(tag_html, "width")),
+        _extract_numeric_pixels(_extract_attr_value(tag_html, "height")),
+        _extract_numeric_pixels(style_map.get("width")),
+        _extract_numeric_pixels(style_map.get("height")),
+    ]
+    return any(value is not None and value <= 60 for value in candidates)
+
+
+def _normalize_decorative_img_tag(tag_html: str) -> tuple[str, bool]:
+    updated = tag_html
+    changed = False
+
+    title_value = _extract_attr_value(updated, "title")
+    if title_value is not None:
+        updated, removed = _remove_attr(updated, "title")
+        changed = changed or removed
+
+    desired_attrs = {
+        "alt": "",
+        "role": "presentation",
+        "aria-hidden": "true",
+        "data-decorative": "true",
+    }
+    for attr_name, attr_value in desired_attrs.items():
+        current = _extract_attr_value(updated, attr_name)
+        if current != attr_value:
+            updated = _set_or_add_attr(updated, attr_name, attr_value)
+            changed = True
+
+    return updated, changed
+
+
+def _remove_empty_img_tags(content: str) -> tuple[str, int]:
+    removed = 0
+
+    def replace_img(match: re.Match[str]) -> str:
+        nonlocal removed
+        tag_html = match.group(0)
+        src = (_extract_attr_value(tag_html, "src") or "").strip()
+        if src:
+            return tag_html
+        removed += 1
+        return ""
+
+    updated = re.sub(
+        r"<img\b[^>]*>",
+        replace_img,
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return updated, removed
+
+
+def _normalize_heading_icon_images(content: str) -> tuple[str, int]:
+    heading_pattern = re.compile(
+        r"<h(?P<level>[1-6])(?P<attrs>\b[^>]*)>(?P<body>.*?)</h(?P=level)>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    normalized = 0
+
+    def replace_heading(match: re.Match[str]) -> str:
+        nonlocal normalized
+        body = match.group("body")
+        if "<img" not in body.lower():
+            return match.group(0)
+
+        def replace_img(img_match: re.Match[str]) -> str:
+            nonlocal normalized
+            tag_html = img_match.group(0)
+            updated_tag, changed = _normalize_decorative_img_tag(tag_html)
+            if changed:
+                normalized += 1
+            return updated_tag
+
+        rebuilt_body = re.sub(
+            r"<img\b[^>]*>",
+            replace_img,
+            body,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        return (
+            f'<h{match.group("level")}{match.group("attrs")}>'
+            f"{rebuilt_body}"
+            f"</h{match.group('level')}>"
+        )
+
+    updated = heading_pattern.sub(replace_heading, content)
+    return updated, normalized
+
+
+def _normalize_explicit_decorative_images(content: str) -> tuple[str, int]:
+    normalized = 0
+
+    def replace_img(match: re.Match[str]) -> str:
+        nonlocal normalized
+        tag_html = match.group(0)
+        src = (_extract_attr_value(tag_html, "src") or "").strip()
+        if not src:
+            return tag_html
+
+        role_value = (_extract_attr_value(tag_html, "role") or "").strip().lower()
+        alt_value = (_extract_attr_value(tag_html, "alt") or "").strip().lower()
+        decorative_value = (
+            (_extract_attr_value(tag_html, "data-decorative") or "").strip().lower()
+        )
+        aria_hidden = (_extract_attr_value(tag_html, "aria-hidden") or "").strip().lower()
+
+        explicitly_decorative = (
+            role_value == "presentation"
+            or decorative_value in {"true", "1", "yes"}
+            or aria_hidden == "true"
+        )
+        small_empty_icon = alt_value in {"", "decorative", "icon", "image"} and _looks_like_small_icon(
+            tag_html
+        )
+        if not explicitly_decorative and not small_empty_icon:
+            return tag_html
+
+        updated_tag, changed = _normalize_decorative_img_tag(tag_html)
+        if changed:
+            normalized += 1
+        return updated_tag
+
+    updated = re.sub(
+        r"<img\b[^>]*>",
+        replace_img,
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return updated, normalized
+
+
+def _normalize_table_row_color_styles(content: str) -> tuple[str, int]:
+    row_pattern = re.compile(
+        r"(?P<open><tr\b[^>]*>)(?P<body>.*?)(?P<close></tr>)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cell_pattern = re.compile(
+        r"<(?:th|td)\b[^>]*>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    normalized_rows = 0
+
+    def replace_row(match: re.Match[str]) -> str:
+        nonlocal normalized_rows
+        open_tag = match.group("open")
+        body = match.group("body")
+        color_styles = {
+            key: value
+            for key, value in _extract_inline_style_map(open_tag).items()
+            if key in {"background-color", "color"}
+        }
+        if not color_styles:
+            return match.group(0)
+
+        cell_updates = 0
+        cell_count = 0
+
+        def replace_cell(cell_match: re.Match[str]) -> str:
+            nonlocal cell_count
+            nonlocal cell_updates
+            cell_count += 1
+            updated_tag, changed = _merge_inline_style(
+                cell_match.group(0), color_styles
+            )
+            if changed:
+                cell_updates += 1
+            return updated_tag
+
+        rebuilt_body = cell_pattern.sub(replace_cell, body)
+        if cell_count == 0:
+            return match.group(0)
+
+        rebuilt_open_tag, row_changed = _remove_inline_style_keys(
+            open_tag, set(color_styles)
+        )
+        if not row_changed and cell_updates == 0:
+            return match.group(0)
+        normalized_rows += 1
+        return rebuilt_open_tag + rebuilt_body + match.group("close")
+
+    updated = row_pattern.sub(replace_row, content)
+    return updated, normalized_rows
+
+
+def _repair_heading_level_jumps(content: str) -> tuple[str, int]:
+    heading_pattern = re.compile(
+        r"<h(?P<level>[1-6])(?P<attrs>\b[^>]*)>(?P<body>.*?)</h(?P=level)>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    repairs = 0
+    previous_level: int | None = None
+    rebuilt_parts: list[str] = []
+    cursor = 0
+
+    for match in heading_pattern.finditer(content):
+        original_level = int(match.group("level"))
+        normalized_level = original_level
+        if previous_level is not None and original_level - previous_level > 1:
+            normalized_level = previous_level + 1
+
+        rebuilt_parts.append(content[cursor : match.start()])
+        if normalized_level != original_level:
+            repairs += 1
+        rebuilt_parts.append(
+            f"<h{normalized_level}{match.group('attrs')}>{match.group('body')}</h{normalized_level}>"
+        )
+        cursor = match.end()
+        previous_level = normalized_level
+
+    if not rebuilt_parts:
+        return content, 0
+
+    rebuilt_parts.append(content[cursor:])
+    return "".join(rebuilt_parts), repairs
+
+
+def apply_accessibility_markup_fixes(
+    content: str,
+    *,
+    repair_heading_jumps: bool = False,
+) -> tuple[str, list[AppliedChange]]:
+    updated = content
+    applied: list[AppliedChange] = []
+
+    updated, removed_empty_images = _remove_empty_img_tags(updated)
+    if removed_empty_images:
+        applied.append(
+            AppliedChange(
+                category="accessibility",
+                description="Removed empty image tags without a usable src attribute",
+                count=removed_empty_images,
+            )
+        )
+
+    updated, normalized_heading_icons = _normalize_heading_icon_images(updated)
+    if normalized_heading_icons:
+        applied.append(
+            AppliedChange(
+                category="accessibility",
+                description="Marked heading icon images as decorative for Canvas accessibility",
+                count=normalized_heading_icons,
+            )
+        )
+
+    updated, normalized_decorative_images = _normalize_explicit_decorative_images(
+        updated
+    )
+    if normalized_decorative_images:
+        applied.append(
+            AppliedChange(
+                category="accessibility",
+                description="Standardized decorative image semantics for Canvas accessibility",
+                count=normalized_decorative_images,
+            )
+        )
+
+    updated, normalized_table_rows = _normalize_table_row_color_styles(updated)
+    if normalized_table_rows:
+        applied.append(
+            AppliedChange(
+                category="accessibility",
+                description="Moved row-level table color styles onto cells for Canvas accessibility checks",
+                count=normalized_table_rows,
+            )
+        )
+
+    if repair_heading_jumps:
+        updated, heading_repairs = _repair_heading_level_jumps(updated)
+        if heading_repairs:
+            applied.append(
+                AppliedChange(
+                    category="accessibility",
+                    description="Promoted heading levels to remove accessibility-breaking heading jumps",
+                    count=heading_repairs,
+                )
+            )
+
+    return updated, applied
+
+
 def _merge_class_names(tag_html: str, class_names: Iterable[str]) -> tuple[str, bool]:
     class_pattern = re.compile(
         r'(\bclass\s*=\s*)(["\'])(?P<value>.*?)(\2)',
@@ -1890,6 +2205,9 @@ def apply_canvas_sanitizer(
             )
         )
 
+    updated, accessibility_applied = apply_accessibility_markup_fixes(updated)
+    applied.extend(accessibility_applied)
+
     metadata_tag_pattern = re.compile(r"<[a-z][^>]*>", flags=re.IGNORECASE)
     removed_editor_artifact_attrs = 0
 
@@ -2718,34 +3036,7 @@ def apply_best_practice_enforcer(
                     )
                 )
 
-    heading_pattern = re.compile(
-        r"<h(?P<level>[1-6])(?P<attrs>\b[^>]*)>(?P<body>.*?)</h(?P=level)>",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    heading_repairs = 0
-    previous_level: int | None = None
-    rebuilt_parts: list[str] = []
-    cursor = 0
-
-    for match in heading_pattern.finditer(updated):
-        original_level = int(match.group("level"))
-        normalized_level = original_level
-        if previous_level is not None and original_level - previous_level > 1:
-            normalized_level = previous_level + 1
-
-        rebuilt_parts.append(updated[cursor : match.start()])
-        if normalized_level != original_level:
-            heading_repairs += 1
-        rebuilt_parts.append(
-            f"<h{normalized_level}{match.group('attrs')}>{match.group('body')}</h{normalized_level}>"
-        )
-        cursor = match.end()
-        previous_level = normalized_level
-
-    if rebuilt_parts:
-        rebuilt_parts.append(updated[cursor:])
-        updated = "".join(rebuilt_parts)
-
+    updated, heading_repairs = _repair_heading_level_jumps(updated)
     if heading_repairs:
         applied.append(
             AppliedChange(

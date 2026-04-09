@@ -25,9 +25,11 @@ from .canvas_api import (
     normalize_base_url,
 )
 from .canvas_cleanup_audit import run_canvas_cleanup_audit
+from .canvas_file_organizer import run_canvas_file_organizer
 from .canvas_preview import CanvasPreviewError, run_preview
 from .canvas_post_import import auto_relink_missing_links
 from .canvas_assessment_templates import auto_wrap_assessment_descriptions
+from .canvas_template_accessibility import auto_fix_template_accessibility
 from .canvas_live_audit import run_live_link_audit
 from .canvas_snapshot import snapshot_canvas_course
 from .fix_checklist import build_fix_checklist
@@ -213,6 +215,8 @@ class LMSMigrationUI:
         self.use_template_alias_map_var = tk.BooleanVar(value=True)
         self.live_audit_apply_safe_fixes_var = tk.BooleanVar(value=True)
         self.post_import_wrap_assessments_var = tk.BooleanVar(value=True)
+        self.post_import_fix_accessibility_var = tk.BooleanVar(value=True)
+        self.post_import_organize_files_var = tk.BooleanVar(value=True)
         self.ab_variant_var = tk.StringVar(value="A")
         self.ab_include_auto_relink_var = tk.BooleanVar(value=True)
         self.show_canvas_advanced_var = tk.BooleanVar(value=False)
@@ -1487,9 +1491,19 @@ class LMSMigrationUI:
             text="Apply template wrappers to assignments, discussions, and quizzes",
             variable=self.post_import_wrap_assessments_var,
         ).grid(row=4, column=1, sticky="w", pady=(0, 3))
+        ttk.Checkbutton(
+            self.canvas_advanced_frame,
+            text="Fix template accessibility markup in Canvas content",
+            variable=self.post_import_fix_accessibility_var,
+        ).grid(row=5, column=1, sticky="w", pady=(0, 3))
+        ttk.Checkbutton(
+            self.canvas_advanced_frame,
+            text="Organize Canvas files and prune empty folders",
+            variable=self.post_import_organize_files_var,
+        ).grid(row=6, column=1, sticky="w", pady=(0, 3))
 
         ab_row = ttk.Frame(self.canvas_advanced_frame)
-        ab_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(2, 4))
+        ab_row.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 4))
         ttk.Label(ab_row, text="A/B variant").grid(row=0, column=0, sticky="w")
         self.ab_variant_combo = ttk.Combobox(
             ab_row,
@@ -1510,7 +1524,7 @@ class LMSMigrationUI:
         self.run_ab_variant_cycle_btn.grid(row=0, column=3, sticky="e", padx=(12, 0))
 
         sec_btns = ttk.Frame(self.canvas_advanced_frame)
-        sec_btns.grid(row=6, column=0, columnspan=3, sticky="e", pady=(4, 0))
+        sec_btns.grid(row=7, column=0, columnspan=3, sticky="e", pady=(4, 0))
         self.fetch_canvas_imports_btn = ttk.Button(
             sec_btns,
             text="Find Latest Import",
@@ -2505,6 +2519,13 @@ class LMSMigrationUI:
             assessment_wrap_report_path = (
                 output_dir / f"{artifact_prefix}.canvas-assessment-wrap-report.json"
             )
+            accessibility_fix_report_path = (
+                output_dir
+                / f"{artifact_prefix}.canvas-template-accessibility-report.json"
+            )
+            file_organizer_report_path = (
+                output_dir / f"{artifact_prefix}.canvas-file-organizer-report.json"
+            )
             live_audit_json = (
                 output_dir / f"{artifact_prefix}.canvas-live-link-audit.json"
             )
@@ -2515,6 +2536,12 @@ class LMSMigrationUI:
             assessment_wrap_report_path = (
                 output_dir / "canvas-assessment-wrap-report.json"
             )
+            accessibility_fix_report_path = (
+                output_dir / "canvas-template-accessibility-report.json"
+            )
+            file_organizer_report_path = (
+                output_dir / "canvas-file-organizer-report.json"
+            )
             live_audit_json = output_dir / "canvas-live-link-audit.json"
         cleanup_audit_json = output_dir / "canvas-cleanup-audit.json"
         live_audit_md = live_audit_json.with_suffix(".md")
@@ -2523,6 +2550,8 @@ class LMSMigrationUI:
         include_auto_relink = bool(self.ab_include_auto_relink_var.get())
         apply_safe_fixes = bool(self.live_audit_apply_safe_fixes_var.get())
         wrap_assessments = bool(self.post_import_wrap_assessments_var.get())
+        fix_accessibility = bool(self.post_import_fix_accessibility_var.get())
+        organize_files = bool(self.post_import_organize_files_var.get())
         alias_map_path = self._resolve_alias_map_path(show_warning=True)
         if self.use_template_alias_map_var.get() and alias_map_path is None:
             return
@@ -2542,6 +2571,10 @@ class LMSMigrationUI:
             update_actions.append(
                 "apply template wrappers to assignments/discussions/quizzes"
             )
+        if fix_accessibility:
+            update_actions.append("fix template accessibility markup")
+        if organize_files:
+            update_actions.append("organize Canvas files")
         if apply_safe_fixes:
             update_actions.append("live-audit safe fixes")
         if update_actions:
@@ -2637,6 +2670,78 @@ class LMSMigrationUI:
                     0,
                     lambda: self._log(
                         "[Full Post-Import] Assessment template wrapping skipped by toggle."
+                    ),
+                )
+
+            accessibility_fix_report = None
+            accessibility_fix_error = ""
+            if fix_accessibility:
+                try:
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            "[Full Post-Import] Fixing template accessibility markup..."
+                        ),
+                    )
+                    report_path = auto_fix_template_accessibility(
+                        base_url=base_url,
+                        course_id=course_id,
+                        token=token,
+                        output_json_path=accessibility_fix_report_path,
+                        dry_run=False,
+                    )
+                    accessibility_fix_report = json.loads(
+                        report_path.read_text(encoding="utf-8")
+                    )
+                except Exception as exc:  # pragma: no cover - network/runtime dependent
+                    accessibility_fix_error = str(exc)
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            f"[WARN] [Full Post-Import] Accessibility remediation failed; continuing with file organizer + cleanup audit + live audit + post export: {exc}"
+                        ),
+                    )
+            else:
+                self.root.after(
+                    0,
+                    lambda: self._log(
+                        "[Full Post-Import] Template accessibility remediation skipped by toggle."
+                    ),
+                )
+
+            file_organizer_report = None
+            file_organizer_error = ""
+            if organize_files:
+                try:
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            "[Full Post-Import] Organizing Canvas files..."
+                        ),
+                    )
+                    report_path = run_canvas_file_organizer(
+                        base_url=base_url,
+                        course_id=course_id,
+                        token=token,
+                        output_json_path=file_organizer_report_path,
+                        dry_run=False,
+                    )
+                    file_organizer_report = json.loads(
+                        report_path.read_text(encoding="utf-8")
+                    )
+                except Exception as exc:  # pragma: no cover - network/runtime dependent
+                    file_organizer_error = str(exc)
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            f"[WARN] [Full Post-Import] File organizer failed; continuing with cleanup audit + live audit + post export: {exc}"
+                        ),
+                    )
+            else:
+                self.root.after(
+                    0,
+                    lambda: self._log(
+                        "[Full Post-Import] Canvas file organizer skipped by toggle."
                     ),
                 )
 
@@ -2739,6 +2844,16 @@ class LMSMigrationUI:
                     assessment_wrap_report_path if wrap_assessments else None
                 ),
                 "assessment_wrap_error": assessment_wrap_error,
+                "accessibility_fix_report": accessibility_fix_report,
+                "accessibility_fix_report_path": (
+                    accessibility_fix_report_path if fix_accessibility else None
+                ),
+                "accessibility_fix_error": accessibility_fix_error,
+                "file_organizer_report": file_organizer_report,
+                "file_organizer_report_path": (
+                    file_organizer_report_path if organize_files else None
+                ),
+                "file_organizer_error": file_organizer_error,
                 "cleanup_audit_json_path": cleanup_audit_json,
                 "cleanup_audit_report": cleanup_audit_report,
                 "cleanup_audit_error": cleanup_audit_error,
@@ -2762,6 +2877,14 @@ class LMSMigrationUI:
         assessment_wrap_report = payload.get("assessment_wrap_report")
         assessment_wrap_report_path = payload.get("assessment_wrap_report_path")
         assessment_wrap_error = str(payload.get("assessment_wrap_error", "")).strip()
+        accessibility_fix_report = payload.get("accessibility_fix_report")
+        accessibility_fix_report_path = payload.get("accessibility_fix_report_path")
+        accessibility_fix_error = str(
+            payload.get("accessibility_fix_error", "")
+        ).strip()
+        file_organizer_report = payload.get("file_organizer_report")
+        file_organizer_report_path = payload.get("file_organizer_report_path")
+        file_organizer_error = str(payload.get("file_organizer_error", "")).strip()
         cleanup_audit_json_path = payload.get("cleanup_audit_json_path")
         cleanup_audit_report = payload.get("cleanup_audit_report")
         cleanup_audit_error = str(payload.get("cleanup_audit_error", "")).strip()
@@ -2819,6 +2942,37 @@ class LMSMigrationUI:
             )
         if assessment_wrap_error:
             self._log(f"[WARN] Assessment wrap error: {assessment_wrap_error}")
+
+        if accessibility_fix_report_path:
+            self._log(
+                f"Template accessibility report JSON: {accessibility_fix_report_path}"
+            )
+        if isinstance(accessibility_fix_report, dict):
+            summary = accessibility_fix_report.get("summary", {})
+            self._log(
+                "Template accessibility summary: "
+                f"pages_updated={summary.get('pages_updated', 0)} | "
+                f"assignments_updated={summary.get('assignments_updated', 0)} | "
+                f"discussions_updated={summary.get('discussions_updated', 0)} | "
+                f"total_updates={summary.get('total_updates', 0)}"
+            )
+        if accessibility_fix_error:
+            self._log(f"[WARN] Template accessibility error: {accessibility_fix_error}")
+
+        if file_organizer_report_path:
+            self._log(f"File organizer report JSON: {file_organizer_report_path}")
+        if isinstance(file_organizer_report, dict):
+            summary = file_organizer_report.get("summary", {})
+            self._log(
+                "File organizer summary: "
+                f"moves_planned={summary.get('moves_planned', 0)} | "
+                f"moves_completed={summary.get('moves_completed', 0)} | "
+                f"folders_created={summary.get('folders_created', 0)} | "
+                f"empty_folders_deleted={summary.get('empty_folders_deleted', 0)} | "
+                f"empty_folders_remaining={summary.get('empty_folders_remaining', 0)}"
+            )
+        if file_organizer_error:
+            self._log(f"[WARN] File organizer error: {file_organizer_error}")
 
         if cleanup_audit_json_path:
             self._log(f"Cleanup audit JSON: {cleanup_audit_json_path}")

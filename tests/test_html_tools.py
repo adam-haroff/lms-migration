@@ -14,6 +14,7 @@ from pathlib import Path
 from lms_migration.html_tools import (
     CanvasSanitizerPolicy,
     apply_canvas_sanitizer,
+    apply_accessibility_markup_fixes,
     BestPracticeEnforcerPolicy,
     apply_best_practice_enforcer,
     inject_accent_divider,
@@ -1139,6 +1140,50 @@ class TestCourseOutlineCaption:
         result = _sanitize_syllabus(html)
         assert "Course Outline (16-Week)" not in result
         assert "Course Outline" in result
+
+
+class TestAccessibilityMarkupFixes:
+    def test_heading_icon_is_marked_decorative(self):
+        html = (
+            '<h2><img src="/courses/1/files/22/preview" alt="Checklist icon" '
+            'width="45" height="45" title="Checklist"> <strong>Checklist</strong></h2>'
+        )
+        result, changes = apply_accessibility_markup_fixes(html, repair_heading_jumps=True)
+
+        assert 'alt=""' in result
+        assert 'role="presentation"' in result
+        assert 'aria-hidden="true"' in result
+        assert 'data-decorative="true"' in result
+        assert "Checklist icon" not in result
+        assert "title=" not in result
+        assert any("heading icon images" in c.description.lower() for c in changes)
+
+    def test_empty_image_without_src_is_removed(self):
+        html = '<p>Intro <img alt="" data-decorative="true"></p>'
+        result, changes = apply_accessibility_markup_fixes(html)
+
+        assert "<img" not in result
+        assert any("removed empty image tags" in c.description.lower() for c in changes)
+
+    def test_row_level_colors_move_to_cells(self):
+        html = (
+            '<table><tr style="background-color: #000000; color: #ffffff;">'
+            '<td>One</td><td style="padding: 8px;">Two</td></tr></table>'
+        )
+        result, changes = apply_accessibility_markup_fixes(html)
+
+        assert '<tr style="' not in result
+        assert result.count("background-color: #000000") == 2
+        assert result.count("color: #ffffff") == 2
+        assert any("row-level table color styles" in c.description.lower() for c in changes)
+
+    def test_heading_jumps_are_repaired_when_requested(self):
+        html = "<h2>Overview</h2><h4>Instructions</h4><h5>Detail</h5>"
+        result, changes = apply_accessibility_markup_fixes(html, repair_heading_jumps=True)
+
+        assert "<h3>Instructions</h3>" in result
+        assert "<h4>Detail</h4>" in result
+        assert any("heading levels" in c.description.lower() for c in changes)
 
     def test_existing_caption_with_week_suffix_is_normalised(self):
         table = (

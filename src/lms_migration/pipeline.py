@@ -1366,13 +1366,6 @@ _COURSE_CONTENT_POWERPOINT_EXTENSIONS: frozenset[str] = frozenset({".ppt", ".ppt
 _COURSE_CONTENT_ROOT_FOLDER = "course-content"
 _COURSE_CONTENT_IMAGES_FOLDER = "course-images"
 _COURSE_CONTENT_POWERPOINTS_FOLDER = "powerpoints"
-_COURSE_CONTENT_MYSTERY_SHOP_FOLDER = "mystery-shop"
-_MYSTERY_SHOP_FILE_MARKERS: tuple[str, ...] = (
-    "mystery shop",
-    "mystery-shop",
-    "mystery_shop",
-    "mysteryshop",
-)
 _COURSE_ALIGNMENT_DOC_EXTENSIONS: frozenset[str] = frozenset(
     {".doc", ".docx", ".pdf", ".xls", ".xlsx"}
 )
@@ -1466,7 +1459,6 @@ def _recommended_course_content_destination(
     if suffix not in _COURSE_CONTENT_RELOCATABLE_EXTENSIONS:
         return None
 
-    lowered_basename = basename.lower()
     if suffix in _COURSE_CONTENT_IMAGE_EXTENSIONS:
         return (
             f"{course_content_root}/{_COURSE_CONTENT_IMAGES_FOLDER}/{basename}"
@@ -1474,10 +1466,6 @@ def _recommended_course_content_destination(
     if suffix in _COURSE_CONTENT_POWERPOINT_EXTENSIONS:
         return (
             f"{course_content_root}/{_COURSE_CONTENT_POWERPOINTS_FOLDER}/{basename}"
-        )
-    if any(marker in lowered_basename for marker in _MYSTERY_SHOP_FILE_MARKERS):
-        return (
-            f"{course_content_root}/{_COURSE_CONTENT_MYSTERY_SHOP_FOLDER}/{basename}"
         )
     return f"{course_content_root}/{basename}"
 

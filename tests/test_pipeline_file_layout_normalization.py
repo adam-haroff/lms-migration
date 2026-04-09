@@ -24,7 +24,7 @@ def test_recommended_course_content_destination_routes_loose_support_files() -> 
     )
     assert (
         _recommended_course_content_destination("Mystery Shop Rubric.pdf")
-        == "course-content/mystery-shop/Mystery Shop Rubric.pdf"
+        == "course-content/Mystery Shop Rubric.pdf"
     )
     assert _recommended_course_content_destination("Welcome.html") is None
     assert _recommended_course_content_destination("folder/guide.pdf") is None
@@ -48,7 +48,7 @@ def test_normalize_loose_course_content_layout_moves_files_and_skips_collisions(
     assert moved == {
         "banner.png": "course-content/course-images/banner.png",
         "guide.pdf": "course-content/guide.pdf",
-        "Mystery Shop Example.pdf": "course-content/mystery-shop/Mystery Shop Example.pdf",
+        "Mystery Shop Example.pdf": "course-content/Mystery Shop Example.pdf",
         "slides.pptx": "course-content/powerpoints/slides.pptx",
     }
     assert summary["files_relocated"] == 4
@@ -56,9 +56,7 @@ def test_normalize_loose_course_content_layout_moves_files_and_skips_collisions(
     assert (tmp_path / "course-content" / "guide.pdf").exists()
     assert (tmp_path / "course-content" / "course-images" / "banner.png").exists()
     assert (tmp_path / "course-content" / "powerpoints" / "slides.pptx").exists()
-    assert (
-        tmp_path / "course-content" / "mystery-shop" / "Mystery Shop Example.pdf"
-    ).exists()
+    assert (tmp_path / "course-content" / "Mystery Shop Example.pdf").exists()
     assert (tmp_path / "Netiquette.pdf").exists()
     assert (tmp_path / "index.html").exists()
 
