@@ -3,10 +3,12 @@ from __future__ import annotations
 import csv
 import html
 import json
+import posixpath
 import re
 import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -1406,6 +1408,23 @@ _QUIZ_MEDIA_MARKER_RE = re.compile(
     r"(?:src|uri)\s*=\s*[\"'][^\"']+\.(?:png|jpg|jpeg|gif|svg|webp)[^\"']*[\"']",
     flags=re.IGNORECASE,
 )
+_LOCAL_PACKAGE_REF_ATTR_RE = re.compile(
+    r"""(?:href|src|poster|data|uri)\s*=\s*["'](?P<ref>[^"']+)["']""",
+    flags=re.IGNORECASE,
+)
+_LOCAL_PACKAGE_REF_CSS_URL_RE = re.compile(
+    r"""url\(\s*(?P<quote>["']?)(?P<ref>[^)"']+)(?P=quote)\s*\)""",
+    flags=re.IGNORECASE,
+)
+_REFERENCED_TEXT_FILE_EXTENSIONS: frozenset[str] = frozenset(
+    {".html", ".htm", ".xml", ".css", ".svg", ".js", ".txt"}
+)
+_PROTECTED_PACKAGE_PREFIXES: tuple[str, ...] = (
+    "web_resources/",
+    "templateassets/",
+    "template-images/",
+    "course_image/",
+)
 
 
 def _load_rubric_name_map(raw: str) -> dict[str, str]:
@@ -1441,6 +1460,149 @@ def _is_course_content_file(path_text: str) -> bool:
     if _is_package_metadata_file(normalized):
         return False
     return Path(normalized).suffix.lower() in _COURSE_CONTENT_FILE_EXTENSIONS
+
+
+def _is_protected_package_file(path_text: str) -> bool:
+    normalized = path_text.strip().replace("\\", "/").lstrip("/")
+    if not normalized or normalized.endswith("/"):
+        return True
+    if _is_package_metadata_file(normalized):
+        return True
+    lowered = normalized.lower()
+    return any(lowered.startswith(prefix) for prefix in _PROTECTED_PACKAGE_PREFIXES)
+
+
+def _resolve_local_package_ref(current_path: str, raw_ref: str) -> str | None:
+    decoded = html.unescape(str(raw_ref or "").strip())
+    if not decoded:
+        return None
+    lowered = decoded.lower()
+    if lowered.startswith(("#", "mailto:", "tel:", "javascript:", "data:")):
+        return None
+
+    parsed = urlparse(decoded)
+    if parsed.scheme or parsed.netloc:
+        return None
+
+    path_text = (parsed.path or "").strip().replace("\\", "/")
+    if not path_text:
+        return None
+
+    if path_text.startswith("/"):
+        normalized = posixpath.normpath(path_text.lstrip("/"))
+    else:
+        normalized = posixpath.normpath(
+            posixpath.join(posixpath.dirname(current_path), path_text)
+        )
+    normalized = normalized.lstrip("./")
+    if not normalized or normalized.startswith("../"):
+        return None
+    return normalized
+
+
+def _extract_local_package_refs(current_path: str, text: str) -> set[str]:
+    refs: set[str] = set()
+    for pattern in (_LOCAL_PACKAGE_REF_ATTR_RE, _LOCAL_PACKAGE_REF_CSS_URL_RE):
+        for match in pattern.finditer(text or ""):
+            resolved = _resolve_local_package_ref(current_path, match.group("ref"))
+            if resolved:
+                refs.add(resolved)
+    return refs
+
+
+def _collect_manifest_referenced_paths(unpack_dir: Path) -> set[str]:
+    referenced: set[str] = set()
+    for manifest_path in sorted(unpack_dir.rglob("imsmanifest.xml")):
+        if not manifest_path.is_file():
+            continue
+        relative_manifest = str(manifest_path.relative_to(unpack_dir).as_posix())
+        referenced.add(relative_manifest)
+        try:
+            tree = ET.parse(manifest_path)
+        except ET.ParseError:
+            continue
+        root = tree.getroot()
+        base_dir = posixpath.dirname(relative_manifest)
+        for element in root.iter():
+            for key, value in list(element.attrib.items()):
+                if _local_name(key) != "href":
+                    continue
+                resolved = _resolve_local_package_ref(
+                    posixpath.join(base_dir, "__manifest__"),
+                    str(value or ""),
+                )
+                if resolved:
+                    referenced.add(resolved)
+    return referenced
+
+
+def _expand_referenced_package_paths(
+    unpack_dir: Path,
+    *,
+    initial_paths: set[str],
+) -> set[str]:
+    all_files = {
+        str(path.relative_to(unpack_dir).as_posix())
+        for path in unpack_dir.rglob("*")
+        if path.is_file()
+    }
+    kept = {path for path in initial_paths if path in all_files}
+    queue: deque[str] = deque(sorted(kept))
+
+    while queue:
+        current = queue.popleft()
+        suffix = Path(current).suffix.lower()
+        if suffix not in _REFERENCED_TEXT_FILE_EXTENSIONS:
+            continue
+        file_path = unpack_dir / Path(current)
+        if not file_path.is_file():
+            continue
+        try:
+            text = _read_text(file_path)
+        except Exception:
+            continue
+        for resolved in _extract_local_package_refs(current, text):
+            if resolved not in all_files or resolved in kept:
+                continue
+            kept.add(resolved)
+            queue.append(resolved)
+    return kept
+
+
+def _trim_unreferenced_package_files(unpack_dir: Path) -> dict:
+    all_files = {
+        str(path.relative_to(unpack_dir).as_posix())
+        for path in unpack_dir.rglob("*")
+        if path.is_file()
+    }
+    protected = {path for path in all_files if _is_protected_package_file(path)}
+    manifest_referenced = _collect_manifest_referenced_paths(unpack_dir)
+    kept = _expand_referenced_package_paths(
+        unpack_dir,
+        initial_paths=protected | manifest_referenced,
+    )
+
+    removed_paths: list[str] = []
+    removed_count = 0
+    for relative_path in sorted(all_files):
+        if relative_path in kept or _is_protected_package_file(relative_path):
+            continue
+        path = unpack_dir / Path(relative_path)
+        if not path.is_file():
+            continue
+        path.unlink()
+        removed_count += 1
+        if len(removed_paths) < 20:
+            removed_paths.append(relative_path)
+
+    return {
+        "pruning_enabled": True,
+        "protected_files": len(protected),
+        "manifest_seed_files": len(manifest_referenced),
+        "kept_files": len(kept),
+        "files_pruned": removed_count,
+        "pruned_paths_sample": removed_paths,
+    }
 
 
 def _recommended_course_content_destination(
@@ -3261,6 +3423,7 @@ def run_migration(
         file_layout_summary.update(
             _rewrite_manifest_hrefs_for_moved_files(unpack_dir, moved_course_files)
         )
+        file_layout_summary.update(_trim_unreferenced_package_files(unpack_dir))
 
         manifest_found = any(unpack_dir.rglob("imsmanifest.xml"))
 

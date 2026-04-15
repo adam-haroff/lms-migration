@@ -36,6 +36,7 @@ lms-quiz-audit = "lms_migration.quiz_audit:main"
 lms-style-inference = "lms_migration.style_inference:main"
 lms-a11y-audit = "lms_migration.canvas_a11y_audit:main"
 lms-blueprint-audit = "lms_migration.blueprint_audit:main"
+lms-build-lor-recovery = "lms_migration.lor_saved_pages:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

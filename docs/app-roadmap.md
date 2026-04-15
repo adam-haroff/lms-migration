@@ -173,6 +173,14 @@ package imported successfully.
   then reuse those resolved references consistently instead of introducing a second
   layer of template-file IDs later.
 
+- **Unique manifest/resource namespaces for saved-LOR recovery imports** — The
+  ad hoc saved-LOR recovery builder currently reuses fixed manifest, item, and
+  resource identifiers across separate recovery packages. When multiple recovery zips
+  are imported into the same Canvas course, Canvas can treat later imports as updates
+  to earlier imported objects instead of distinct new pages. Add a package-specific
+  namespace or deterministic unique suffix to the manifest identifier and all generated
+  item/resource IDs so repeated recovery imports do not overwrite one another.
+
 ---
 
 ## Non-negotiable engineering controls

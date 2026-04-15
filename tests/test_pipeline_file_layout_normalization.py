@@ -6,6 +6,7 @@ from lms_migration.pipeline import (
     _normalize_loose_course_content_layout,
     _recommended_course_content_destination,
     _rewrite_manifest_hrefs_for_moved_files,
+    _trim_unreferenced_package_files,
 )
 
 
@@ -89,3 +90,85 @@ def test_rewrite_manifest_hrefs_for_moved_files_updates_resource_and_file_hrefs(
     updated = manifest.read_text(encoding="utf-8")
     assert 'href="course-content/Netiquette.pdf"' in updated
     assert summary == {"manifest_files_changed": 1, "manifest_hrefs_rewritten": 2}
+
+
+def test_trim_unreferenced_package_files_prunes_orphans_but_keeps_references(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "imsmanifest.xml"
+    manifest.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imscp_v1p1">
+  <resources>
+    <resource identifier="R1" type="webcontent" href="pages/lesson.html">
+      <file href="pages/lesson.html" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        encoding="utf-8",
+    )
+    lesson_dir = tmp_path / "pages"
+    lesson_dir.mkdir(parents=True, exist_ok=True)
+    (lesson_dir / "lesson.html").write_text(
+        '<html><body><img src="../images/used.png"><a href="../docs/guide.pdf">Guide</a></body></html>',
+        encoding="utf-8",
+    )
+    images_dir = tmp_path / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    (images_dir / "used.png").write_text("img", encoding="utf-8")
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "guide.pdf").write_text("guide", encoding="utf-8")
+    (tmp_path / "orphan.pdf").write_text("orphan", encoding="utf-8")
+    (lesson_dir / "orphan.html").write_text("<html>orphan</html>", encoding="utf-8")
+
+    template_dir = tmp_path / "web_resources" / "template-images" / "icons"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    (template_dir / "book.png").write_text("template", encoding="utf-8")
+
+    summary = _trim_unreferenced_package_files(tmp_path)
+
+    assert summary["files_pruned"] == 2
+    assert "orphan.pdf" in summary["pruned_paths_sample"]
+    assert "pages/orphan.html" in summary["pruned_paths_sample"]
+    assert manifest.exists()
+    assert (lesson_dir / "lesson.html").exists()
+    assert (images_dir / "used.png").exists()
+    assert (docs_dir / "guide.pdf").exists()
+    assert (template_dir / "book.png").exists()
+    assert not (tmp_path / "orphan.pdf").exists()
+    assert not (lesson_dir / "orphan.html").exists()
+
+
+def test_trim_unreferenced_package_files_keeps_metadata_linked_assets(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "imsmanifest.xml").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imscp_v1p1">
+  <resources>
+    <resource identifier="R1" type="webcontent" href="pages/start.html">
+      <file href="pages/start.html" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pages").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "pages" / "start.html").write_text("<html>start</html>", encoding="utf-8")
+    (tmp_path / "quiz_d2l_123.xml").write_text(
+        '<quiz><matimage uri="quizimages/q1.png" /></quiz>',
+        encoding="utf-8",
+    )
+    (tmp_path / "quizimages").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "quizimages" / "q1.png").write_text("img", encoding="utf-8")
+    (tmp_path / "unused.docx").write_text("unused", encoding="utf-8")
+
+    summary = _trim_unreferenced_package_files(tmp_path)
+
+    assert summary["files_pruned"] == 1
+    assert "unused.docx" in summary["pruned_paths_sample"]
+    assert (tmp_path / "quiz_d2l_123.xml").exists()
+    assert (tmp_path / "quizimages" / "q1.png").exists()
