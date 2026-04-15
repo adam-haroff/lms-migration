@@ -55,6 +55,26 @@ def fetch_course(
     return payload
 
 
+def update_course_default_view(
+    *,
+    base_url: str,
+    course_id: str,
+    token: str,
+    default_view: str = "wiki",
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/courses/{course_id}"
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="PUT",
+        form_data={"course[default_view]": default_view},
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas course update response format.")
+    return payload
+
+
 def fetch_migration_issues(
     *,
     base_url: str,
@@ -319,6 +339,31 @@ def update_course_page_body(
     )
     if not isinstance(payload, dict):
         raise CanvasAPIError("Unexpected Canvas page update response format.")
+    return payload
+
+
+def set_course_front_page(
+    *,
+    base_url: str,
+    course_id: str,
+    page_url: str,
+    token: str,
+    publish: bool = True,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    page_part = parse.quote(page_url.strip(), safe="")
+    url = f"{base}/api/v1/courses/{course_id}/pages/{page_part}"
+    form_data: dict[str, Any] = {"wiki_page[front_page]": "true"}
+    if publish:
+        form_data["wiki_page[published]"] = "true"
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="PUT",
+        form_data=form_data,
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas front-page update response format.")
     return payload
 
 

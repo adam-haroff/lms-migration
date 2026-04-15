@@ -428,6 +428,31 @@ def _course_prefix_from_manifest(manifest_path: Path) -> str:
     return ""
 
 
+def sinclair_division_for_course_prefix(course_prefix: str) -> str:
+    """Return the Sinclair division code for a course prefix.
+
+    Unknown prefixes default to ``"hs"``.
+    """
+    return _PREFIX_TO_DIVISION.get(course_prefix.lower(), "hs")
+
+
+def home_page_variant_basename(course_prefix: str) -> str:
+    """Return the template home-page basename for a course prefix."""
+    return _DIVISION_HOME_PAGE[sinclair_division_for_course_prefix(course_prefix)]
+
+
+def home_page_variant_title(course_prefix: str) -> str:
+    """Return the expected Canvas page title for the divisional home page."""
+    basename = home_page_variant_basename(course_prefix)
+    if basename == "home-page-bps.html":
+        return "Home Page - BPS"
+    if basename == "home-page-lcs.html":
+        return "Home Page - LCS"
+    if basename == "home-page-stem.html":
+        return "Home Page - STEM"
+    return "Home Page"
+
+
 def _home_page_variant(course_prefix: str) -> str:
     """Return the template wiki_content basename for the home page.
 
@@ -437,8 +462,7 @@ def _home_page_variant(course_prefix: str) -> str:
     Returns:
         A basename like ``"home-page-bps.html"`` or ``"home-page.html"``.
     """
-    division = _PREFIX_TO_DIVISION.get(course_prefix.lower(), "hs")
-    return _DIVISION_HOME_PAGE[division]
+    return home_page_variant_basename(course_prefix)
 
 
 def _inject_home_page(

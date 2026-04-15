@@ -19,6 +19,8 @@ from lms_migration.canvas_api import (
     fetch_course,
     fetch_course_pages,
     normalize_base_url,
+    set_course_front_page,
+    update_course_default_view,
 )
 
 
@@ -347,6 +349,22 @@ class TestFetchCourse:
                 )
 
 
+class TestUpdateCourseDefaultView:
+    def test_puts_wiki_default_view(self):
+        body = json.dumps({"id": 42, "default_view": "wiki"}).encode()
+        with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
+            mock_open.return_value = _fake_response(body, {})
+            result = update_course_default_view(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                token="tok",
+            )
+        assert result == {"id": 42, "default_view": "wiki"}
+        req = mock_open.call_args[0][0]
+        assert req.get_method() == "PUT"
+        assert b"course%5Bdefault_view%5D=wiki" in req.data
+
+
 # ─── fetch_course_pages ───────────────────────────────────────────────────────
 
 
@@ -436,4 +454,24 @@ class TestCreateOrUpdateCoursePage:
                 published=True,
             )
         req = mock_open.call_args[0][0]
+        assert b"wiki_page%5Bpublished%5D=true" in req.data
+
+
+class TestSetCourseFrontPage:
+    def test_sets_front_page_and_publishes(self):
+        body = json.dumps({"url": "home-page", "front_page": True}).encode()
+        with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
+            mock_open.return_value = _fake_response(body, {})
+            result = set_course_front_page(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                page_url="home-page-lcs",
+                token="tok",
+                publish=True,
+            )
+        assert result == {"url": "home-page", "front_page": True}
+        req = mock_open.call_args[0][0]
+        assert req.get_method() == "PUT"
+        assert "home-page-lcs" in req.full_url
+        assert b"wiki_page%5Bfront_page%5D=true" in req.data
         assert b"wiki_page%5Bpublished%5D=true" in req.data

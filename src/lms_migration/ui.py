@@ -26,6 +26,7 @@ from .canvas_api import (
 )
 from .canvas_cleanup_audit import run_canvas_cleanup_audit
 from .canvas_file_organizer import run_canvas_file_organizer
+from .canvas_front_page import auto_set_course_front_page
 from .canvas_preview import CanvasPreviewError, run_preview
 from .canvas_post_import import auto_relink_missing_links
 from .canvas_assessment_templates import auto_wrap_assessment_descriptions
@@ -217,6 +218,7 @@ class LMSMigrationUI:
         self.post_import_wrap_assessments_var = tk.BooleanVar(value=True)
         self.post_import_fix_accessibility_var = tk.BooleanVar(value=True)
         self.post_import_organize_files_var = tk.BooleanVar(value=True)
+        self.post_import_set_front_page_var = tk.BooleanVar(value=True)
         self.ab_variant_var = tk.StringVar(value="A")
         self.ab_include_auto_relink_var = tk.BooleanVar(value=True)
         self.show_canvas_advanced_var = tk.BooleanVar(value=False)
@@ -1501,9 +1503,14 @@ class LMSMigrationUI:
             text="Organize Canvas files and prune empty folders",
             variable=self.post_import_organize_files_var,
         ).grid(row=6, column=1, sticky="w", pady=(0, 3))
+        ttk.Checkbutton(
+            self.canvas_advanced_frame,
+            text="Set the correct division Home Page as Front Page",
+            variable=self.post_import_set_front_page_var,
+        ).grid(row=7, column=1, sticky="w", pady=(0, 3))
 
         ab_row = ttk.Frame(self.canvas_advanced_frame)
-        ab_row.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 4))
+        ab_row.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(2, 4))
         ttk.Label(ab_row, text="A/B variant").grid(row=0, column=0, sticky="w")
         self.ab_variant_combo = ttk.Combobox(
             ab_row,
@@ -2526,6 +2533,9 @@ class LMSMigrationUI:
             file_organizer_report_path = (
                 output_dir / f"{artifact_prefix}.canvas-file-organizer-report.json"
             )
+            front_page_report_path = (
+                output_dir / f"{artifact_prefix}.canvas-front-page-report.json"
+            )
             live_audit_json = (
                 output_dir / f"{artifact_prefix}.canvas-live-link-audit.json"
             )
@@ -2542,6 +2552,7 @@ class LMSMigrationUI:
             file_organizer_report_path = (
                 output_dir / "canvas-file-organizer-report.json"
             )
+            front_page_report_path = output_dir / "canvas-front-page-report.json"
             live_audit_json = output_dir / "canvas-live-link-audit.json"
         cleanup_audit_json = output_dir / "canvas-cleanup-audit.json"
         live_audit_md = live_audit_json.with_suffix(".md")
@@ -2552,6 +2563,8 @@ class LMSMigrationUI:
         wrap_assessments = bool(self.post_import_wrap_assessments_var.get())
         fix_accessibility = bool(self.post_import_fix_accessibility_var.get())
         organize_files = bool(self.post_import_organize_files_var.get())
+        set_front_page = bool(self.post_import_set_front_page_var.get())
+        course_code = self.sinclair_course_code_var.get().strip()
         alias_map_path = self._resolve_alias_map_path(show_warning=True)
         if self.use_template_alias_map_var.get() and alias_map_path is None:
             return
@@ -2575,6 +2588,8 @@ class LMSMigrationUI:
             update_actions.append("fix template accessibility markup")
         if organize_files:
             update_actions.append("organize Canvas files")
+        if set_front_page:
+            update_actions.append("set the correct Home Page as Front Page")
         if apply_safe_fixes:
             update_actions.append("live-audit safe fixes")
         if update_actions:
@@ -2745,6 +2760,52 @@ class LMSMigrationUI:
                     ),
                 )
 
+            front_page_report = None
+            front_page_error = ""
+            if set_front_page:
+                if course_code:
+                    try:
+                        self.root.after(
+                            0,
+                            lambda: self._log(
+                                "[Full Post-Import] Setting course Front Page..."
+                            ),
+                        )
+                        report_path = auto_set_course_front_page(
+                            base_url=base_url,
+                            course_id=course_id,
+                            token=token,
+                            course_code=course_code,
+                            output_json_path=front_page_report_path,
+                            dry_run=False,
+                        )
+                        front_page_report = json.loads(
+                            report_path.read_text(encoding="utf-8")
+                        )
+                    except Exception as exc:  # pragma: no cover - network/runtime dependent
+                        front_page_error = str(exc)
+                        self.root.after(
+                            0,
+                            lambda: self._log(
+                                f"[WARN] [Full Post-Import] Front Page selection failed; continuing with cleanup audit + live audit + post export: {exc}"
+                            ),
+                        )
+                else:
+                    front_page_error = "No Sinclair course code provided."
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            "[WARN] [Full Post-Import] Front Page selection skipped; no Sinclair course code provided."
+                        ),
+                    )
+            else:
+                self.root.after(
+                    0,
+                    lambda: self._log(
+                        "[Full Post-Import] Front Page auto-selection skipped by toggle."
+                    ),
+                )
+
             cleanup_audit_report = None
             cleanup_audit_error = ""
             try:
@@ -2854,6 +2915,11 @@ class LMSMigrationUI:
                     file_organizer_report_path if organize_files else None
                 ),
                 "file_organizer_error": file_organizer_error,
+                "front_page_report": front_page_report,
+                "front_page_report_path": (
+                    front_page_report_path if set_front_page else None
+                ),
+                "front_page_error": front_page_error,
                 "cleanup_audit_json_path": cleanup_audit_json,
                 "cleanup_audit_report": cleanup_audit_report,
                 "cleanup_audit_error": cleanup_audit_error,
@@ -2885,6 +2951,9 @@ class LMSMigrationUI:
         file_organizer_report = payload.get("file_organizer_report")
         file_organizer_report_path = payload.get("file_organizer_report_path")
         file_organizer_error = str(payload.get("file_organizer_error", "")).strip()
+        front_page_report = payload.get("front_page_report")
+        front_page_report_path = payload.get("front_page_report_path")
+        front_page_error = str(payload.get("front_page_error", "")).strip()
         cleanup_audit_json_path = payload.get("cleanup_audit_json_path")
         cleanup_audit_report = payload.get("cleanup_audit_report")
         cleanup_audit_error = str(payload.get("cleanup_audit_error", "")).strip()
@@ -2973,6 +3042,25 @@ class LMSMigrationUI:
             )
         if file_organizer_error:
             self._log(f"[WARN] File organizer error: {file_organizer_error}")
+
+        if front_page_report_path:
+            self._log(f"Front Page report JSON: {front_page_report_path}")
+        if isinstance(front_page_report, dict):
+            selection = front_page_report.get("selection", {})
+            summary = front_page_report.get("summary", {})
+            self._log(
+                "Front Page summary: "
+                f"page_selected={summary.get('page_selected', False)} | "
+                f"front_page_set={summary.get('front_page_set', False)} | "
+                f"used_fallback={summary.get('used_fallback', False)}"
+            )
+            self._log(
+                "Front Page selection: "
+                f"title={selection.get('selected_page_title', '')} | "
+                f"url={selection.get('selected_page_url', '')}"
+            )
+        if front_page_error:
+            self._log(f"[WARN] Front Page error: {front_page_error}")
 
         if cleanup_audit_json_path:
             self._log(f"Cleanup audit JSON: {cleanup_audit_json_path}")
