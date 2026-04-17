@@ -539,12 +539,44 @@ def _escape_xml(value: str) -> str:
     )
 
 
+def _build_package_namespace(
+    *,
+    package_title: str,
+    module_title: str,
+    pages: list[SavedLorPage],
+) -> str:
+    digest = hashlib.sha1()
+    digest.update(package_title.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(module_title.encode("utf-8"))
+    digest.update(b"\0")
+    for page in sorted(
+        pages,
+        key=lambda item: (
+            item.relative_path,
+            item.display_title,
+            item.module_section or "",
+            item.lo_ident_id or "",
+        ),
+    ):
+        digest.update(page.relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(page.display_title.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((page.module_section or "").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((page.lo_ident_id or "").encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:10].upper()
+
+
 def _build_manifest(
     *,
     package_title: str,
     module_title: str,
     pages: list[SavedLorPage],
     staged_root: Path,
+    package_namespace: str,
 ) -> str:
     lines: list[str] = [
         "<?xml version='1.0' encoding='utf-8'?>",
@@ -552,7 +584,7 @@ def _build_manifest(
         'xmlns:d2l_2p0="http://desire2learn.com/xsd/d2lcp_v2p0" '
         'xmlns:imsmd="http://www.imsglobal.org/xsd/imsmd_rootv1p2p1" '
         'xmlns:lom="http://ltsc.ieee.org/xsd/LOM" '
-        'identifier="D2L_SAVED_LOR_PAGE_RECOVERY">',
+        f'identifier="D2L_SAVED_LOR_PAGE_RECOVERY_{package_namespace}">',
         "  <metadata>",
         "    <imsmd:lom>",
         "      <imsmd:general>",
@@ -565,12 +597,14 @@ def _build_manifest(
         "  </metadata>",
         '  <organizations default="d2l_orgs">',
         '    <organization identifier="d2l_org">',
-        '      <item identifier="9000" identifierref="RES_RECOVERY_MODULE" d2l_2p0:id="9000" description="" completion_type="2">',
+        f'      <item identifier="RECOVERY_{package_namespace}_ROOT" '
+        f'identifierref="RES_RECOVERY_MODULE_{package_namespace}" '
+        'd2l_2p0:id="9000" description="" completion_type="2">',
         f"        <title>{_escape_xml(module_title)}</title>",
     ]
 
     resources: list[str] = [
-        '    <resource identifier="RES_RECOVERY_MODULE" type="webcontent" '
+        f'    <resource identifier="RES_RECOVERY_MODULE_{package_namespace}" type="webcontent" '
         'd2l_2p0:material_type="contentmodule" d2l_2p0:link_target="" href="" title="" />'
     ]
 
@@ -581,11 +615,11 @@ def _build_manifest(
     page_counter = 1
     section_counter = 1
     for section_title, section_pages in by_section.items():
-        section_identifier = f"910{section_counter}"
-        section_resource = f"RES_RECOVERY_SECTION_{section_counter}"
+        section_identifier = f"RECOVERY_{package_namespace}_SECTION_{section_counter}"
+        section_resource = f"RES_RECOVERY_SECTION_{package_namespace}_{section_counter}"
         lines.extend(
             [
-                f'        <item identifier="{section_identifier}" identifierref="{section_resource}" d2l_2p0:id="{section_identifier}" description="" completion_type="2">',
+                f'        <item identifier="{section_identifier}" identifierref="{section_resource}" d2l_2p0:id="910{section_counter}" description="" completion_type="2">',
                 f"          <title>{_escape_xml(section_title)}</title>",
             ]
         )
@@ -594,11 +628,11 @@ def _build_manifest(
             f'd2l_2p0:material_type="contentmodule" d2l_2p0:link_target="" href="" title="{_escape_xml(section_title)}" />'
         )
         for page in section_pages:
-            page_identifier = f"920{page_counter}"
-            page_resource = f"RES_RECOVERY_PAGE_{page_counter}"
+            page_identifier = f"RECOVERY_{package_namespace}_PAGE_{page_counter}"
+            page_resource = f"RES_RECOVERY_PAGE_{package_namespace}_{page_counter}"
             lines.extend(
                 [
-                    f'          <item identifier="{page_identifier}" identifierref="{page_resource}" d2l_2p0:id="{page_identifier}" description="" completion_type="2">',
+                    f'          <item identifier="{page_identifier}" identifierref="{page_resource}" d2l_2p0:id="920{page_counter}" description="" completion_type="2">',
                     f"            <title>{_escape_xml(page.display_title)}</title>",
                     "          </item>",
                 ]
@@ -621,7 +655,7 @@ def _build_manifest(
         if relative_path == "imsmanifest.xml" or file_path.suffix.lower() in _HTML_SUFFIXES:
             continue
         resources.append(
-            f'    <resource identifier="RES_RECOVERY_FILE_{file_counter}" type="webcontent" '
+            f'    <resource identifier="RES_RECOVERY_FILE_{package_namespace}_{file_counter}" type="webcontent" '
             f'd2l_2p0:material_type="content" d2l_2p0:link_target="" href="{_escape_xml(relative_path)}" title="" />'
         )
         file_counter += 1
@@ -648,6 +682,11 @@ def build_saved_lor_pages_recovery_package(
     pages = _resolve_saved_pages(input_dir=input_dir, inventory_rows=inventory_rows)
     if not pages:
         raise ValueError(f"No HTML pages found under: {input_dir}")
+    package_namespace = _build_package_namespace(
+        package_title=package_title,
+        module_title=module_title,
+        pages=pages,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     zip_path = output_dir / "saved-lor-pages-recovery.zip"
@@ -774,6 +813,7 @@ def build_saved_lor_pages_recovery_package(
             module_title=module_title,
             pages=pages,
             staged_root=staged_root,
+            package_namespace=package_namespace,
         )
         (staged_root / "imsmanifest.xml").write_text(manifest, encoding="utf-8")
         _zip_directory(staged_root, zip_path)
@@ -783,6 +823,7 @@ def build_saved_lor_pages_recovery_package(
         "inventory_csv": str(inventory_csv) if inventory_csv is not None else None,
         "package_title": package_title,
         "module_title": module_title,
+        "package_namespace": package_namespace,
         "pages_found": len(pages),
         "pages_matched_to_inventory": sum(1 for page in pages if page.matched_inventory),
         "sections_found": len({page.module_section for page in pages}),

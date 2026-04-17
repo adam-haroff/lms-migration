@@ -581,6 +581,130 @@ def _normalize_table_row_color_styles(content: str) -> tuple[str, int]:
     return updated, normalized_rows
 
 
+def _is_blackish_color(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = html.unescape(str(value)).strip().lower()
+    normalized = re.sub(r"\s+", "", normalized)
+    return normalized in {
+        "#000",
+        "#000000",
+        "black",
+        "rgb(0,0,0)",
+        "rgba(0,0,0,1)",
+    }
+
+
+def _style_declares_black_background(style_map: dict[str, str]) -> bool:
+    for key in ("background-color", "background"):
+        value = style_map.get(key)
+        if value is None:
+            continue
+        lowered = html.unescape(value).strip().lower()
+        if _is_blackish_color(lowered):
+            return True
+        if re.search(r"(?:^|[\s(,])black(?:[\s),;]|$)", lowered):
+            return True
+        if re.search(r"#000(?:000)?\b", lowered):
+            return True
+        if "rgb(0,0,0)" in lowered or "rgba(0,0,0,1)" in lowered:
+            return True
+    return False
+
+
+def _normalize_descendant_black_text_styles(
+    fragment: str,
+    *,
+    replacement_color: str | None = None,
+) -> tuple[str, int]:
+    normalized = 0
+
+    def replace_tag(match: re.Match[str]) -> str:
+        nonlocal normalized
+        tag_html = match.group(0)
+        style_map = _extract_inline_style_map(tag_html)
+        color_value = style_map.get("color")
+        if not _is_blackish_color(color_value):
+            return tag_html
+        if replacement_color is None:
+            updated_tag, changed = _remove_inline_style_keys(tag_html, {"color"})
+        else:
+            updated_tag, changed = _merge_inline_style(
+                tag_html, {"color": replacement_color}
+            )
+        if changed:
+            normalized += 1
+        return updated_tag
+
+    updated = re.sub(
+        r"<(?:span|strong|b|em|i|u|p|div)\b[^>]*>",
+        replace_tag,
+        fragment,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return updated, normalized
+
+
+def _normalize_black_table_header_cells(content: str) -> tuple[str, int]:
+    cell_pattern = re.compile(
+        r"(?P<open><(?P<tag>th|td)\b[^>]*>)(?P<body>.*?)(?P<close></(?P=tag)>)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    normalized_cells = 0
+
+    def replace_cell(match: re.Match[str]) -> str:
+        nonlocal normalized_cells
+        open_tag = match.group("open")
+        body = match.group("body")
+        if not _style_declares_black_background(_extract_inline_style_map(open_tag)):
+            return match.group(0)
+
+        updated_open_tag, open_changed = _merge_inline_style(
+            open_tag, {"color": "#ffffff"}
+        )
+        rebuilt_body, body_changes = _normalize_descendant_black_text_styles(
+            body,
+            replacement_color="#ffffff",
+        )
+        if not open_changed and body_changes == 0:
+            return match.group(0)
+        normalized_cells += 1
+        return updated_open_tag + rebuilt_body + match.group("close")
+
+    updated = cell_pattern.sub(replace_cell, content)
+    return updated, normalized_cells
+
+
+def _normalize_block_heading_color_overrides(content: str) -> tuple[str, int]:
+    heading_pattern = re.compile(
+        r"<h(?P<level>[1-6])(?P<attrs>\b[^>]*)>(?P<body>.*?)</h(?P=level)>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    normalized_headings = 0
+
+    def replace_heading(match: re.Match[str]) -> str:
+        nonlocal normalized_headings
+        open_tag = f"<h{match.group('level')}{match.group('attrs')}>"
+        style_map = _extract_inline_style_map(open_tag)
+        has_block_heading_style = any(
+            key in style_map for key in ("background", "background-color", "padding")
+        )
+        if not has_block_heading_style:
+            return match.group(0)
+
+        rebuilt_body, body_changes = _normalize_descendant_black_text_styles(
+            match.group("body"),
+            replacement_color=None,
+        )
+        if body_changes == 0:
+            return match.group(0)
+        normalized_headings += 1
+        return f"<h{match.group('level')}{match.group('attrs')}>{rebuilt_body}</h{match.group('level')}>"
+
+    updated = heading_pattern.sub(replace_heading, content)
+    return updated, normalized_headings
+
+
 def _repair_heading_level_jumps(content: str) -> tuple[str, int]:
     heading_pattern = re.compile(
         r"<h(?P<level>[1-6])(?P<attrs>\b[^>]*)>(?P<body>.*?)</h(?P=level)>",
@@ -663,6 +787,30 @@ def apply_accessibility_markup_fixes(
             )
         )
 
+    updated, normalized_black_header_cells = _normalize_black_table_header_cells(
+        updated
+    )
+    if normalized_black_header_cells:
+        applied.append(
+            AppliedChange(
+                category="accessibility",
+                description="Forced white text semantics for black table header cells and conflicting descendant styles",
+                count=normalized_black_header_cells,
+            )
+        )
+
+    updated, normalized_block_headings = _normalize_block_heading_color_overrides(
+        updated
+    )
+    if normalized_block_headings:
+        applied.append(
+            AppliedChange(
+                category="accessibility",
+                description="Removed conflicting descendant color overrides inside styled block headings",
+                count=normalized_block_headings,
+            )
+        )
+
     if repair_heading_jumps:
         updated, heading_repairs = _repair_heading_level_jumps(updated)
         if heading_repairs:
@@ -737,6 +885,40 @@ def _normalize_equation_image_styles(content: str) -> tuple[str, int]:
         flags=re.IGNORECASE | re.DOTALL,
     )
     return updated, styled
+
+
+def _strip_presentational_typography_styles(content: str) -> tuple[str, int, int]:
+    tag_pattern = re.compile(
+        r"<(?P<tag>p|li|div|span|h[1-6])\b[^>]*>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    stripped_styles = 0
+
+    def replace_tag(match: re.Match[str]) -> str:
+        nonlocal stripped_styles
+        tag_html = match.group(0)
+        updated_tag, changed = _remove_inline_style_keys(
+            tag_html,
+            {"font-family", "font-size", "line-height"},
+        )
+        if changed:
+            stripped_styles += 1
+        return updated_tag
+
+    updated = tag_pattern.sub(replace_tag, content)
+
+    unwrapped_spans = 0
+    bare_span_pattern = re.compile(
+        r"<span\s*>\s*(?P<body>.*?)\s*</span>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    while True:
+        updated, removed = bare_span_pattern.subn(r"\g<body>", updated)
+        if removed <= 0:
+            break
+        unwrapped_spans += removed
+
+    return updated, stripped_styles, unwrapped_spans
 
 
 def _is_syllabus_like_page(
@@ -2290,6 +2472,26 @@ def apply_canvas_sanitizer(
                 category="sanitizer",
                 description="Removed D2L-specific inline style tokens that do not translate to Canvas",
                 count=removed_d2l_style_tokens,
+            )
+        )
+
+    updated, stripped_typography_styles, unwrapped_plain_spans = (
+        _strip_presentational_typography_styles(updated)
+    )
+    if stripped_typography_styles:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Removed presentational font-family/font-size/line-height styles from ordinary text blocks",
+                count=stripped_typography_styles,
+            )
+        )
+    if unwrapped_plain_spans:
+        applied.append(
+            AppliedChange(
+                category="sanitizer",
+                description="Unwrapped spans that no longer carried meaningful formatting after typography cleanup",
+                count=unwrapped_plain_spans,
             )
         )
 

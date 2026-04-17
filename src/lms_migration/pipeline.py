@@ -1412,6 +1412,10 @@ _LOCAL_PACKAGE_REF_ATTR_RE = re.compile(
     r"""(?:href|src|poster|data|uri)\s*=\s*["'](?P<ref>[^"']+)["']""",
     flags=re.IGNORECASE,
 )
+_LOCAL_PACKAGE_REF_ORIGINAL_ATTR_RE = re.compile(
+    r"""data-migration-original-href\s*=\s*["'](?P<ref>[^"']+)["']""",
+    flags=re.IGNORECASE,
+)
 _LOCAL_PACKAGE_REF_CSS_URL_RE = re.compile(
     r"""url\(\s*(?P<quote>["']?)(?P<ref>[^)"']+)(?P=quote)\s*\)""",
     flags=re.IGNORECASE,
@@ -1502,7 +1506,11 @@ def _resolve_local_package_ref(current_path: str, raw_ref: str) -> str | None:
 
 def _extract_local_package_refs(current_path: str, text: str) -> set[str]:
     refs: set[str] = set()
-    for pattern in (_LOCAL_PACKAGE_REF_ATTR_RE, _LOCAL_PACKAGE_REF_CSS_URL_RE):
+    for pattern in (
+        _LOCAL_PACKAGE_REF_ATTR_RE,
+        _LOCAL_PACKAGE_REF_ORIGINAL_ATTR_RE,
+        _LOCAL_PACKAGE_REF_CSS_URL_RE,
+    ):
         for match in pattern.finditer(text or ""):
             resolved = _resolve_local_package_ref(current_path, match.group("ref"))
             if resolved:

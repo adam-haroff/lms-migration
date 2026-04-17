@@ -1177,6 +1177,31 @@ class TestAccessibilityMarkupFixes:
         assert result.count("color: #ffffff") == 2
         assert any("row-level table color styles" in c.description.lower() for c in changes)
 
+    def test_black_table_header_cells_force_white_text_and_fix_nested_black_spans(self):
+        html = (
+            '<table><tr>'
+            '<th style="background-color: #000000;"><span style="color: #000000;">Header</span></th>'
+            '</tr></table>'
+        )
+        result, changes = apply_accessibility_markup_fixes(html)
+
+        assert 'background-color: #000000' in result
+        assert 'color: #ffffff' in result
+        assert 'span style="color: #ffffff;' in result or '<span>Header</span>' in result
+        assert any("black table header cells" in c.description.lower() for c in changes)
+
+    def test_styled_block_heading_strips_conflicting_nested_black_color(self):
+        html = (
+            '<h2 style="color: #000000; background: #CACACA; padding-left: 5px;">'
+            '<span style="color: #000000;"><strong>Licensing and Image Source Documentation</strong></span>'
+            '</h2>'
+        )
+        result, changes = apply_accessibility_markup_fixes(html)
+
+        assert 'background: #CACACA' in result
+        assert '<span style="color: #000000;' not in result
+        assert any("block headings" in c.description.lower() for c in changes)
+
     def test_heading_jumps_are_repaired_when_requested(self):
         html = "<h2>Overview</h2><h4>Instructions</h4><h5>Detail</h5>"
         result, changes = apply_accessibility_markup_fixes(html, repair_heading_jumps=True)
@@ -1198,6 +1223,39 @@ class TestAccessibilityMarkupFixes:
         result = _sanitize_syllabus(html)
         assert "Course Outline (16-Week)" not in result
         assert "Course Outline" in result
+
+
+class TestTypographySimplification:
+    def test_removes_font_family_and_size_from_plain_text_spans(self):
+        html = (
+            '<p><span style="font-family: Lato, sans-serif; font-size: 19px;">'
+            "Overview text."
+            "</span></p>"
+        )
+        out = _sanitize(html)
+        assert "font-family" not in out
+        assert "font-size" not in out
+        assert "<span" not in out
+        assert "Overview text." in out
+
+    def test_preserves_color_only_heading_spans(self):
+        html = (
+            '<h2><span style="color: #ac1a2f; font-family: Lato, sans-serif; font-size: 19px;">'
+            "<strong>Module Objectives</strong>"
+            "</span></h2>"
+        )
+        out = _sanitize(html)
+        assert "font-family" not in out
+        assert "font-size" not in out
+        assert "color: #ac1a2f" in out
+        assert "<span" in out
+
+    def test_strips_line_height_from_paragraph_style(self):
+        html = '<p style="font-size: 18px; line-height: 1.6; color: #333333;">Text</p>'
+        out = _sanitize(html)
+        assert "font-size" not in out
+        assert "line-height" not in out
+        assert "color: #333333" in out
 
 
 class TestCourseOutlineColumnNormalisation:

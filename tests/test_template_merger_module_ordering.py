@@ -369,6 +369,21 @@ class TestFillModuleIntro:
         assert "<li>Post to discussion</li>" in result
         assert "Complete the items listed below as you work through this module:" not in result
 
+    def test_intro_shell_renames_page_title_to_introduction_and_checklist(self):
+        source = (
+            "<html><head><title>Intro</title></head><body>"
+            "<h1>Introduction</h1><p>Welcome.</p>"
+            "<h2>Objectives</h2><ul><li>Learn it</li></ul>"
+            "</body></html>"
+        )
+        result = _fill_module_intro(
+            source,
+            module_number=1,
+            chapter_title="Chapter 1",
+            path_seed="Introduction and Objectives.html",
+        )
+        assert "<title>Module 1: Chapter 1: Introduction and Checklist</title>" in result
+
 
 class TestLearningActivitiesClassification:
     def test_learning_activities_page_role_detected(self):
@@ -694,6 +709,63 @@ class TestSeededStarterCourse:
         assert _TEMPLATE_INSTRUCTOR_MODULE_TITLE not in module_meta
         assert _TEMPLATE_START_HERE_TITLE not in module_meta
         assert _TEMPLATE_CONCLUSION_TITLE not in module_meta
+
+
+class TestTemplateMergeIntroTitleSync:
+    def test_run_template_merge_updates_manifest_title_for_intro_page(
+        self, tmp_path: Path
+    ):
+        manifest = tmp_path / "imsmanifest.xml"
+        manifest.write_text(
+            textwrap.dedent(
+                """\
+                <?xml version="1.0" encoding="UTF-8"?>
+                <manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+                  <organizations>
+                    <organization identifier="d2l_org">
+                      <item identifier="module1">
+                        <title>Module 1: Sample</title>
+                        <item identifier="intro1" identifierref="RES_INTRO">
+                          <title>Module 1: Introduction and Objectives</title>
+                        </item>
+                      </item>
+                    </organization>
+                  </organizations>
+                  <resources>
+                    <resource identifier="RES_INTRO" href="01-Sample/Introduction and Objectives.html" />
+                  </resources>
+                </manifest>
+                """
+            ),
+            encoding="utf-8",
+        )
+        intro_dir = tmp_path / "01-Sample"
+        intro_dir.mkdir(parents=True, exist_ok=True)
+        (intro_dir / "Introduction and Objectives.html").write_text(
+            textwrap.dedent(
+                """\
+                <html>
+                  <head><title>Module 1: Introduction and Objectives</title></head>
+                  <body>
+                    <h1>Introduction</h1>
+                    <p>Welcome.</p>
+                    <h2>Objectives</h2>
+                    <ul><li>Learn it</li></ul>
+                  </body>
+                </html>
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            seeded_starter_course=True,
+        )
+
+        updated_manifest = manifest.read_text(encoding="utf-8")
+        assert "Module 1: Sample: Introduction and Checklist" in updated_manifest
 
 
 class TestTemplateMergeModuleMeta:

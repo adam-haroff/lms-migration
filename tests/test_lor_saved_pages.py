@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -256,3 +257,58 @@ def test_build_saved_lor_pages_recovery_package_pairs_wrapper_downloads_and_merg
         assert "Module Checklist" in html_doc
         assert "Explain spiral of silence." in html_doc
         assert "Complete the Practice Quiz." in html_doc
+
+
+def test_build_saved_lor_pages_recovery_package_uses_unique_manifest_namespace(
+    tmp_path: Path,
+) -> None:
+    input_dir_a = tmp_path / "saved-pages-a"
+    input_dir_b = tmp_path / "saved-pages-b"
+    out_a = tmp_path / "out-a"
+    out_b = tmp_path / "out-b"
+
+    _write(
+        input_dir_a / "Groupthink Theory" / "Practice Quiz.html",
+        """
+        <html><head><title>Practice Quiz</title></head>
+        <body><h1>Practice Quiz</h1><p>Alpha content.</p></body></html>
+        """,
+    )
+    _write(
+        input_dir_b / "Narrative Paradigm" / "Practice Quiz.html",
+        """
+        <html><head><title>Practice Quiz</title></head>
+        <body><h1>Practice Quiz</h1><p>Beta content.</p></body></html>
+        """,
+    )
+
+    result_a = build_saved_lor_pages_recovery_package(
+        input_dir=input_dir_a,
+        output_dir=out_a,
+        package_title="Recovery A",
+        module_title="Recovered Pages A",
+    )
+    result_b = build_saved_lor_pages_recovery_package(
+        input_dir=input_dir_b,
+        output_dir=out_b,
+        package_title="Recovery B",
+        module_title="Recovered Pages B",
+    )
+
+    report_a = json.loads(result_a.report_json.read_text(encoding="utf-8"))
+    report_b = json.loads(result_b.report_json.read_text(encoding="utf-8"))
+    assert report_a["package_namespace"] != report_b["package_namespace"]
+
+    with ZipFile(result_a.output_zip) as zf_a, ZipFile(result_b.output_zip) as zf_b:
+        manifest_a = zf_a.read("imsmanifest.xml").decode("utf-8", errors="ignore")
+        manifest_b = zf_b.read("imsmanifest.xml").decode("utf-8", errors="ignore")
+        assert (
+            f'identifier="D2L_SAVED_LOR_PAGE_RECOVERY_{report_a["package_namespace"]}"'
+            in manifest_a
+        )
+        assert (
+            f'identifier="D2L_SAVED_LOR_PAGE_RECOVERY_{report_b["package_namespace"]}"'
+            in manifest_b
+        )
+        assert f"RES_RECOVERY_PAGE_{report_a['package_namespace']}_" in manifest_a
+        assert f"RES_RECOVERY_PAGE_{report_b['package_namespace']}_" in manifest_b

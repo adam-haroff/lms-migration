@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import posixpath
 import re
 import textwrap
 import xml.etree.ElementTree as ET
@@ -1713,7 +1714,7 @@ def _fill_module_intro(
     )
 
     mod_str = f"Module {module_number}: " if module_number else ""
-    new_title = f"{mod_str}{chapter_title}: Introduction and Objectives"
+    new_title = f"{mod_str}{chapter_title}: Introduction and Checklist"
 
     result = _replace_title(d2l_html, new_title)
     result = _replace_body(result, new_body)
@@ -1915,6 +1916,88 @@ def _inject_manifest_entries(
         )
 
     manifest_path.write_text(manifest, encoding="utf-8")
+
+
+def _sync_manifest_page_titles(
+    unpack_dir: Path,
+    *,
+    pages: Iterable[ScannedPage],
+) -> int:
+    manifest_path = unpack_dir / "imsmanifest.xml"
+    if not manifest_path.exists():
+        return 0
+
+    title_by_relpath: dict[str, str] = {}
+    for page in pages:
+        if page.role != PageRole.MODULE_INTRO:
+            continue
+        current_title = _extract_title(
+            page.html_file.read_text(encoding="utf-8", errors="replace")
+        )
+        if not current_title:
+            continue
+        title_by_relpath[page.path] = current_title
+
+    if not title_by_relpath:
+        return 0
+
+    tree = ET.parse(manifest_path)
+    root = tree.getroot()
+
+    resources_parent = None
+    for child in root:
+        if child.tag.endswith("resources"):
+            resources_parent = child
+            break
+    if resources_parent is None:
+        return 0
+
+    manifest_rel_dir = manifest_path.relative_to(unpack_dir).parent.as_posix()
+    if manifest_rel_dir == ".":
+        manifest_rel_dir = ""
+
+    href_by_resource_id: dict[str, str] = {}
+    for resource in resources_parent:
+        if not resource.tag.endswith("resource"):
+            continue
+        resource_id = (resource.attrib.get("identifier") or "").strip()
+        href = (resource.attrib.get("href") or "").strip()
+        if not resource_id or not href:
+            continue
+        normalized_href = href.replace("\\", "/")
+        resolved = posixpath.normpath(
+            posixpath.join(manifest_rel_dir, normalized_href)
+            if manifest_rel_dir
+            else normalized_href
+        )
+        href_by_resource_id[resource_id] = resolved
+
+    changed = 0
+    for item in root.iter():
+        if not item.tag.endswith("item"):
+            continue
+        resource_id = (item.attrib.get("identifierref") or "").strip()
+        if not resource_id:
+            continue
+        href = href_by_resource_id.get(resource_id)
+        if href is None:
+            continue
+        expected_title = title_by_relpath.get(href)
+        if not expected_title:
+            continue
+        for child in item:
+            if not child.tag.endswith("title"):
+                continue
+            current_title = (child.text or "").strip()
+            if current_title == expected_title:
+                break
+            child.text = expected_title
+            changed += 1
+            break
+
+    if changed:
+        tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -2203,6 +2286,8 @@ def run_template_merge(
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(page_html, encoding="utf-8")
         result.added_template_pages.append(dest_rel)
+
+    _sync_manifest_page_titles(unpack_dir, pages=scanned_pages)
 
     # ── Home page selection ────────────────────────────────────────────────
     # Detect the course-code prefix from the D2L manifest so we can pick the

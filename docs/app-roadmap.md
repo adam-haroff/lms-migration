@@ -63,6 +63,14 @@ Priority order reflects frequency and full-automation potential.
 - **LTI tool references** — Detect Panopto/Studio embeds and LTI links; map to Canvas
   equivalents using a configurable org-level lookup table; flag unresolvable references.
 
+- **Panopto quickLink iframe conversion** — Some D2L courses embed Panopto videos as
+  D2L quickLink LTI iframes inside HTML pages instead of using direct Panopto embed
+  markup. The export preserves the D2L `rCode`, LTI XML, title, and Panopto launch
+  metadata, but not a clean Canvas-ready `Embed.aspx?id=...` URL. Add a conversion step
+  that inventories every Panopto quickLink in page HTML, accepts a resolver table
+  (`rCode` → Panopto embed URL or UUID), and rewrites those iframes into the standard
+  responsive Panopto embed wrapper during package generation or page-replacement export.
+
 - **Blueprint-specific audit** — Before sync: flag ghost records in discussions (deleted
   replies), verify unpublished page state won't be overwritten, confirm gradebook
   structure and module prerequisites survive sync to child courses.
@@ -180,6 +188,75 @@ package imported successfully.
   to earlier imported objects instead of distinct new pages. Add a package-specific
   namespace or deterministic unique suffix to the manifest identifier and all generated
   item/resource IDs so repeated recovery imports do not overwrite one another.
+
+- **Section-level Introduction/Objectives → Introduction/Checklist synthesis** —
+  Some D2L courses, including MAT 0200, use a section landing-page pattern where the
+  first page in the module is a checklist/overview page and the second page is
+  `Introduction and Objectives`. The migration should automatically:
+  1. rename the second page to `Introduction and Checklist`,
+  2. preserve the Introduction text from the original page,
+  3. carry forward `Learning Objectives` into the `Module Objectives` section even when
+     the source heading is not already template-shaped, and
+  4. pull the checklist items from the module's first overview/checklist page into the
+     `Module Checklist` section.
+  This should prevent the current failure mode where the Canvas page keeps the old
+  `Introduction and Objectives` title, loses the objectives list, and falls back to a
+  generic checklist instead of the section-specific checklist from D2L.
+
+- **Semantic HTML simplification pass for page bodies** — The current pipeline still
+  preserves too many layout wrappers and inline typography styles from D2L, especially
+  on content pages like MAT 0200 video lessons. Add a late normalization pass that:
+  1. unwraps non-semantic `div`/`span` wrappers when they do not carry meaningful
+     structure,
+  2. removes inline `font-size`, `font-family`, and similar text-presentational styles
+     from ordinary paragraphs and headings so Canvas theme defaults can apply,
+  3. keeps only high-value inline styles such as image alignment, intentional table
+     cell emphasis, and canonical template divider/header treatments, and
+  4. prefers semantic blocks (`h2`/`h3`, `p`, `ul`/`ol`, `table`, `figure`) over
+     deeply nested wrapper markup.
+  The goal is to preserve structure and accessibility without carrying forward D2L's
+  presentational HTML debt or overriding Canvas's default handling of headings and
+  paragraph text.
+
+- **Equation-image quiz stem conversion for math courses** — Some D2L quizzes,
+  including MAT 0200, store the entire question stem as an image of an equation
+  instead of text or MathML. After Canvas import, these stems can remain image-only
+  or break entirely if the file reference fails. Add a math-course recovery pass that:
+  1. inventories New Quiz items whose `item_body` is only an image,
+  2. attempts to recover a semantic text or MathML version from source data,
+  3. supports a reviewer-assisted transcription map when no hidden equation text
+     exists in the export, and
+  4. patches the live New Quiz item bodies through the New Quizzes API with
+     accessible HTML math.
+  The goal is to eliminate inaccessible image-only equation stems and avoid the
+  current manual transcription path for math-heavy courses.
+
+- **Course-file reachability before pruning / relink neutralization** — MAT 0200
+  exposed a failure mode where page bodies still referenced valid D2L course files
+  (for example `../Notes and Handouts/*.pdf` in Video Lessons pages), but the later
+  pipeline stages neutralized those links to `href="#"` before package pruning and
+  post-import relinking were complete. That caused the actual PDFs to be dropped from
+  the canvas-ready package and left the live Canvas pages with broken placeholder links.
+  Fix this by:
+  1. computing file reachability from the original pre-neutralized local href/src values,
+  2. preserving all D2L course files referenced through `data-migration-original-href`
+     or equivalent migration metadata,
+  3. only pruning after that course-file graph is stable, and
+  4. teaching the post-import relinker to restore course-file links from those preserved
+     original paths instead of leaving them as unresolved `#` placeholders.
+
+### Recently completed before MAT 0470 (2026-04-16)
+
+- Implemented unique manifest/resource namespaces for saved-LOR recovery imports so
+  multiple recovery packages do not overwrite one another in Canvas.
+- Implemented section-level `Introduction and Checklist` title synthesis in the
+  template merge flow and synced the corrected title into the generated manifest.
+- Implemented a conservative semantic HTML simplification pass that strips ordinary
+  text typography styles and unwraps now-meaningless spans.
+- Extended the template accessibility fixer to handle black header cells with nested
+  black text overrides and styled heading blocks with conflicting descendant colors.
+- Implemented course-file reachability retention from `data-migration-original-href`
+  so package pruning no longer drops files that the post-import relinker can recover.
 
 ---
 

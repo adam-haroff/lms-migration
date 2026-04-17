@@ -172,3 +172,39 @@ def test_trim_unreferenced_package_files_keeps_metadata_linked_assets(
     assert "unused.docx" in summary["pruned_paths_sample"]
     assert (tmp_path / "quiz_d2l_123.xml").exists()
     assert (tmp_path / "quizimages" / "q1.png").exists()
+
+
+def test_trim_unreferenced_package_files_keeps_neutralized_original_href_targets(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "imsmanifest.xml").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imscp_v1p1">
+  <resources>
+    <resource identifier="R1" type="webcontent" href="pages/video-lessons.html">
+      <file href="pages/video-lessons.html" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pages").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "pages" / "video-lessons.html").write_text(
+        '<html><body><a href="#" data-migration-link-status="needs-review" '
+        'data-migration-original-href="../Notes and Handouts/Section 6.1 Notes.pdf">'
+        "Section 6.1 Notes</a></body></html>",
+        encoding="utf-8",
+    )
+    handouts_dir = tmp_path / "Notes and Handouts"
+    handouts_dir.mkdir(parents=True, exist_ok=True)
+    (handouts_dir / "Section 6.1 Notes.pdf").write_text("notes", encoding="utf-8")
+    (tmp_path / "unused.pdf").write_text("unused", encoding="utf-8")
+
+    summary = _trim_unreferenced_package_files(tmp_path)
+
+    assert summary["files_pruned"] == 1
+    assert "unused.pdf" in summary["pruned_paths_sample"]
+    assert (tmp_path / "pages" / "video-lessons.html").exists()
+    assert (handouts_dir / "Section 6.1 Notes.pdf").exists()
+    assert not (tmp_path / "unused.pdf").exists()
