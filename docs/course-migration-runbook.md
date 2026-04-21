@@ -2,6 +2,8 @@
 
 Use this as the default per-course workflow for live migration work.
 
+For app-setting choices, also use [app-operator-guide.md](/Users/adam.haroff/Desktop/projects/codex/lms-migration/docs/app-operator-guide.md). The operator guide is the quicker reference for which toggles to use in a clean Canvas course versus a course that already has the starter template.
+
 ## Goal
 
 Move one D2L export into a Canvas-ready package with the fewest possible manual passes:

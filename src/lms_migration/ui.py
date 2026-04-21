@@ -45,6 +45,11 @@ from .review_writeback import apply_review_draft
 from .safe_summary import build_safe_summary_from_path
 from .template_standards import resolve_default_template_package
 from .visual_audit import build_visual_audit
+from .workflow_presets import (
+    WorkflowPreset,
+    default_workflow_preset_id,
+    list_workflow_presets,
+)
 
 
 def _default_safe_summary_path(report_path: Path) -> Path:
@@ -127,9 +132,20 @@ class LMSMigrationUI:
         self.input_zip_history = self._load_history("input_zip_history")
 
         workspace_root = self._resolve_workspace_root()
+        self.operator_guide_path = workspace_root / "docs" / "app-operator-guide.md"
         default_output = workspace_root / "output"
         reference_doc_defaults = default_reference_doc_paths(workspace_root)
         default_template_package = resolve_default_template_package(workspace_root)
+        self.workflow_presets = list_workflow_presets()
+        self.workflow_preset_by_id = {
+            preset.preset_id: preset for preset in self.workflow_presets
+        }
+        self.workflow_preset_label_to_id = {
+            preset.label: preset.preset_id for preset in self.workflow_presets
+        }
+        default_workflow_preset = self.workflow_preset_by_id[
+            default_workflow_preset_id()
+        ]
         self.policy_profiles_path = workspace_root / "rules" / "policy_profiles.json"
         self.available_policy_profiles = self._load_available_policy_profiles()
         self.input_zip_var = tk.StringVar(value="")
@@ -223,6 +239,8 @@ class LMSMigrationUI:
         self.ab_include_auto_relink_var = tk.BooleanVar(value=True)
         self.show_canvas_advanced_var = tk.BooleanVar(value=False)
         self.show_optional_tools_var = tk.BooleanVar(value=False)
+        self.workflow_preset_var = tk.StringVar(value=default_workflow_preset.label)
+        self.workflow_preset_summary_var = tk.StringVar(value="")
         self.canvas_upload_zip_var = tk.StringVar(value="")
         self.canvas_upload_template_zip_var = tk.StringVar(value="")
         self.canvas_upload_include_template_var = tk.BooleanVar(value=True)
@@ -255,8 +273,12 @@ class LMSMigrationUI:
         self.template_visual_standards_var.trace_add(
             "write", lambda *_: self._sync_template_visual_subcontrols_state()
         )
+        self.workflow_preset_var.trace_add(
+            "write", lambda *_: self._refresh_workflow_preset_summary()
+        )
 
         self._build_layout()
+        self._refresh_workflow_preset_summary()
 
     def _load_ui_state_payload(self) -> dict:
         if not self.ui_state_path.exists():
@@ -657,6 +679,75 @@ class LMSMigrationUI:
         ):
             self.math_audit_output_var.set(str(math_output_default))
 
+    def _selected_workflow_preset(self) -> WorkflowPreset:
+        preset_id = self.workflow_preset_label_to_id.get(
+            self.workflow_preset_var.get().strip(), default_workflow_preset_id()
+        )
+        return self.workflow_preset_by_id.get(
+            preset_id, self.workflow_presets[0]
+        )
+
+    def _refresh_workflow_preset_summary(self) -> None:
+        preset = self._selected_workflow_preset()
+        summary = (
+            f"{preset.summary}\n\n"
+            f"Recommended settings: "
+            f"conversion policy `{preset.conversion_policy}`, "
+            f"template styling overlay {'on' if preset.apply_template_overlay else 'off'}, "
+            f"template page merge {'on' if preset.apply_template_page_merge else 'off'}, "
+            f"starter template shell in generated package {'on' if preset.include_starter_template_shell else 'off'}, "
+            f"course already has starter template {'on' if preset.course_already_has_starter_template else 'off'}, "
+            f"import starter template first {'on' if preset.import_starter_template_first else 'off'}."
+        )
+        self.workflow_preset_summary_var.set(summary)
+
+    def _apply_selected_workflow_preset(self) -> None:
+        preset = self._selected_workflow_preset()
+
+        policy_profile = (
+            preset.conversion_policy
+            if preset.conversion_policy in self.available_policy_profiles
+            else self.available_policy_profiles[0]
+        )
+        self.policy_profile_var.set(policy_profile)
+        self.enable_template_overlay_var.set(preset.apply_template_overlay)
+        self.template_overlay_use_alias_map_var.set(
+            preset.use_template_asset_alias_map
+        )
+        self.template_merge_var.set(preset.apply_template_page_merge)
+        self.full_template_shell_var.set(preset.include_starter_template_shell)
+        self.seeded_starter_course_var.set(
+            preset.course_already_has_starter_template
+        )
+        self.canvas_upload_include_template_var.set(
+            preset.import_starter_template_first
+        )
+        self.accordion_handling_var.set(preset.accordion_handling)
+        self.accordion_alignment_var.set(preset.accordion_title_align)
+        self.image_layout_mode_var.set(preset.image_layout_mode)
+        self.math_handling_var.set(preset.math_handling)
+        self.intro_checklist_handling_var.set(preset.intro_checklist_handling)
+        self.learning_activities_handling_var.set(
+            preset.learning_activities_handling
+        )
+        self._refresh_workflow_preset_summary()
+        self._log(f"Applied workflow preset: {preset.label}")
+
+    def _open_operator_guide(self) -> None:
+        if not self.operator_guide_path.exists():
+            messagebox.showwarning(
+                "Missing operator guide",
+                f"Operator guide not found: {self.operator_guide_path}",
+            )
+            return
+        try:
+            webbrowser.open_new_tab(self.operator_guide_path.resolve().as_uri())
+        except Exception as exc:
+            messagebox.showerror(
+                "Unable to open operator guide",
+                f"Could not open {self.operator_guide_path}.\n\n{exc}",
+            )
+
     def _build_layout(self) -> None:
         style = ttk.Style(self.root)
         try:
@@ -867,7 +958,7 @@ class LMSMigrationUI:
         tmpl_row.grid(row=5, column=1, columnspan=2, sticky="w", pady=(2, 4))
         self.enable_template_overlay_check = ttk.Checkbutton(
             tmpl_row,
-            text="Apply Template Overlay",
+            text="Apply template styling overlay",
             variable=self.enable_template_overlay_var,
         )
         self.enable_template_overlay_check.grid(
@@ -875,19 +966,19 @@ class LMSMigrationUI:
         )
         self.template_overlay_use_alias_map_check = ttk.Checkbutton(
             tmpl_row,
-            text="Use alias map for Template Overlay",
+            text="Use template asset alias map",
             variable=self.template_overlay_use_alias_map_var,
         )
         self.template_overlay_use_alias_map_check.grid(row=0, column=1, sticky="w")
         self.template_merge_check = ttk.Checkbutton(
             tmpl_row,
-            text="Apply Template Merge",
+            text="Apply template page merge",
             variable=self.template_merge_var,
         )
         self.template_merge_check.grid(row=0, column=2, sticky="w", padx=(16, 0))
         self.full_template_shell_check = ttk.Checkbutton(
             tmpl_row,
-            text="Include Full Starter Template Shell",
+            text="Include starter template shell in generated package",
             variable=self.full_template_shell_var,
         )
         self.full_template_shell_check.grid(
@@ -895,20 +986,66 @@ class LMSMigrationUI:
         )
         self.seeded_starter_course_check = ttk.Checkbutton(
             tmpl_row,
-            text="Target existing starter template course (reuse shell/assets post-import)",
+            text="Course already has starter template (reuse template assets after import)",
             variable=self.seeded_starter_course_var,
         )
         self.seeded_starter_course_check.grid(
             row=2, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
+        ttk.Label(
+            src,
+            text=(
+                "Recommended default: for a clean Canvas course, leave the starter template "
+                "shell out of the generated package, keep template reuse on, and import the "
+                "starter template first during Upload."
+            ),
+            wraplength=1080,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
+        preset_lf = ttk.LabelFrame(
+            parent, text="Recommended Workflow Preset", padding=10
+        )
+        preset_lf.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        preset_lf.columnconfigure(1, weight=1)
+        ttk.Label(preset_lf, text="Preset").grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        self.workflow_preset_combo = ttk.Combobox(
+            preset_lf,
+            textvariable=self.workflow_preset_var,
+            values=[preset.label for preset in self.workflow_presets],
+            state="readonly",
+        )
+        self.workflow_preset_combo.grid(
+            row=0, column=1, sticky="ew", padx=6, pady=(0, 6)
+        )
+        ttk.Button(
+            preset_lf,
+            text="Apply Preset",
+            command=self._apply_selected_workflow_preset,
+        ).grid(row=0, column=2, padx=(6, 6), pady=(0, 6))
+        ttk.Button(
+            preset_lf,
+            text="Open Operator Guide",
+            command=self._open_operator_guide,
+        ).grid(row=0, column=3, pady=(0, 6))
+        ttk.Label(
+            preset_lf,
+            textvariable=self.workflow_preset_summary_var,
+            wraplength=1080,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=1, column=0, columnspan=4, sticky="w")
 
         # Conversion options
         opts = ttk.LabelFrame(parent, text="Conversion Options", padding=10)
-        opts.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        opts.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         opts.columnconfigure(1, weight=1)
         opts.columnconfigure(2, weight=2)
 
-        ttk.Label(opts, text="Policy profile").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Label(opts, text="Conversion policy").grid(row=0, column=0, sticky="w", pady=3)
         self.policy_profile_combo = ttk.Combobox(
             opts,
             textvariable=self.policy_profile_var,
@@ -919,6 +1056,13 @@ class LMSMigrationUI:
         self.policy_profile_combo.current(
             self.available_policy_profiles.index(self.policy_profile_var.get())
         )
+        ttk.Label(
+            opts,
+            text="Strict is the recommended default for Sinclair course migrations.",
+            wraplength=480,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=0, column=2, sticky="w", pady=3)
 
         ttk.Label(opts, text="Accordion handling").grid(
             row=1, column=0, sticky="w", pady=3
@@ -997,6 +1141,13 @@ class LMSMigrationUI:
             state="readonly",
         )
         self.math_handling_combo.grid(row=6, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(
+            opts,
+            text="Preserve semantic is the recommended default unless you have a specific equation-conversion goal.",
+            wraplength=480,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=6, column=2, sticky="w", pady=3)
 
         ttk.Label(opts, text="Intro/Checklist handling").grid(
             row=7, column=0, sticky="w", pady=3
@@ -1036,7 +1187,7 @@ class LMSMigrationUI:
 
         # Template standards
         tpl = ttk.LabelFrame(parent, text="Template Standards", padding=10)
-        tpl.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        tpl.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         self.template_module_structure_check = ttk.Checkbutton(
             tpl,
             text="Apply Module Structure  (Topic → Module, Overview / Learning Activities / Review layout)",
@@ -1073,7 +1224,7 @@ class LMSMigrationUI:
 
         # Action buttons
         btn_frame = ttk.Frame(parent)
-        btn_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 4))
+        btn_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 4))
         btn_frame.columnconfigure(0, weight=1)
         ttk.Checkbutton(
             btn_frame,
@@ -1262,6 +1413,17 @@ class LMSMigrationUI:
             wraplength=1080,
             justify="left",
         ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            intro_lf,
+            text=(
+                "Recommended default: if the Canvas course is clean, leave "
+                "`Import starter template first` on. If the course already has the starter "
+                "template, turn it off."
+            ),
+            wraplength=1080,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         # Package paths
         pkg = ttk.LabelFrame(parent, text="Package", padding=10)
@@ -1310,12 +1472,23 @@ class LMSMigrationUI:
         )
         ttk.Checkbutton(
             pkg,
-            text="Import template first (uncheck if the course already has the template)",
+            text="Import starter template first (for clean Canvas courses)",
             variable=self.canvas_upload_include_template_var,
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        ttk.Label(
+            pkg,
+            text=(
+                "Use this when the Canvas course is still clean. Turn it off if the "
+                "course already has the starter template or if the generated package "
+                "already includes the full starter template shell."
+            ),
+            wraplength=1080,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 6))
         self._add_file_row(
             pkg,
-            3,
+            4,
             "Preview result JSON (output)",
             self.canvas_preview_output_var,
             "Save As",
@@ -1388,6 +1561,16 @@ class LMSMigrationUI:
             wraplength=1080,
             justify="left",
         ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            intro_lf,
+            text=(
+                "Recommended default: leave the post-import fixes on unless you are debugging a "
+                "specific issue. The normal workflow is Cleanup + Audit, then Course Snapshot."
+            ),
+            wraplength=1080,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         # Primary actions
         primary = ttk.LabelFrame(parent, text="Actions", padding=10)

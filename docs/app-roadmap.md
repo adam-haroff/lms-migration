@@ -181,6 +181,15 @@ package imported successfully.
   then reuse those resolved references consistently instead of introducing a second
   layer of template-file IDs later.
 
+- **T-prefixed template shell naming for example items** — When starter-template
+  example pages, assignments, discussions, and quizzes are intentionally retained in a
+  migrated course for faculty reference, rename them consistently with a `T` marker so
+  they are clearly distinguishable from real course content. Examples:
+  `Module T1: Introduction and Checklist`, `Module T1: Assignment [Title Here]`,
+  `Module T1: Discussion [Title Here]`, and similar course-conclusion/template items.
+  This should make template leftovers easier to identify, discuss with faculty, and
+  remove during final cleanup.
+
 - **Unique manifest/resource namespaces for saved-LOR recovery imports** — The
   ad hoc saved-LOR recovery builder currently reuses fixed manifest, item, and
   resource identifiers across separate recovery packages. When multiple recovery zips
@@ -244,6 +253,99 @@ package imported successfully.
   3. only pruning after that course-file graph is stable, and
   4. teaching the post-import relinker to restore course-file links from those preserved
      original paths instead of leaving them as unresolved `#` placeholders.
+
+## Phase 4 additions (from MAT 0200 + MAT 0470 post-import cleanup, 2026-04-21)
+
+These items came from repeated live-course cleanup after import, especially in math
+courses where New Quizzes, template pages, and course files still needed targeted
+Canvas-side repair after the package imported successfully.
+
+- **New Quizzes asset reconciliation after import** — MAT 0200 exposed a separate
+  failure mode from ordinary page/file relinking: some quiz image assets were not
+  available in Canvas after import even though the D2L source still had the files.
+  Add a post-import API step that:
+  1. inventories New Quiz item bodies for local image/file references,
+  2. compares those references against live Canvas Files,
+  3. uploads any missing source assets from the original D2L package into a canonical
+     course folder (preferably `course-content/course-images` for reusable quiz images),
+  4. rewrites the live New Quiz item bodies to the canonical Canvas file URLs, and
+  5. emits a repair report so the reviewer can see what was restored automatically.
+  This should prevent the current manual recovery path for missing quiz images/files
+  that do not participate cleanly in the normal package-manifest relink flow.
+
+- **Template-page accessibility preset pack (Canvas API post-import)** — The generic
+  accessibility fixer now handles many common template issues, but MAT 0200 and
+  MAT 0470 still surfaced residual Canvas-checker findings on live template pages
+  such as syllabus table contrast issues, nested span color conflicts, and stray
+  heading-level problems in template reference pages. Add a template-specific
+  post-import repair pass that:
+  1. targets known Sinclair template pages by title/pattern,
+  2. applies the verified heading/color/contrast fixes that have already worked in
+     live courses,
+  3. preserves intentional visual treatments such as white text on black table headers
+     where that is the approved design, and
+  4. runs as part of the existing Canvas cleanup workflow so template pages are clean
+     in the Canvas Accessibility Checker immediately after upload.
+
+- **Pattern-driven bulk Canvas API operations** — Several of the highest-value time
+  savings in recent courses came from one-off API scripts that updated multiple pages,
+  assignments, or quizzes at once after the reviewer identified a clear pattern.
+  Formalize those into reusable app features, including:
+  1. bulk page body replacement by title/path pattern,
+  2. bulk assignment setting updates by naming convention or module membership,
+  3. bulk quiz item/body updates by quiz title and item pattern,
+  4. bulk publish/unpublish and safe cleanup helpers, and
+  5. bulk module/header scaffolding from a simple CSV/JSON input.
+  The goal is to turn repeated ad hoc Canvas API fixes into supported reviewer tools
+  instead of requiring course-specific scripts each time.
+
+- **Equation-image transcription assistant (LaTeX first, MathML optional)** — Math
+  courses still encounter quiz and page content where equations exist only as images.
+  Add an assisted workflow that:
+  1. inventories equation-only images in pages and New Quiz items,
+  2. attempts OCR/transcription into a reviewer-editable LaTeX candidate,
+  3. optionally converts approved LaTeX into MathML for Canvas insertion,
+  4. supports patching either package HTML or live Canvas/New Quiz bodies, and
+  5. keeps the original image as fallback evidence until the reviewer approves the
+     semantic replacement.
+  The primary output should be trustworthy LaTeX first; MathML should remain an
+  optional derived format rather than the only representation.
+
+- **Canvas API opportunity inventory for reviewer acceleration** — Start a formal
+  catalog of safe, repeatable post-import API actions that can save reviewer time.
+  Candidate operations from recent migrations include:
+  1. creating module shells and repeated headers/checklists in bulk,
+  2. replacing or standardizing assignment/discussion/quiz descriptions at scale,
+  3. applying consistent naming conventions across modules, pages, and assignments,
+  4. mass-updating submission settings, point values, and due-date scaffolds,
+  5. rewriting broken file links to Canvas preview links in bulk, and
+  6. generating live inventories such as instructor notes, unused pages, and cleanup
+     candidates directly from the course API.
+  This should become a small library of trusted operations that the reviewer can run
+  from the app without needing custom scripts for each course.
+
+- **Operator-facing UI language cleanup + embedded workflow help** — The app wording
+  has grown around internal migration terminology and is now too dependent on expert
+  interpretation. Add a user-facing terminology pass that:
+  1. replaces internal labels with clearer operator language,
+  2. groups settings by the real decisions an ID/CC is making,
+  3. adds inline help for the most confusing toggles,
+  4. provides built-in workflow presets such as "clean Canvas course" vs "template
+     already present", and
+  5. keeps the UI language aligned with the operator guide so reviewers do not have
+     to ask for the recommended settings on each course.
+
+- **Page Review workbench usability improvements** — The page review interface is
+  already useful, but it still takes too much interpretation for routine reviewer
+  work. Continue improving it with:
+  1. clearer reviewer-facing language instead of internal scoring terminology,
+  2. better triage grouping for the highest-value pages first,
+  3. easier side-by-side comparison and approval flows,
+  4. stronger cues for what changed automatically versus what still needs a person,
+  5. simpler filtering for common reviewer tasks, and
+  6. documentation/help that matches how IDs and CCs actually use the workbench.
+  The goal is to make page review faster, more legible, and less dependent on expert
+  interpretation.
 
 ### Recently completed before MAT 0470 (2026-04-16)
 
