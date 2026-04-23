@@ -17,7 +17,7 @@ class WorkflowPreset:
     import_starter_template_first: bool = True
     accordion_handling: str = "smart"
     accordion_title_align: str = "left"
-    image_layout_mode: str = "safe-block"
+    image_layout_mode: str = "preserve-wrap"
     math_handling: str = "preserve-semantic"
     intro_checklist_handling: str = "rebuild-when-confident"
     learning_activities_handling: str = "preserve"

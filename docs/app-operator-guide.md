@@ -73,13 +73,15 @@ Unless the course gives you a specific reason to change them, use:
 - `Conversion policy` = `strict`
 - `Accordion handling` = `smart`
 - `Accordion title align` = `left`
-- `Image layout mode` = `safe-block`
+- `Image layout mode` = `preserve-wrap`
 - `Math handling` = `preserve-semantic`
 - `Intro/Checklist handling` = `rebuild-when-confident`
 - `Learning Activities handling` = `preserve`
 
-These are the safest defaults for Sinclair courses because they favor structure
-preservation and reduce layout surprises.
+These are the current recommended defaults for Sinclair courses because they
+preserve the original reading flow more faithfully while still staying within
+the safer Canvas template structure. Use `safe-block` only when a course proves
+that wrapped images are rendering badly in Canvas.
 
 ## Recommended Post-Import Defaults
 

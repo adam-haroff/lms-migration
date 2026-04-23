@@ -10,6 +10,7 @@ import posixpath
 import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from zipfile import ZipFile
@@ -225,7 +226,7 @@ _ICON_CATALOG: list[tuple[str, str]] = [
     ("book.png", "Read"),
     ("headphones.png", "Listen"),
     ("video.png", "View"),
-    ("bookmark.png", "View This"),
+    ("bookmark.png", "Title"),
     ("folder.png", "Additional Resources"),
     ("circle-arrow.png", "Practice"),
     ("rocket.png", "Assessment"),
@@ -244,6 +245,81 @@ _ICON_CATALOG: list[tuple[str, str]] = [
     ("ai-brain.png", "AI Usage Allowed"),
 ]
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_TEMPLATE_PACKAGE_CANDIDATES: tuple[Path, ...] = (
+    _REPO_ROOT / "resources/examples/template/elearn-standard-template-export-20260324.imscc",
+    _REPO_ROOT / "resources/examples/template/elearn-standard-template-export.imscc",
+    _REPO_ROOT / "resources/examples/template/elearn-standard-template-export-20260316.imscc",
+)
+_TEMPLATE_PREVIEW_ASSET_ROOTS = (
+    "web_resources/template-images/icons/",
+    "web_resources/template-images/banners/",
+    "web_resources/template-images/sample-images/",
+    "template-images/icons/",
+    "template-images/banners/",
+    "template-images/sample-images/",
+)
+
+
+def _default_template_package_candidates() -> tuple[Path, ...]:
+    return tuple(path for path in _DEFAULT_TEMPLATE_PACKAGE_CANDIDATES if path.exists())
+
+
+def _icon_label(filename: str) -> str:
+    for basename, label in _ICON_CATALOG:
+        if basename.lower() == filename.lower():
+            return label
+    return Path(filename).stem.replace("-", " ").replace("_", " ").title() or filename
+
+
+@lru_cache(maxsize=8)
+def _load_template_preview_asset_catalog(zip_path: str) -> dict[str, dict[str, str]]:
+    path = Path(zip_path)
+    if not path.exists():
+        return {}
+
+    catalog: dict[str, dict[str, str]] = {}
+    with ZipFile(path, "r") as zf:
+        for name in sorted(zf.namelist()):
+            lower = name.lower()
+            if not any(root in lower for root in _TEMPLATE_PREVIEW_ASSET_ROOTS):
+                continue
+            filename = name.split("/")[-1]
+            mime_type, _ = mimetypes.guess_type(filename)
+            if not mime_type or not mime_type.startswith("image/"):
+                continue
+            try:
+                data = zf.read(name)
+            except KeyError:
+                continue
+            encoded = base64.b64encode(data).decode("ascii")
+            label = _banner_label(filename) if "/banners/" in lower else _icon_label(filename)
+            catalog.setdefault(
+                filename.lower(),
+                {
+                    "basename": filename,
+                    "asset_path": name,
+                    "data_uri": f"data:{mime_type};base64,{encoded}",
+                    "label": label,
+                },
+            )
+    return catalog
+
+
+@lru_cache(maxsize=1)
+def _fallback_template_preview_asset_catalog() -> dict[str, dict[str, str]]:
+    for candidate in _default_template_package_candidates():
+        catalog = _load_template_preview_asset_catalog(str(candidate))
+        if catalog:
+            return catalog
+    return {}
+
+
+def _template_preview_asset_entry(basename: str) -> dict[str, str] | None:
+    if not basename:
+        return None
+    return _fallback_template_preview_asset_catalog().get(basename.lower())
+
 
 def _build_icon_catalog(zip_path: Path) -> list[dict]:
     """Return label+data-URI for every icon that exists in *zip_path*.
@@ -252,38 +328,18 @@ def _build_icon_catalog(zip_path: Path) -> list[dict]:
     Icons not present in the zip are still included but with ``data_uri: ""``.
     """
     catalog: list[dict] = []
-    with ZipFile(zip_path, "r") as zf:
-        names = [n for n in zf.namelist() if not n.endswith("/")]
-        for basename, label in _ICON_CATALOG:
-            data_uri = ""
-            asset_path = ""
-            actual = next(
-                (
-                    n
-                    for n in names
-                    if n.lower().endswith(f"/{basename.lower()}")
-                    and _is_template_asset_ref(n)
-                ),
-                None,
-            )
-            if actual:
-                asset_path = actual
-                mime_type, _ = mimetypes.guess_type(basename)
-                if mime_type and mime_type.startswith("image/"):
-                    try:
-                        data = zf.read(actual)
-                        encoded = base64.b64encode(data).decode("ascii")
-                        data_uri = f"data:{mime_type};base64,{encoded}"
-                    except KeyError:
-                        pass
-            catalog.append(
-                {
-                    "basename": basename,
-                    "label": label,
-                    "asset_path": asset_path,
-                    "data_uri": data_uri,
-                }
-            )
+    zip_catalog = _load_template_preview_asset_catalog(str(zip_path))
+    fallback_catalog = _fallback_template_preview_asset_catalog()
+    for basename, label in _ICON_CATALOG:
+        entry = zip_catalog.get(basename.lower()) or fallback_catalog.get(basename.lower())
+        catalog.append(
+            {
+                "basename": basename,
+                "label": label,
+                "asset_path": (entry or {}).get("asset_path", ""),
+                "data_uri": (entry or {}).get("data_uri", ""),
+            }
+        )
     return catalog
 
 
@@ -313,6 +369,13 @@ def _build_preview_asset_map(
                 lower_map=lower_map,
             )
             if resolved is None:
+                if _is_template_asset_ref(raw_ref):
+                    basename = posixpath.basename(
+                        unquote((urlparse(raw_ref).path or raw_ref).strip()).replace("\\", "/")
+                    )
+                    fallback = _template_preview_asset_entry(basename)
+                    if fallback and fallback.get("data_uri"):
+                        asset_map[raw_ref] = str(fallback["data_uri"])
                 continue
             mime_type, _ = mimetypes.guess_type(resolved)
             if not mime_type or not mime_type.startswith("image/"):
@@ -348,30 +411,18 @@ def _build_banner_catalog(zip_path: Path) -> dict[str, dict[str, str]]:
          "label": "3"}
     """
     catalog: dict[str, dict[str, str]] = {}
-    with ZipFile(zip_path, "r") as zf:
-        for name in sorted(zf.namelist()):
-            lower = name.lower()
-            if "banner" not in lower:
+    for source in (
+        _fallback_template_preview_asset_catalog(),
+        _load_template_preview_asset_catalog(str(zip_path)),
+    ):
+        for entry in source.values():
+            filename = entry["basename"]
+            if "banner" not in filename.lower():
                 continue
-            if not (
-                lower.endswith(".png")
-                or lower.endswith(".jpg")
-                or lower.endswith(".jpeg")
-            ):
-                continue
-            filename = name.split("/")[-1]
-            mime_type, _ = mimetypes.guess_type(filename)
-            if not mime_type or not mime_type.startswith("image/"):
-                continue
-            try:
-                data = zf.read(name)
-            except KeyError:
-                continue
-            encoded = base64.b64encode(data).decode("ascii")
             catalog[filename] = {
-                "asset_path": name,
-                "data_uri": f"data:{mime_type};base64,{encoded}",
-                "label": _banner_label(filename),
+                "asset_path": entry.get("asset_path", ""),
+                "data_uri": entry.get("data_uri", ""),
+                "label": entry.get("label", _banner_label(filename)),
             }
     return catalog
 

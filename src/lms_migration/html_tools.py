@@ -2087,7 +2087,10 @@ def apply_canvas_sanitizer(
         _d2l_rule_img_para_re = re.compile(
             r"<p\b[^>]*>"
             r"(?:\s*<span\b[^>]*>)?"
-            r"\s*<img\b[^>]*\bsrc\s*=\s*([\"'])[^\"']*standardImages/Rule[^\"']*\1[^>]*>"
+            r"\s*<img\b(?=[^>]*(?:"
+            r"\bsrc\s*=\s*([\"'])[^\"']*standardImages/Rule[^\"']*\1"
+            r"|(?:\balt|\btitle)\s*=\s*([\"'])Horizontal Rule\2"
+            r"))[^>]*>"
             r"\s*(?:</span>)?"
             r"\s*</p>",
             flags=re.IGNORECASE,
@@ -2921,6 +2924,11 @@ def repair_missing_local_references(
             normalized = posixpath.normpath(posixpath.join(current_dir, path_text))
         normalized = normalized.lstrip("./")
         lowered = normalized.lower()
+
+        if lowered.startswith("template-images/") or lowered.startswith(
+            "web_resources/template-images/"
+        ):
+            return ("keep", "")
 
         if normalized in available_set:
             return ("rewrite", normalized)

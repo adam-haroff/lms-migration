@@ -92,7 +92,7 @@ def test_rewrite_manifest_hrefs_for_moved_files_updates_resource_and_file_hrefs(
     assert summary == {"manifest_files_changed": 1, "manifest_hrefs_rewritten": 2}
 
 
-def test_trim_unreferenced_package_files_prunes_orphans_but_keeps_references(
+def test_trim_unreferenced_package_files_keeps_html_pages_but_prunes_orphan_binaries(
     tmp_path: Path,
 ) -> None:
     manifest = tmp_path / "imsmanifest.xml"
@@ -129,16 +129,15 @@ def test_trim_unreferenced_package_files_prunes_orphans_but_keeps_references(
 
     summary = _trim_unreferenced_package_files(tmp_path)
 
-    assert summary["files_pruned"] == 2
+    assert summary["files_pruned"] == 1
     assert "orphan.pdf" in summary["pruned_paths_sample"]
-    assert "pages/orphan.html" in summary["pruned_paths_sample"]
     assert manifest.exists()
     assert (lesson_dir / "lesson.html").exists()
+    assert (lesson_dir / "orphan.html").exists()
     assert (images_dir / "used.png").exists()
     assert (docs_dir / "guide.pdf").exists()
     assert (template_dir / "book.png").exists()
     assert not (tmp_path / "orphan.pdf").exists()
-    assert not (lesson_dir / "orphan.html").exists()
 
 
 def test_trim_unreferenced_package_files_keeps_metadata_linked_assets(
@@ -208,3 +207,37 @@ def test_trim_unreferenced_package_files_keeps_neutralized_original_href_targets
     assert (tmp_path / "pages" / "video-lessons.html").exists()
     assert (handouts_dir / "Section 6.1 Notes.pdf").exists()
     assert not (tmp_path / "unused.pdf").exists()
+
+
+def test_trim_unreferenced_package_files_keeps_urlencoded_local_image_targets(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "imsmanifest.xml").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imscp_v1p1">
+  <resources>
+    <resource identifier="R1" type="webcontent" href="pages/intro.html">
+      <file href="pages/intro.html" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pages").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "pages" / "intro.html").write_text(
+        '<html><body><p><img src="../images/Margaret%20Mead.jpg" alt="Margaret Mead"></p></body></html>',
+        encoding="utf-8",
+    )
+    images_dir = tmp_path / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    (images_dir / "Margaret Mead.jpg").write_text("img", encoding="utf-8")
+    (tmp_path / "unused.jpg").write_text("unused", encoding="utf-8")
+
+    summary = _trim_unreferenced_package_files(tmp_path)
+
+    assert summary["files_pruned"] == 1
+    assert "unused.jpg" in summary["pruned_paths_sample"]
+    assert (tmp_path / "pages" / "intro.html").exists()
+    assert (images_dir / "Margaret Mead.jpg").exists()
+    assert not (tmp_path / "unused.jpg").exists()

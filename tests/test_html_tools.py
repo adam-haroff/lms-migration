@@ -18,6 +18,7 @@ from lms_migration.html_tools import (
     BestPracticeEnforcerPolicy,
     apply_best_practice_enforcer,
     inject_accent_divider,
+    repair_missing_local_references,
     _convert_bootstrap_accordion_cards,
     _merge_inline_style,
     _extract_attr_value,
@@ -508,6 +509,12 @@ class TestNormalizeIconOnlyParagraph:
         out = self._overlay(html)
         assert "View" in out
 
+    def test_view_this_heading_uses_view_label(self):
+        html = '<p><img src="../TemplateAssets/video.png" alt="View This"/></p>'
+        out = self._overlay(html)
+        assert "View" in out
+        assert "View This" not in out
+
     def test_icon_heading_does_not_insert_space_before_label(self):
         html = '<p><img src="../TemplateAssets/checklist.png" alt=""/></p>'
         out = self._overlay(html)
@@ -615,6 +622,10 @@ class TestCanonicalHeadingLabel:
     def test_video_always_returns_view(self):
         assert _canonical_heading_label("", icon_basename="video.png") == "View"
         assert _canonical_heading_label("View") == "View"
+
+    def test_view_this_is_normalized_to_view(self):
+        assert _canonical_heading_label("View This") == "View"
+        assert _canonical_heading_label("Watch This") == "View"
 
 
 # ===========================================================================
@@ -840,6 +851,79 @@ class TestEnsureCanonicalClosingDivider:
         assert changed is False
         assert self._CANONICAL_HR not in out
 
+    def test_replaces_trailing_bare_hr_and_empty_spacers(self):
+        html = (
+            "<html><body><p>Content.</p><p>&nbsp;</p><hr><p><span>&nbsp;</span></p>"
+            "</body></html>"
+        )
+        out, changed = ensure_canonical_closing_divider(
+            html,
+            file_path="Introduction and Objectives.html",
+            apply_divider_standards=True,
+        )
+        assert changed is True
+        assert out.count(self._CANONICAL_HR) == 1
+        assert "<hr>" not in out.replace(self._CANONICAL_HR, "")
+
+    def test_normalizes_trailing_bare_hr_before_existing_canonical_divider(self):
+        html = (
+            "<html><body><p>Content.</p><hr><p>&nbsp;</p>"
+            f"{self._CANONICAL_HR}</body></html>"
+        )
+        out, changed = ensure_canonical_closing_divider(
+            html,
+            file_path="Learning Activities.html",
+            apply_divider_standards=True,
+        )
+        assert changed is True
+        assert out.count(self._CANONICAL_HR) == 1
+        assert "<hr>" not in out.replace(self._CANONICAL_HR, "")
+
+
+class TestPreserveWrapListOffsets:
+    def _make_ctx(self) -> TemplateOverlayContext:
+        return TemplateOverlayContext(
+            template_package=Path("."),
+            alias_map_source="test",
+            alias_map={},
+            assets_by_basename={},
+            file_name_collisions={},
+            icon_label_by_basename={},
+            apply_visual_standards=True,
+            apply_color_standards=True,
+            apply_divider_standards=True,
+            image_layout_mode="preserve-wrap",
+        )
+
+    def test_list_after_left_wrapped_image_gets_offset(self):
+        html = (
+            '<body><p><img src="photo.jpg" style="float: left; width: 220px;" alt="photo">'
+            "Intro text.</p><ul><li>One</li></ul></body>"
+        )
+        out, changes, _, _ = apply_template_overlay(
+            html,
+            file_path="lesson.html",
+            context=self._make_ctx(),
+        )
+        assert 'float: left' in out
+        assert '<ul style="margin-left: 24px; padding-left: 24px;' in out
+        assert any(
+            "list padding near left-wrapped images" in c.description.lower()
+            for c in changes
+        )
+
+    def test_right_wrapped_image_does_not_force_list_offset(self):
+        html = (
+            '<body><p><img src="photo.jpg" style="float: right; width: 220px;" alt="photo">'
+            "Intro text.</p><ul><li>One</li></ul></body>"
+        )
+        out, _, _, _ = apply_template_overlay(
+            html,
+            file_path="lesson.html",
+            context=self._make_ctx(),
+        )
+        assert "<ul><li>One</li></ul>" in out
+
 
 class TestLearningActivitiesTitleSpacing:
     def _make_ctx(self) -> TemplateOverlayContext:
@@ -868,6 +952,58 @@ class TestLearningActivitiesTitleSpacing:
             context=self._make_ctx(),
         )
         assert not re.search(r"bookmark\.png[^>]*>\s+Learning Activities", out, re.IGNORECASE)
+
+    def test_semantic_section_headings_gain_template_icons(self):
+        html = (
+            "<body><h2>View This</h2><p>Video content.</p>"
+            "<h3>Read</h3><p>Reading content.</p>"
+            "<h3>Explore This</h3><p>Resource content.</p></body>"
+        )
+        ctx = TemplateOverlayContext(
+            template_package=Path("."),
+            alias_map_source="test",
+            alias_map={},
+            assets_by_basename={
+                "video.png": ["TemplateAssets/video.png"],
+                "book.png": ["TemplateAssets/book.png"],
+                "folder.png": ["TemplateAssets/folder.png"],
+            },
+            file_name_collisions={},
+            icon_label_by_basename={
+                "video.png": "View",
+                "book.png": "Read",
+                "folder.png": "Explore This",
+            },
+            apply_visual_standards=True,
+            apply_color_standards=True,
+            apply_divider_standards=True,
+            image_layout_mode="safe-block",
+        )
+        out, _, _, _ = apply_template_overlay(
+            html,
+            file_path="Module 1 Learning Activities.html",
+            context=ctx,
+        )
+        assert "video.png" in out
+        assert "View" in out
+        assert "book.png" in out
+        assert "folder.png" in out
+
+
+class TestRepairMissingLocalReferences:
+    def test_keeps_template_asset_image_refs_when_not_packaged(self):
+        html = (
+            '<html><body><h2><img src="../template-images/icons/video.png" alt="" '
+            'role="presentation">View</h2></body></html>'
+        )
+        out, changes = repair_missing_local_references(
+            html,
+            file_path="04-topic/Learning Activities.html",
+            available_paths={"04-topic/Learning Activities.html"},
+            keep_alt_text_for_missing_images=True,
+        )
+        assert "../template-images/icons/video.png" in out
+        assert changes == []
 
 
 # ===========================================================================
@@ -1481,6 +1617,15 @@ class TestRuleImageReplacement:
         result = self._run(body)
         assert "<hr>" in result.lower() or "<hr " in result.lower()
         assert "Rule_brown_gradient" not in result
+
+    def test_horizontal_rule_alt_image_becomes_hr(self):
+        body = (
+            '<div><p>Before</p><p><img src="images/separator.png" alt="Horizontal Rule" '
+            'title="Horizontal Rule"></p><p>After</p></div>'
+        )
+        result = self._run(body)
+        assert "<hr>" in result.lower() or "<hr " in result.lower()
+        assert "separator.png" not in result
 
     def test_rule_hr_has_no_style(self):
         """The replacement <hr> must be bare (no style attribute)."""

@@ -365,8 +365,9 @@ class TestFillModuleIntro:
             chapter_title="Chapter 1",
             path_seed="Introduction and Objectives.html",
         )
-        assert "<li>Read Chapter 1</li>" in result
-        assert "<li>Post to discussion</li>" in result
+        assert "<ol>" in result
+        assert "<li><strong>Read</strong>: Chapter 1</li>" in result
+        assert "<li><strong>Post</strong>: to discussion</li>" in result
         assert "Complete the items listed below as you work through this module:" not in result
 
     def test_intro_shell_renames_page_title_to_introduction_and_checklist(self):
@@ -383,6 +384,111 @@ class TestFillModuleIntro:
             path_seed="Introduction and Objectives.html",
         )
         assert "<title>Module 1: Chapter 1: Introduction and Checklist</title>" in result
+
+    def test_intro_shell_inserts_title_tag_when_missing(self):
+        source = (
+            "<html><head></head><body>"
+            "<h1>Introduction</h1><p>Welcome.</p>"
+            "<h2>Objectives</h2><ul><li>Learn it</li></ul>"
+            "</body></html>"
+        )
+        result = _fill_module_intro(
+            source,
+            module_number=1,
+            chapter_title="Chapter 1",
+            path_seed="Introduction and Objectives.html",
+        )
+        assert "<title>Module 1: Chapter 1: Introduction and Checklist</title>" in result
+
+    def test_intro_shell_merges_sibling_activities_checklist_page(self):
+        source = (
+            "<html><head><title>Intro</title></head><body>"
+            "<h3>Chapter Two: Ordained by Nature</h3>"
+            "<p>Welcome.</p>"
+            "<h2>Objectives</h2><ul><li>Learn it</li></ul>"
+            "</body></html>"
+        )
+        checklist = (
+            "<html><head><title>Activities Checklist</title></head><body>"
+            "<p>To meet the learning objectives for this topic, you will complete these activities.</p>"
+            "<ul><li>Review the <strong>Introduction and Objectives</strong> page.</li>"
+            "<li>Complete the <strong>Learning Activities</strong> page.</li></ul>"
+            "</body></html>"
+        )
+        result = _fill_module_intro(
+            source,
+            module_number=2,
+            chapter_title="Biological Basis",
+            path_seed="Introduction and Objectives.html",
+            checklist_source_html=checklist,
+        )
+        assert "<h3>Chapter Two: Ordained by Nature</h3>" in result
+        assert "Introduction and Checklist</strong> page" not in result
+        assert (
+            "<li><strong>Complete</strong>: <strong>Learning Activities</strong> page</li>"
+            in result
+        )
+        assert (
+            "<title>Module 2: Chapter Two: Ordained by Nature: Introduction and Checklist</title>"
+            in result
+        )
+
+    def test_intro_shell_preserves_intro_text_and_objectives_preamble_with_image(self):
+        source = (
+            "<html><head><title>Introduction and Objectives</title></head><body>"
+            "<h3>Introduction</h3>"
+            "<h3>Chapter 3: Spanning the World</h3>"
+            "<p>Anthropology is a valuable discipline to help us see gender differently.</p>"
+            "<p>Anthropology also makes it clear that men and women are seen as different in most cultures.</p>"
+            '<p><img src="../standardImages/Rule_brown_gradient.png" alt="Horizontal Rule"></p>'
+            "<h3>Objectives</h3>"
+            '<p>After completing the learning activities for this topic, you will be able to:<img src="images/MargaretMead.jpg" alt="Margaret Mead" style="float: right;" width="197" height="299"></p>'
+            "<ul><li>Explain some of Margaret Mead's studies.</li></ul>"
+            "</body></html>"
+        )
+        result = _fill_module_intro(
+            source,
+            module_number=3,
+            chapter_title="Chapter 3",
+            path_seed="Introduction and Objectives.html",
+        )
+        assert "Refer to the course materials for an introduction to this module." not in result
+        assert "Anthropology" in result
+        assert "different in most cultures" in result
+        assert 'src="images/MargaretMead.jpg"' in result
+        assert "learning activities for this topic" in result
+        assert '<hr style="clear: both;">' in result
+        assert "<pstyle=" not in result.lower()
+
+    def test_intro_shell_filters_generic_intro_and_help_checklist_items(self):
+        source = (
+            "<html><head><title>Introduction and Objectives</title></head><body>"
+            "<h3>Introduction</h3>"
+            "<p>Intro text.</p>"
+            "<h3>Objectives</h3>"
+            "<p>After completing the learning activities for this topic, you will be able to:</p>"
+            "<ul><li>Explain the chapter topic.</li></ul>"
+            "</body></html>"
+        )
+        checklist = (
+            "<html><body><h3>Activities Checklist</h3><ul>"
+            "<li>Review the Introduction and Objectives page.</li>"
+            "<li>Post any questions about the course or assignments in the Discussion | Help.</li>"
+            "<li>Post any questions about the course or assignments in the Course Q&amp;A.</li>"
+            "<li>Complete the Quiz | Chapter 2 Vocabulary.</li>"
+            "</ul></body></html>"
+        )
+        result = _fill_module_intro(
+            source,
+            module_number=2,
+            chapter_title="Chapter 2",
+            path_seed="Introduction and Objectives.html",
+            checklist_source_html=checklist,
+        )
+        assert "Introduction and Checklist page" not in result
+        assert "Discussion | Help" not in result
+        assert "Course Q&amp;A" not in result
+        assert "<strong>Complete</strong>: Quiz | Chapter 2 Vocabulary" in result
 
 
 class TestLearningActivitiesClassification:
@@ -438,7 +544,7 @@ class TestLearningActivitiesRebuild:
             path_seed="Learning Activities.html",
         )
         assert rebuilt is not None
-        assert "View This" in rebuilt
+        assert "View" in rebuilt
         assert "template-images/icons/video.png" in rebuilt
 
 
@@ -710,6 +816,50 @@ class TestSeededStarterCourse:
         assert _TEMPLATE_START_HERE_TITLE not in module_meta
         assert _TEMPLATE_CONCLUSION_TITLE not in module_meta
 
+    def test_seeded_starter_course_injects_unmanifested_courseoverview_pages(
+        self, tmp_path: Path
+    ):
+        manifest = tmp_path / "imsmanifest.xml"
+        manifest.write_text(
+            textwrap.dedent(
+                """\
+                <?xml version="1.0" encoding="UTF-8"?>
+                <manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+                  <organizations>
+                    <organization identifier="d2l_org">
+                      <item identifier="module1"><title>Module 1: Sample</title></item>
+                    </organization>
+                  </organizations>
+                  <resources />
+                </manifest>
+                """
+            ),
+            encoding="utf-8",
+        )
+        courseoverview = tmp_path / "CourseOverview"
+        courseoverview.mkdir(parents=True, exist_ok=True)
+        (courseoverview / "Technology and Resources for Course.html").write_text(
+            textwrap.dedent(
+                """\
+                <html>
+                  <head><title>Technology and Resources for Course</title></head>
+                  <body><p>Carryover content.</p></body>
+                </html>
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            seeded_starter_course=True,
+        )
+
+        updated_manifest = manifest.read_text(encoding="utf-8")
+        assert "CourseOverview\\Technology and Resources for Course.html" in updated_manifest
+        assert "<title>Technology and Resources for Course</title>" in updated_manifest
+
 
 class TestTemplateMergeIntroTitleSync:
     def test_run_template_merge_updates_manifest_title_for_intro_page(
@@ -766,6 +916,93 @@ class TestTemplateMergeIntroTitleSync:
 
         updated_manifest = manifest.read_text(encoding="utf-8")
         assert "Module 1: Sample: Introduction and Checklist" in updated_manifest
+
+    def test_run_template_merge_removes_merged_activities_checklist_page(
+        self, tmp_path: Path
+    ):
+        manifest = tmp_path / "imsmanifest.xml"
+        manifest.write_text(
+            textwrap.dedent(
+                """\
+                <?xml version="1.0" encoding="UTF-8"?>
+                <manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+                  <organizations>
+                    <organization identifier="d2l_org">
+                      <item identifier="module1">
+                        <title>Module 1: Sample</title>
+                        <item identifier="intro1" identifierref="RES_INTRO">
+                          <title>Introduction and Objectives</title>
+                        </item>
+                        <item identifier="check1" identifierref="RES_CHECK">
+                          <title>Activities Checklist</title>
+                        </item>
+                      </item>
+                    </organization>
+                  </organizations>
+                  <resources>
+                    <resource identifier="RES_INTRO" href="01-Sample/Introduction and Objectives.html">
+                      <file href="01-Sample/Introduction and Objectives.html" />
+                    </resource>
+                    <resource identifier="RES_CHECK" href="01-Sample/Activities Checklist.html">
+                      <file href="01-Sample/Activities Checklist.html" />
+                    </resource>
+                  </resources>
+                </manifest>
+                """
+            ),
+            encoding="utf-8",
+        )
+        intro_dir = tmp_path / "01-Sample"
+        intro_dir.mkdir(parents=True, exist_ok=True)
+        (intro_dir / "Introduction and Objectives.html").write_text(
+            textwrap.dedent(
+                """\
+                <html>
+                  <head><title>Introduction and Objectives</title></head>
+                  <body>
+                    <h3>Chapter One: Sample Heading</h3>
+                    <p>Welcome.</p>
+                    <h2>Objectives</h2>
+                    <ul><li>Learn it</li></ul>
+                  </body>
+                </html>
+                """
+            ),
+            encoding="utf-8",
+        )
+        (intro_dir / "Activities Checklist.html").write_text(
+            textwrap.dedent(
+                """\
+                <html>
+                  <head><title>Activities Checklist</title></head>
+                  <body>
+                    <ul><li>Review the <strong>Introduction and Objectives</strong> page.</li></ul>
+                  </body>
+                </html>
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        run_template_merge(
+            tmp_path,
+            _TEMPLATE_PACKAGE,
+            seeded_starter_course=True,
+        )
+
+        updated_manifest = manifest.read_text(encoding="utf-8")
+        assert "Activities Checklist" not in updated_manifest
+        assert "RES_CHECK" not in updated_manifest
+        assert not (intro_dir / "Activities Checklist.html").exists()
+        intro_html = (intro_dir / "Introduction and Objectives.html").read_text(
+            encoding="utf-8"
+        )
+        assert "Introduction and Checklist" in intro_html
+        assert "Introduction and Checklist</strong> page" not in intro_html
+        assert (
+            "<li><strong>Read</strong>: all assigned content and review lecture materials</li>"
+            in intro_html
+        )
 
 
 class TestTemplateMergeModuleMeta:

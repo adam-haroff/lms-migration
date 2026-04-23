@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from zipfile import ZipFile
 
+from .css_parser import parse_inline_style, serialize_inline_style
 from .html_tools import AppliedChange, ManualReviewIssue
 
 
@@ -112,6 +113,15 @@ _INTRO_HEADING_SPECS = {
         "label": "Module Checklist",
         "styles": _SECTION_HEADING_STYLE,
     },
+}
+_SEMANTIC_SECTION_HEADING_ICON_MAP = {
+    "do this": "paper.png",
+    "read": "book.png",
+    "view this": "video.png",
+    "watch this": "video.png",
+    "explore this": "folder.png",
+    "review this": "circle-arrow.png",
+    "additional resources": "folder.png",
 }
 _TEMPLATE_ASSET_REF_PATTERN = (
     r"(?:templateassets|web_resources/template-images(?:/(?:icons|banners|sample-images))?|"
@@ -453,8 +463,8 @@ def _canonical_heading_label(raw_label: str, *, icon_basename: str = "") -> str:
         return "Explore This"
     if key == "review this":
         return "Review This"
-    if key == "view this":
-        return "View This"
+    if key in {"view this", "watch this"}:
+        return "View"
     if basename == "video.png" or key in {"view", "watch"}:
         return "View"
     if basename == "bookmark.png" and key in {"syllabus", "title", "bookmark"}:
@@ -583,8 +593,11 @@ def _resolve_semantic_icon_basename(
         return "folder.png"
     if normalized_label in {"review this"} or normalized_combined in {"review this"}:
         return "circle-arrow.png"
-    if normalized_label in {"view this"} or normalized_combined in {"view this"}:
-        return "bookmark.png"
+    if normalized_label in {"view this", "watch this"} or normalized_combined in {
+        "view this",
+        "watch this",
+    }:
+        return "video.png"
 
     if _contains_heading_phrase(
         combined,
@@ -712,6 +725,8 @@ def _resolve_semantic_icon_basename(
         "video.png",
         "view.png",
     } or normalized_label in {"view", "watch"}:
+        if normalized_combined in {"view this", "watch this"}:
+            return "video.png"
         if normalized_combined in {"view", "watch"} or normalized_combined.startswith(
             "view "
         ):
@@ -938,7 +953,7 @@ class TemplateOverlayConfig:
     apply_visual_standards: bool = True
     apply_color_standards: bool = True
     apply_divider_standards: bool = True
-    image_layout_mode: str = "safe-block"
+    image_layout_mode: str = "preserve-wrap"
     inject_default_banner: bool = False
     use_template_web_resources: bool = True
 
@@ -987,7 +1002,7 @@ def build_template_overlay_context(
         apply_visual_standards=bool(config.apply_visual_standards),
         apply_color_standards=bool(config.apply_color_standards),
         apply_divider_standards=bool(config.apply_divider_standards),
-        image_layout_mode=str(config.image_layout_mode or "safe-block").strip().lower(),
+        image_layout_mode=str(config.image_layout_mode or "preserve-wrap").strip().lower(),
         inject_default_banner=bool(config.inject_default_banner),
         use_template_web_resources=bool(config.use_template_web_resources),
     )
@@ -999,6 +1014,32 @@ def ensure_canonical_closing_divider(
     file_path: str,
     apply_divider_standards: bool,
 ) -> tuple[str, bool]:
+    trailing_empty = (
+        r"(?:\s|<br\s*/?>|"
+        r"<(?:p|div)\b[^>]*>\s*(?:&nbsp;|\s|<br\s*/?>|"
+        r"<span\b[^>]*>\s*(?:&nbsp;|\s|<br\s*/?>)*</span>)*</(?:p|div)>)"
+    )
+    trailing_rule = r"<hr\b(?![^>]*border-top\s*:\s*8px\s+solid)[^>]*>\s*"
+    canonical_rule = r"<hr\b[^>]*border-top\s*:\s*8px\s+solid[^>]*>\s*"
+
+    def _trim_trailing_source_dividers(payload: str) -> str:
+        pattern = re.compile(
+            rf"(?:{trailing_empty})*(?:{trailing_rule})?(?:{trailing_empty})*$",
+            re.IGNORECASE,
+        )
+        trimmed = pattern.sub("", payload)
+        return trimmed.rstrip()
+
+    def _normalize_trailing_dividers(payload: str) -> str:
+        canonical_tail_pattern = re.compile(
+            rf"(?P<head>.*?)(?:{trailing_empty})*(?:{trailing_rule}(?:{trailing_empty})*)*(?:{canonical_rule})(?:{trailing_empty})*$",
+            re.IGNORECASE | re.DOTALL,
+        )
+        canonical_match = canonical_tail_pattern.fullmatch(payload)
+        if canonical_match is not None:
+            return canonical_match.group("head").rstrip() + f"\n{canonical_hr}"
+        return _trim_trailing_source_dividers(payload) + f"\n{canonical_hr}"
+
     if not apply_divider_standards:
         return content, False
     normalized_file_path = file_path.replace("\\", "/").lower()
@@ -1006,28 +1047,26 @@ def ensure_canonical_closing_divider(
     if is_home:
         return content, False
     canonical_hr = '<hr style="border-top: 8px solid #AC1A2F;">'
-    if re.search(r"<hr[^>]*border-top\s*:\s*8px\s+solid", content, re.IGNORECASE):
-        return content, False
 
     if re.search(r"</body\s*>", content, re.IGNORECASE):
         updated = re.sub(
-            r"(</body\s*>)",
-            f"\n{canonical_hr}\n\\1",
+            r"(?P<body>.*?)(</body\s*>)",
+            lambda m: f"{_normalize_trailing_dividers(m.group('body'))}\n{m.group(2)}",
             content,
             count=1,
-            flags=re.IGNORECASE,
+            flags=re.IGNORECASE | re.DOTALL,
         )
         return updated, updated != content
     if re.search(r"</html\s*>", content, re.IGNORECASE):
         updated = re.sub(
-            r"(</html\s*>)",
-            f"\n{canonical_hr}\n\\1",
+            r"(?P<body>.*?)(</html\s*>)",
+            lambda m: f"{_normalize_trailing_dividers(m.group('body'))}\n{m.group(2)}",
             content,
             count=1,
-            flags=re.IGNORECASE,
+            flags=re.IGNORECASE | re.DOTALL,
         )
         return updated, updated != content
-    updated = content.rstrip() + f"\n{canonical_hr}\n"
+    updated = _normalize_trailing_dividers(content) + "\n"
     return updated, updated != content
 
 
@@ -1219,6 +1258,7 @@ def apply_template_overlay(
     icon_block_heading_merges = 0
     legacy_icon_asset_remaps = 0
     responsive_image_updates = 0
+    wrapped_list_offset_updates = 0
     promoted_icon_headings = 0
     page_heading_updates = 0
     leading_divider_removals = 0
@@ -1616,6 +1656,9 @@ def apply_template_overlay(
             if updated_tag != tag:
                 icon_style_updates += 1
 
+            if raw_icon_label:
+                updated_tag = _set_img_data_template_label(updated_tag, raw_icon_label)
+
             alt_match = re.search(
                 r'(?<=\s)alt\s*=\s*(["\'])(?P<alt>[^"\']*)\1',
                 updated_tag,
@@ -1671,6 +1714,60 @@ def apply_template_overlay(
             return updated_tag
 
         updated = _IMG_TAG_PATTERN.sub(normalize_template_icon_tag, updated)
+
+        def offset_list_near_left_wrapped_image(match: re.Match[str]) -> str:
+            nonlocal wrapped_list_offset_updates
+            original_tag = match.group("list")
+            style_match = re.search(
+                r'(?<=\s)style\s*=\s*(["\'])(?P<style>[^"\']*)\1',
+                original_tag,
+                flags=re.IGNORECASE,
+            )
+            props = (
+                parse_inline_style(style_match.group("style"))
+                if style_match is not None
+                else {}
+            )
+            changed = False
+            if "margin-left" not in props:
+                props["margin-left"] = "24px"
+                changed = True
+            if "padding-left" not in props:
+                props["padding-left"] = "24px"
+                changed = True
+            if not changed:
+                return match.group(0)
+
+            rebuilt_style = serialize_inline_style(props)
+            if style_match is not None:
+                updated_tag = (
+                    original_tag[: style_match.start("style")]
+                    + rebuilt_style
+                    + original_tag[style_match.end("style") :]
+                )
+            else:
+                updated_tag = original_tag[:-1] + f' style="{rebuilt_style}">'
+            wrapped_list_offset_updates += 1
+            return match.group("prefix") + updated_tag
+
+        if context.image_layout_mode == "preserve-wrap":
+            left_float_block_list_pattern = re.compile(
+                r"(?P<prefix><(?:p|div|figure)\b[^>]*>.*?"
+                r"<img\b[^>]*style\s*=\s*[\"'][^\"']*float\s*:\s*left[^\"']*[\"'][^>]*>.*?"
+                r"</(?:p|div|figure)>\s*)(?P<list><(?:ul|ol)\b[^>]*>)",
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            direct_left_float_list_pattern = re.compile(
+                r"(?P<prefix><img\b[^>]*style\s*=\s*[\"'][^\"']*float\s*:\s*left[^\"']*[\"'][^>]*>\s*)"
+                r"(?P<list><(?:ul|ol)\b[^>]*>)",
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            updated = left_float_block_list_pattern.sub(
+                offset_list_near_left_wrapped_image, updated
+            )
+            updated = direct_left_float_list_pattern.sub(
+                offset_list_near_left_wrapped_image, updated
+            )
 
         def normalize_icon_only_heading(match: re.Match[str]) -> str:
             nonlocal icon_label_heading_updates
@@ -1967,6 +2064,37 @@ def apply_template_overlay(
             if context.apply_divider_standards:
                 updated = remove_leading_divider(updated, icon_basename="bookmark.png")
 
+        def normalize_semantic_section_heading(match: re.Match[str]) -> str:
+            nonlocal page_heading_updates
+            if _is_template_asset_url(match.group("body")):
+                return match.group(0)
+            heading_text = _plain_text(match.group("body"))
+            if not heading_text:
+                return match.group(0)
+            normalized_heading = _normalize_heading_key(heading_text)
+            icon_basename = _SEMANTIC_SECTION_HEADING_ICON_MAP.get(normalized_heading)
+            if not icon_basename:
+                return match.group(0)
+            attrs = _template_heading_attrs(match.group("attrs"), context=context)
+            replacement = _render_icon_heading_block(
+                level=template_section_level(int(match.group("level"))),
+                attrs=attrs,
+                img_tag=_build_heading_icon_tag(
+                    basename=icon_basename,
+                    file_path=file_path,
+                    context=context,
+                ),
+                canonical_label=_canonical_heading_label(
+                    heading_text,
+                    icon_basename=icon_basename,
+                ),
+            )
+            if replacement != match.group(0):
+                page_heading_updates += 1
+            return replacement
+
+        updated = _HEADING_PATTERN.sub(normalize_semantic_section_heading, updated)
+
     if context.inject_default_banner:
         if not re.search(
             r"<img\b[^>]*(?:TemplateAssets|template-images(?:/banners)?|web_resources/template-images/banners)/banner",
@@ -2116,6 +2244,14 @@ def apply_template_overlay(
                     else "Normalized content image spacing and responsive sizing for Canvas-safe layouts"
                 ),
                 count=responsive_image_updates,
+            )
+        )
+    if wrapped_list_offset_updates:
+        applied_changes.append(
+            AppliedChange(
+                category="template_overlay",
+                description="Added list padding near left-wrapped images to prevent bullet overlap in Canvas",
+                count=wrapped_list_offset_updates,
             )
         )
     if icon_fallback_basenames:

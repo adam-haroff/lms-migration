@@ -174,7 +174,7 @@ class LMSMigrationUI:
         self.template_visual_standards_var = tk.BooleanVar(value=True)
         self.template_color_standards_var = tk.BooleanVar(value=True)
         self.template_divider_standards_var = tk.BooleanVar(value=True)
-        self.image_layout_mode_var = tk.StringVar(value="safe-block")
+        self.image_layout_mode_var = tk.StringVar(value="preserve-wrap")
         self.intro_checklist_handling_var = tk.StringVar(
             value="rebuild-when-confident"
         )
@@ -1123,13 +1123,13 @@ class LMSMigrationUI:
         self.image_layout_mode_combo = ttk.Combobox(
             opts,
             textvariable=self.image_layout_mode_var,
-            values=("safe-block", "preserve-wrap"),
+            values=("preserve-wrap", "safe-block"),
             state="readonly",
         )
         self.image_layout_mode_combo.grid(row=5, column=1, sticky="w", padx=6, pady=3)
         ttk.Label(
             opts,
-            text="safe-block avoids text overlap; preserve-wrap keeps left/right wraps.",
+            text="preserve-wrap keeps left/right wraps; use safe-block only when wrapping renders badly in Canvas.",
             foreground="#555555",
         ).grid(row=5, column=2, sticky="w", pady=3)
 
@@ -2141,7 +2141,7 @@ class LMSMigrationUI:
             self.template_divider_standards_var.get()
         )
         image_layout_mode = (
-            self.image_layout_mode_var.get().strip().lower() or "safe-block"
+            self.image_layout_mode_var.get().strip().lower() or "preserve-wrap"
         )
         template_overlay_enabled = bool(self.enable_template_overlay_var.get())
         template_merge_enabled = bool(self.template_merge_var.get())

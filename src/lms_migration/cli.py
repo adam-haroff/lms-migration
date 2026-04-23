@@ -120,8 +120,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--image-layout-mode",
         type=str,
         choices=("safe-block", "preserve-wrap"),
-        default="safe-block",
-        help="How to handle large floated content images. safe-block avoids text overlap; preserve-wrap keeps optional wrapped-text layouts within safer width limits.",
+        default="preserve-wrap",
+        help="How to handle large floated content images. preserve-wrap keeps optional wrapped-text layouts within safer width limits; use safe-block only when wrapping renders badly in Canvas.",
     )
     parser.add_argument(
         "--template-merge",

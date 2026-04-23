@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from .html_tools import (
@@ -1488,7 +1488,7 @@ def _resolve_local_package_ref(current_path: str, raw_ref: str) -> str | None:
     if parsed.scheme or parsed.netloc:
         return None
 
-    path_text = (parsed.path or "").strip().replace("\\", "/")
+    path_text = unquote((parsed.path or "").strip()).replace("\\", "/")
     if not path_text:
         return None
 
@@ -1584,10 +1584,15 @@ def _trim_unreferenced_package_files(unpack_dir: Path) -> dict:
         if path.is_file()
     }
     protected = {path for path in all_files if _is_protected_package_file(path)}
+    standalone_html = {
+        path
+        for path in all_files
+        if Path(path).suffix.lower() in {".html", ".htm"}
+    }
     manifest_referenced = _collect_manifest_referenced_paths(unpack_dir)
     kept = _expand_referenced_package_paths(
         unpack_dir,
-        initial_paths=protected | manifest_referenced,
+        initial_paths=protected | standalone_html | manifest_referenced,
     )
 
     removed_paths: list[str] = []
@@ -1606,6 +1611,7 @@ def _trim_unreferenced_package_files(unpack_dir: Path) -> dict:
     return {
         "pruning_enabled": True,
         "protected_files": len(protected),
+        "standalone_html_files": len(standalone_html),
         "manifest_seed_files": len(manifest_referenced),
         "kept_files": len(kept),
         "files_pruned": removed_count,
@@ -3346,7 +3352,7 @@ def run_migration(
     apply_template_visual_standards: bool = True,
     apply_template_color_standards: bool = True,
     apply_template_divider_standards: bool = True,
-    image_layout_mode: str = "safe-block",
+    image_layout_mode: str = "preserve-wrap",
     template_merge: bool = False,
     full_template_shell: bool = False,
     seeded_starter_course: bool = False,

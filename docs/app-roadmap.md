@@ -324,6 +324,32 @@ Canvas-side repair after the package imported successfully.
   This should become a small library of trusted operations that the reviewer can run
   from the app without needing custom scripts for each course.
 
+- **Post-import checklist title sync to final Canvas item names** — Generated
+  `Introduction and Checklist` pages can carry the correct checklist structure before
+  upload, but the final page/assignment/discussion names sometimes still change after
+  the reviewer or course coordinator adjusts the live module. Add a post-import API
+  step that:
+  1. reads the live module item titles in Canvas,
+  2. matches each `Module Checklist` item to its corresponding page/assignment/discussion
+     when the mapping is unambiguous,
+  3. rewrites checklist labels to the final live Canvas names, and
+  4. leaves ambiguous items untouched for reviewer confirmation.
+  This should avoid stale checklist wording without forcing the package builder to
+  guess final names before the course structure is settled.
+
+- **Post-import import-artifact cleanup for package source files** — The import
+  package still needs HTML/XML/manifest files in order for Canvas to create pages,
+  modules, quizzes, and settings, but many of those source artifacts do not need to
+  remain in the live course Files area afterward. Add a post-import API cleanup step
+  that can identify and optionally remove:
+  1. package-source HTML files that were only used to create Canvas pages,
+  2. manifest / metadata XML files and folders that are not student-facing assets,
+  3. other known import-only cartridge artifacts, while
+  4. explicitly preserving real downloadable course files and anything still linked
+     from page bodies, assignments, discussions, quizzes, or modules.
+  This should be conservative by default and produce a reviewable deletion plan
+  before removing anything live.
+
 - **Operator-facing UI language cleanup + embedded workflow help** — The app wording
   has grown around internal migration terminology and is now too dependent on expert
   interpretation. Add a user-facing terminology pass that:
@@ -334,6 +360,18 @@ Canvas-side repair after the package imported successfully.
      already present", and
   5. keeps the UI language aligned with the operator guide so reviewers do not have
      to ask for the recommended settings on each course.
+
+- **Overall UI/UX redesign with responsive layout** — Beyond terminology cleanup, the
+  app still needs a stronger operator experience. Improve the interface so it is more
+  usable for people beyond the current primary operator by:
+  1. modernizing the overall layout and visual hierarchy,
+  2. reducing dense option clusters and surfacing the most important decisions first,
+  3. improving spacing, readability, and sectioning across the full workflow,
+  4. making the interface resilient at smaller window sizes instead of assuming a large
+     desktop layout at all times, and
+  5. treating responsive behavior as a first-class requirement for both the main app
+     interface and the page-review workbench.
+  The goal is not just clearer labels, but a noticeably better operator experience.
 
 - **Page Review workbench usability improvements** — The page review interface is
   already useful, but it still takes too much interpretation for routine reviewer

@@ -712,7 +712,7 @@ def build_saved_lor_pages_recovery_package(
                 apply_visual_standards=True,
                 apply_color_standards=True,
                 apply_divider_standards=True,
-                image_layout_mode="safe-block",
+                image_layout_mode="preserve-wrap",
             )
         )
 

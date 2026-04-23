@@ -16,6 +16,7 @@ def test_clean_course_preset_uses_template_first_flow() -> None:
     assert preset.include_starter_template_shell is False
     assert preset.course_already_has_starter_template is True
     assert preset.import_starter_template_first is True
+    assert preset.image_layout_mode == "preserve-wrap"
     assert preset.math_handling == "preserve-semantic"
     assert preset.intro_checklist_handling == "rebuild-when-confident"
 

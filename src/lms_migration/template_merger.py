@@ -82,6 +82,7 @@ from zipfile import ZipFile
 
 class PageRole(str, Enum):
     MODULE_INTRO = "module_intro"
+    ACTIVITIES_CHECKLIST = "activities_checklist"
     LEARNING_ACTIVITIES = "learning_activities"
     WELCOME_INSTRUCTOR = "welcome_instructor"
     STANDALONE = "standalone"
@@ -159,6 +160,10 @@ _CHECKLIST_HEADING_RE = re.compile(
     r"<h[1-6][^>]*>(?:(?!</h[1-6]>).)*?(?:checklist|to meet the learning objectives)(?:(?!</h[1-6]>).)*?</h[1-6]>",
     re.IGNORECASE | re.DOTALL,
 )
+_HEADING_RE = re.compile(
+    r"<h(?P<level>[1-6])[^>]*>(?P<body>.*?)</h(?P=level)>",
+    re.IGNORECASE | re.DOTALL,
+)
 _LIST_RE = re.compile(
     r"<(?:ol|ul)[^>]*>.*?</(?:ol|ul)>",
     re.DOTALL | re.IGNORECASE,
@@ -179,6 +184,10 @@ _LEARNING_SEPARATOR_RE = re.compile(
 )
 _EMPTY_BLOCK_RE = re.compile(
     r"<(?:p|div)[^>]*>\s*(?:&nbsp;|\s|<br\s*/?>)*</(?:p|div)>",
+    re.IGNORECASE,
+)
+_BOUNDARY_EMPTY_BLOCK_RE = re.compile(
+    r"(?:\s|<br\s*/?>|<(?:p|div)[^>]*>\s*(?:&nbsp;|\s|<br\s*/?>|<span\b[^>]*>\s*(?:&nbsp;|\s|<br\s*/?>)*</span>)*</(?:p|div)>)+",
     re.IGNORECASE,
 )
 
@@ -1315,6 +1324,15 @@ def classify_page(
         chapter_title = m.group(2).replace("_", " ").replace("-", " ").title().strip()
         return PageRole.MODULE_INTRO, module_number, chapter_title
 
+    if "activities checklist" in title_lower or "activities checklist" in path_lower:
+        module_number = int(m.group(1)) if m else None
+        chapter_title = (
+            m.group(2).replace("_", " ").replace("-", " ").title().strip()
+            if m
+            else title.strip()
+        )
+        return PageRole.ACTIVITIES_CHECKLIST, module_number, chapter_title
+
     if "learning activities" in title_lower or "learning activities" in path_lower:
         module_number = None
         chapter_title = title.strip()
@@ -1366,7 +1384,17 @@ def _extract_body(html: str) -> str:
 
 
 def _replace_title(html: str, new_title: str) -> str:
-    return _TITLE_RE.sub(f"<title>{new_title}</title>", html, count=1)
+    if _TITLE_RE.search(html):
+        return _TITLE_RE.sub(f"<title>{new_title}</title>", html, count=1)
+    if re.search(r"</head\s*>", html, re.IGNORECASE):
+        return re.sub(
+            r"(</head\s*>)",
+            f"<title>{new_title}</title>\n\\1",
+            html,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return f"<title>{new_title}</title>\n{html}"
 
 
 def _replace_identifier(html: str, seed: str) -> str:
@@ -1465,10 +1493,21 @@ def _extract_intro_paragraphs(body: str) -> str:
         return "\n".join(paras[:3])
 
     search_from = intro_m.end()
-    # Section ends at next heading or <hr>
-    end_m = re.search(r"<(?:h[1-6]|hr)[\s>]", body[search_from:], re.IGNORECASE)
-    end_pos = end_m.start() if end_m else len(body[search_from:])
+    obj_m = _OBJECTIVES_HEADING_RE.search(body[search_from:])
+    if obj_m is not None:
+        end_pos = obj_m.start()
+    else:
+        end_m = re.search(r"<(?:h[1-6]|hr)[\s>]", body[search_from:], re.IGNORECASE)
+        end_pos = end_m.start() if end_m else len(body[search_from:])
     section = body[search_from : search_from + end_pos]
+
+    section = re.sub(
+        r"^\s*<h[1-6]\b[^>]*>.*?</h[1-6]>\s*",
+        "",
+        section,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
     # Remove rule/separator images
     section = re.sub(
@@ -1477,8 +1516,32 @@ def _extract_intro_paragraphs(body: str) -> str:
         section,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    section = re.sub(r"<hr\b[^>]*>\s*$", "", section, flags=re.IGNORECASE | re.DOTALL)
     section = _EMPTY_PARA_RE.sub("", section)
     return section.strip()
+
+
+def _extract_objectives_intro_html(body: str) -> str:
+    """Return lead-in HTML between the objectives heading and the first list."""
+    obj_m = _OBJECTIVES_HEADING_RE.search(body)
+    if obj_m is None:
+        return ""
+    section = body[obj_m.end() :]
+    list_m = re.search(
+        r"<(?:ol|ul)[^>]*>.*?</(?:ol|ul)>",
+        section,
+        re.DOTALL | re.IGNORECASE,
+    )
+    end_pos = list_m.start() if list_m else len(section)
+    lead_in = section[:end_pos]
+    lead_in = re.sub(
+        r"<(?:p[^>]*>)?\s*<img[^>]*(?:rule|gradient|separator)[^>]*/?>(?:</p>)?",
+        "",
+        lead_in,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    lead_in = _EMPTY_PARA_RE.sub("", lead_in)
+    return lead_in.strip()
 
 
 def _extract_objectives_list(body: str) -> str:
@@ -1515,6 +1578,127 @@ def _render_list_html(items: list[str]) -> str:
         return ""
     rendered = "\n".join(f"  <li>{item}</li>" for item in deduped)
     return "<ul>\n" + rendered + "\n</ul>"
+
+
+def _render_ordered_list_html(items: list[str]) -> str:
+    deduped = _dedupe_list_items(items)
+    if not deduped:
+        return ""
+    rendered = "\n".join(f"  <li>{item}</li>" for item in deduped)
+    return "<ol>\n" + rendered + "\n</ol>"
+
+
+def _trim_boundary_empty_blocks(fragment: str) -> str:
+    updated = fragment.strip()
+    updated = re.sub(
+        rf"^(?:{_BOUNDARY_EMPTY_BLOCK_RE.pattern})",
+        "",
+        updated,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    updated = re.sub(
+        rf"(?:{_BOUNDARY_EMPTY_BLOCK_RE.pattern})$",
+        "",
+        updated,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return updated.strip()
+
+
+def _extract_primary_content_heading(body: str) -> str:
+    ignored = {
+        "introduction",
+        "objectives",
+        "learning objectives",
+        "module objectives",
+        "introduction and objectives",
+        "introduction and checklist",
+        "activities checklist",
+        "checklist",
+        "module checklist",
+    }
+    for match in _HEADING_RE.finditer(body):
+        heading_text = _plain_text(match.group("body"))
+        normalized = heading_text.lower().strip(" :-")
+        if not normalized or normalized in ignored:
+            continue
+        return f"<h3>{match.group('body').strip()}</h3>"
+    return ""
+
+
+def _extract_checklist_items_from_checklist_page(body: str) -> list[str]:
+    heading_match = _CHECKLIST_HEADING_RE.search(body)
+    search_start = heading_match.end() if heading_match is not None else 0
+    list_match = _LIST_RE.search(body, search_start)
+    if list_match is not None:
+        return _dedupe_list_items(_extract_list_items(list_match.group(0)))
+    return _extract_checklist_candidates(body)
+
+
+def _is_redundant_module_checklist_item(item_html: str) -> bool:
+    raw_text = _plain_text(item_html)
+    if not raw_text:
+        return False
+    normalized = re.sub(r"\s+", " ", raw_text.lower()).strip()
+    simplified = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+
+    if (
+        "introduction and objectives page" in simplified
+        or "introduction and checklist page" in simplified
+    ):
+        return True
+
+    if (
+        "questions about the course or assignments" in simplified
+        and (
+            "discussion help" in simplified
+            or "course q a" in simplified
+            or "course q and a" in simplified
+            or "course qa" in simplified
+        )
+    ):
+        return True
+
+    return False
+
+
+def _format_checklist_item(item_html: str) -> str:
+    updated = item_html.strip()
+    updated = re.sub(
+        r"(?i)\bIntroduction and Objectives\b",
+        "Introduction and Checklist",
+        updated,
+    )
+    updated = re.sub(r"(?i)\bthis topic\b", "this module", updated)
+    updated = re.sub(r"(?i)\bthe topic\b", "the module", updated)
+    updated = re.sub(r"(?i)<br\s*/?>\s*$", "", updated)
+    updated = re.sub(r"\s*\.\s*$", "", updated)
+    action_match = re.match(
+        r"^\s*(?P<verb>Read|Review|Complete|Participate|Post|Watch|View|Explore|Create|Take|Submit|Print|Use|Join|Work)\b(?:\s+|&nbsp;)+(?:the\s+|the&nbsp;)?(?P<rest>.*)$",
+        updated,
+        flags=re.IGNORECASE,
+    )
+    if action_match is None:
+        return updated
+    verb = action_match.group("verb").capitalize()
+    rest = action_match.group("rest").strip()
+    if not rest:
+        return f"<strong>{verb}</strong>"
+    return f"<strong>{verb}</strong>: {rest}"
+
+
+def _format_module_checklist_items(items: list[str]) -> list[str]:
+    formatted: list[str] = []
+    for item in items:
+        if _is_redundant_module_checklist_item(item):
+            continue
+        rebuilt = _format_checklist_item(item)
+        if _is_redundant_module_checklist_item(rebuilt):
+            continue
+        formatted.append(rebuilt)
+    return formatted
 
 
 def _extract_checklist_candidates(body: str) -> list[str]:
@@ -1564,7 +1748,7 @@ def _learning_section_spec(marker_html: str) -> tuple[str, str] | None:
     if "review this" in text or basename == "reviewthis.png":
         return "Review This", "circle-arrow.png"
     if "view this" in text or basename == "viewthis.png":
-        return "View This", "video.png"
+        return "View", "video.png"
     if re.search(r"\bview\b", text):
         return "View", "video.png"
     if re.search(r"\bread\b", text):
@@ -1634,18 +1818,21 @@ def _extract_do_this_items_from_learning_activities(body: str) -> list[str]:
 def _build_module_intro_body(
     *,
     asset_prefix: str,
+    preserved_title_html: str,
     intro_content: str,
+    objectives_intro_html: str,
     objectives_content: str,
     checklist_content: str,
 ) -> str:
     return f"""\
 <h2 style="color: #ac1a2f; border-bottom: 10px solid #AC1A2F; padding: 10px;"><img role="presentation" src="{asset_prefix}star.png" alt="" width="45" height="45" loading="lazy"><strong>Introduction</strong></h2>
+{preserved_title_html}
 {intro_content}
-<hr>
+<hr style="clear: both;">
 <h2><img role="presentation" src="{asset_prefix}bullseye.png" alt="" width="45" height="45" loading="lazy"><strong><span style="color: #ac1a2f;">Module Objectives</span></strong></h2>
-<p>By the end of this module, students will be able to:</p>
+{objectives_intro_html}
 {objectives_content}
-<hr>
+<hr style="clear: both;">
 <h2><img role="presentation" src="{asset_prefix}checkmark.png" alt="" width="45" height="45" loading="lazy"><span style="color: #ac1a2f;"><strong>Module Checklist</strong></span></h2>
 {checklist_content}
 """
@@ -1653,11 +1840,11 @@ def _build_module_intro_body(
 
 def _default_module_checklist_html() -> str:
     return """<p>Complete the items listed below as you work through this module:</p>
-<ul>
-  <li>Read all assigned content and review lecture materials.</li>
-  <li>Complete the learning activities for this module.</li>
-  <li>Submit all assignments before the posted due date.</li>
-</ul>"""
+<ol>
+  <li><strong>Read</strong>: all assigned content and review lecture materials</li>
+  <li><strong>Complete</strong>: the learning activities for this module</li>
+  <li><strong>Submit</strong>: all assignments before the posted due date</li>
+</ol>"""
 
 
 def _fill_module_intro(
@@ -1666,6 +1853,7 @@ def _fill_module_intro(
     chapter_title: str,
     path_seed: str,
     extra_checklist_items: list[str] | None = None,
+    checklist_source_html: str | None = None,
     *,
     use_template_web_resources: bool = False,
 ) -> str:
@@ -1675,14 +1863,18 @@ def _fill_module_intro(
     replaces only the body with the template shell.
     """
     body = _clean_d2l_scaffold(_extract_body(d2l_html))
+    preserved_title_html = _extract_primary_content_heading(body)
 
-    intro_content = _extract_intro_paragraphs(body)
+    intro_content = _trim_boundary_empty_blocks(_extract_intro_paragraphs(body))
     if not intro_content:
         intro_content = (
             "<p>Refer to the course materials for an introduction to this module.</p>"
         )
 
     objectives_html = _extract_objectives_list(body)
+    objectives_intro_html = _trim_boundary_empty_blocks(
+        _extract_objectives_intro_html(body)
+    )
     if objectives_html:
         # Normalise to <ul> for visual consistency with the template shell
         li_items = re.findall(
@@ -1693,32 +1885,118 @@ def _fill_module_intro(
         )
     else:
         objectives_content = "<ul><li>See course materials for this module's learning objectives.</li></ul>"
+    if not objectives_intro_html:
+        objectives_intro_html = "<p>By the end of this module, students will be able to:</p>"
 
     checklist_items = _extract_checklist_candidates(body)
+    if checklist_source_html:
+        checklist_items.extend(
+            _extract_checklist_items_from_checklist_page(
+                _clean_d2l_scaffold(_extract_body(checklist_source_html))
+            )
+        )
     if extra_checklist_items:
         checklist_items.extend(extra_checklist_items)
+    checklist_items = _format_module_checklist_items(checklist_items)
     checklist_html = (
-        _render_list_html(checklist_items)
+        _render_ordered_list_html(checklist_items)
         if checklist_items
         else _default_module_checklist_html()
     )
+
+    effective_title = chapter_title
+    if preserved_title_html:
+        preserved_title_text = _plain_text(preserved_title_html)
+        if preserved_title_text:
+            effective_title = preserved_title_text
 
     new_body = _build_module_intro_body(
         asset_prefix=_template_asset_prefix(
             path_seed,
             use_template_web_resources=use_template_web_resources,
         ),
+        preserved_title_html=(preserved_title_html + "\n" if preserved_title_html else ""),
         intro_content=intro_content,
+        objectives_intro_html=objectives_intro_html,
         objectives_content=objectives_content,
         checklist_content=checklist_html,
     )
 
     mod_str = f"Module {module_number}: " if module_number else ""
-    new_title = f"{mod_str}{chapter_title}: Introduction and Checklist"
+    new_title = f"{mod_str}{effective_title}: Introduction and Checklist"
 
     result = _replace_title(d2l_html, new_title)
     result = _replace_body(result, new_body)
     return result
+
+
+def _remove_manifest_items_and_resources(
+    unpack_dir: Path,
+    *,
+    relative_paths: Iterable[str],
+) -> int:
+    manifest_path = unpack_dir / "imsmanifest.xml"
+    if not manifest_path.exists():
+        return 0
+
+    targets = {path.replace("\\", "/") for path in relative_paths if path}
+    if not targets:
+        return 0
+
+    tree = ET.parse(manifest_path)
+    root = tree.getroot()
+    resources_parent: ET.Element | None = None
+    for element in root.iter():
+        if _local_name(element.tag) == "resources":
+            resources_parent = element
+            break
+    if resources_parent is None:
+        return 0
+
+    target_resource_ids: set[str] = set()
+    for resource in list(resources_parent):
+        if _local_name(resource.tag) != "resource":
+            continue
+        hrefs = _resource_file_hrefs(resource)
+        if not hrefs.intersection(targets):
+            continue
+        resource_id = (resource.attrib.get("identifier") or "").strip()
+        if resource_id:
+            target_resource_ids.add(resource_id)
+
+    if not target_resource_ids:
+        return 0
+
+    removed = 0
+
+    def _remove_items(parent: ET.Element) -> int:
+        removed_items = 0
+        for child in list(parent):
+            if _local_name(child.tag) != "item":
+                continue
+            identifierref = (child.attrib.get("identifierref") or "").strip()
+            if identifierref in target_resource_ids:
+                parent.remove(child)
+                removed_items += 1
+                continue
+            removed_items += _remove_items(child)
+        return removed_items
+
+    for element in root.iter():
+        if _local_name(element.tag) == "organization":
+            removed += _remove_items(element)
+
+    for resource in list(resources_parent):
+        if _local_name(resource.tag) != "resource":
+            continue
+        resource_id = (resource.attrib.get("identifier") or "").strip()
+        if resource_id in target_resource_ids:
+            resources_parent.remove(resource)
+            removed += 1
+
+    if removed:
+        tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+    return removed
 
 
 def _render_learning_title(title: str, asset_prefix: str) -> str:
@@ -1853,6 +2131,8 @@ def _inject_manifest_entries(
     new_pages: list[
         str
     ],  # relative posix paths, e.g. "wiki_content/about-the-instructor.html"
+    *,
+    title_by_path: dict[str, str] | None = None,
 ) -> None:
     """Register newly-added wiki_content pages in ``imsmanifest.xml``.
 
@@ -1871,18 +2151,26 @@ def _inject_manifest_entries(
 
     for rel_path in new_pages:
         basename = Path(rel_path).name
-        stem = Path(rel_path).stem  # e.g. "about-the-instructor"
-        slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+        stem = Path(rel_path).stem
+        slug = re.sub(r"[^a-z0-9]+", "-", rel_path.lower()).strip("-")
         identifier = f"TMPL_{slug.upper().replace('-', '_')}"
-        title = _TEMPLATE_PAGE_TITLES.get(basename, stem.replace("-", " ").title())
+        title = (
+            (title_by_path or {}).get(rel_path)
+            or _TEMPLATE_PAGE_TITLES.get(basename)
+            or stem.replace("-", " ").title()
+        )
 
         # D2L manifests use backslash-separated href paths
         manifest_href = rel_path.replace("/", "\\")
+        if manifest_href in manifest or rel_path in manifest:
+            continue
 
         resource_lines.append(
             f'        <resource identifier="{identifier}" type="webcontent"'
             f' d2l_2p0:material_type="content" d2l_2p0:link_target=""'
-            f' href="{manifest_href}" title="" />'
+            f' href="{manifest_href}" title="">\n'
+            f'          <file href="{manifest_href}" />\n'
+            f"        </resource>"
         )
         item_lines.append(
             f'            <item identifier="TMPL_ITEM_{slug.upper().replace("-", "_")}"'
@@ -1902,6 +2190,16 @@ def _inject_manifest_entries(
             + "\n"
             + manifest[insert_pos:]
         )
+    elif resource_lines:
+        manifest, _ = re.subn(
+            r"<resources\s*/>",
+            lambda _m: "<resources>\n"
+            + "\n".join(resource_lines)
+            + "\n  </resources>",
+            manifest,
+            count=1,
+            flags=re.IGNORECASE,
+        )
 
     # Insert item entries before </organization> (the single org block)
     org_close = re.search(r"(\s*</organization>)", manifest)
@@ -1916,6 +2214,57 @@ def _inject_manifest_entries(
         )
 
     manifest_path.write_text(manifest, encoding="utf-8")
+
+
+def _manifest_registered_hrefs(unpack_dir: Path) -> set[str]:
+    manifest_path = unpack_dir / "imsmanifest.xml"
+    if not manifest_path.exists():
+        return set()
+    try:
+        root = ET.parse(manifest_path).getroot()
+    except ET.ParseError:
+        return set()
+
+    registered: set[str] = set()
+    for element in root.iter():
+        if _local_name(element.tag) not in {"resource", "file"}:
+            continue
+        href = (element.attrib.get("href") or "").strip()
+        if href:
+            registered.add(href.replace("\\", "/"))
+    return registered
+
+
+def _inject_courseoverview_carryover_pages(unpack_dir: Path) -> int:
+    courseoverview_dir = unpack_dir / "CourseOverview"
+    if not courseoverview_dir.exists():
+        return 0
+
+    registered = _manifest_registered_hrefs(unpack_dir)
+    carryover_pages: list[str] = []
+    title_by_path: dict[str, str] = {}
+
+    for html_file in sorted(courseoverview_dir.glob("*.htm*")):
+        if not html_file.is_file():
+            continue
+        relative_path = str(html_file.relative_to(unpack_dir).as_posix())
+        if relative_path in registered:
+            continue
+        carryover_pages.append(relative_path)
+        title_by_path[relative_path] = (
+            _extract_title(html_file.read_text(encoding="utf-8", errors="replace"))
+            or html_file.stem
+        )
+
+    if not carryover_pages:
+        return 0
+
+    _inject_manifest_entries(
+        unpack_dir,
+        carryover_pages,
+        title_by_path=title_by_path,
+    )
+    return len(carryover_pages)
 
 
 def _sync_manifest_page_titles(
@@ -2093,6 +2442,21 @@ def run_template_merge(
         for page in scanned_pages
         if page.role == PageRole.LEARNING_ACTIVITIES
     }
+    checklist_pages_by_key = {
+        _page_pair_key(page.path, page.module_number): page
+        for page in scanned_pages
+        if page.role == PageRole.ACTIVITIES_CHECKLIST
+    }
+    merged_checklist_paths: set[str] = set()
+    if intro_checklist_handling != "preserve":
+        for page in scanned_pages:
+            if page.role != PageRole.MODULE_INTRO:
+                continue
+            checklist_page = checklist_pages_by_key.get(
+                _page_pair_key(page.path, page.module_number)
+            )
+            if checklist_page is not None:
+                merged_checklist_paths.add(checklist_page.path)
 
     welcome_path: str | None = None
 
@@ -2128,6 +2492,9 @@ def run_template_merge(
                 continue
 
             learning_page = learning_pages_by_key.get(_page_pair_key(rel, module_number))
+            checklist_page = checklist_pages_by_key.get(
+                _page_pair_key(rel, module_number)
+            )
             extra_checklist_items = (
                 _extract_do_this_items_from_learning_activities(
                     _extract_body(learning_page.content)
@@ -2141,6 +2508,9 @@ def run_template_merge(
                 chapter_title=chapter_title,
                 path_seed=rel,
                 extra_checklist_items=extra_checklist_items,
+                checklist_source_html=(
+                    checklist_page.content if checklist_page is not None else None
+                ),
                 use_template_web_resources=use_template_web_resources,
             )
             html_file.write_text(new_html, encoding="utf-8")
@@ -2149,6 +2519,29 @@ def run_template_merge(
                     original_path=rel,
                     role=role,
                     action="template_wrapped",
+                    module_number=module_number,
+                    chapter_title=chapter_title,
+                )
+            )
+
+        elif role == PageRole.ACTIVITIES_CHECKLIST:
+            if rel in merged_checklist_paths:
+                result.pages.append(
+                    MergedPageRecord(
+                        original_path=rel,
+                        role=role,
+                        action="merged_into_intro",
+                        target_path="",
+                        module_number=module_number,
+                        chapter_title=chapter_title,
+                    )
+                )
+                continue
+            result.pages.append(
+                MergedPageRecord(
+                    original_path=rel,
+                    role=role,
+                    action="passthrough",
                     module_number=module_number,
                     chapter_title=chapter_title,
                 )
@@ -2286,6 +2679,22 @@ def run_template_merge(
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(page_html, encoding="utf-8")
         result.added_template_pages.append(dest_rel)
+
+    injected_carryover_count = _inject_courseoverview_carryover_pages(unpack_dir)
+    if injected_carryover_count:
+        result.added_template_pages.append(
+            f"CourseOverview carryover pages ({injected_carryover_count})"
+        )
+
+    if merged_checklist_paths:
+        _remove_manifest_items_and_resources(
+            unpack_dir,
+            relative_paths=merged_checklist_paths,
+        )
+        for relative_path in merged_checklist_paths:
+            checklist_path = unpack_dir / Path(relative_path)
+            if checklist_path.exists() and checklist_path.is_file():
+                checklist_path.unlink()
 
     _sync_manifest_page_titles(unpack_dir, pages=scanned_pages)
 
