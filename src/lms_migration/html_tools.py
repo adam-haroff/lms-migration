@@ -6,7 +6,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
 from .css_parser import (
@@ -595,6 +595,20 @@ def _is_blackish_color(value: str | None) -> bool:
     }
 
 
+def _is_whiteish_color(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = html.unescape(str(value)).strip().lower()
+    normalized = re.sub(r"\s+", "", normalized)
+    return normalized in {
+        "#fff",
+        "#ffffff",
+        "white",
+        "rgb(255,255,255)",
+        "rgba(255,255,255,1)",
+    }
+
+
 def _style_declares_black_background(style_map: dict[str, str]) -> bool:
     for key in ("background-color", "background"):
         value = style_map.get(key)
@@ -612,9 +626,10 @@ def _style_declares_black_background(style_map: dict[str, str]) -> bool:
     return False
 
 
-def _normalize_descendant_black_text_styles(
+def _normalize_descendant_color_styles(
     fragment: str,
     *,
+    color_matcher: Callable[[str | None], bool],
     replacement_color: str | None = None,
 ) -> tuple[str, int]:
     normalized = 0
@@ -624,7 +639,7 @@ def _normalize_descendant_black_text_styles(
         tag_html = match.group(0)
         style_map = _extract_inline_style_map(tag_html)
         color_value = style_map.get("color")
-        if not _is_blackish_color(color_value):
+        if not color_matcher(color_value):
             return tag_html
         if replacement_color is None:
             updated_tag, changed = _remove_inline_style_keys(tag_html, {"color"})
@@ -645,6 +660,30 @@ def _normalize_descendant_black_text_styles(
     return updated, normalized
 
 
+def _normalize_descendant_black_text_styles(
+    fragment: str,
+    *,
+    replacement_color: str | None = None,
+) -> tuple[str, int]:
+    return _normalize_descendant_color_styles(
+        fragment,
+        color_matcher=_is_blackish_color,
+        replacement_color=replacement_color,
+    )
+
+
+def _normalize_descendant_white_text_styles(
+    fragment: str,
+    *,
+    replacement_color: str | None = None,
+) -> tuple[str, int]:
+    return _normalize_descendant_color_styles(
+        fragment,
+        color_matcher=_is_whiteish_color,
+        replacement_color=replacement_color,
+    )
+
+
 def _normalize_black_table_header_cells(content: str) -> tuple[str, int]:
     cell_pattern = re.compile(
         r"(?P<open><(?P<tag>th|td)\b[^>]*>)(?P<body>.*?)(?P<close></(?P=tag)>)",
@@ -662,10 +701,15 @@ def _normalize_black_table_header_cells(content: str) -> tuple[str, int]:
         updated_open_tag, open_changed = _merge_inline_style(
             open_tag, {"color": "#ffffff"}
         )
-        rebuilt_body, body_changes = _normalize_descendant_black_text_styles(
+        rebuilt_body, black_body_changes = _normalize_descendant_black_text_styles(
             body,
             replacement_color="#ffffff",
         )
+        rebuilt_body, white_body_changes = _normalize_descendant_white_text_styles(
+            rebuilt_body,
+            replacement_color=None,
+        )
+        body_changes = black_body_changes + white_body_changes
         if not open_changed and body_changes == 0:
             return match.group(0)
         normalized_cells += 1

@@ -492,7 +492,7 @@ class TestNormalizeIconOnlyParagraph:
     def test_p_icon_only_becomes_heading(self):
         html = '<p><img src="../TemplateAssets/checklist.png" alt=""/></p>'
         out = self._overlay(html)
-        assert "<h3" in out
+        assert "<h2" in out
         assert "checklist.png" in out
 
     def test_heading_contains_canonical_label(self):
@@ -523,7 +523,7 @@ class TestNormalizeIconOnlyParagraph:
     def test_div_wrapper_also_converted(self):
         html = '<div><img src="../TemplateAssets/checklist.png" alt=""/></div>'
         out = self._overlay(html)
-        assert "<h3" in out
+        assert "<h2" in out
         assert "Checklist" in out
 
     def test_icon_with_text_sibling_not_affected(self):
@@ -555,28 +555,28 @@ class TestNormalizeIconOnlyParagraph:
         html = '<p><img src="/content/enforced/course/Content/images/ExploreThis.png" alt="Explore This"/></p>'
         out = self._overlay(html)
         assert "TemplateAssets/folder.png" in out
-        assert "<h3" in out
+        assert "<h2" in out
         assert "Explore This" in out
 
     def test_legacy_course_owned_do_this_icon_uses_template_asset_and_label(self):
         html = '<p><img src="/d2l/lor/viewer/viewFile.d2lfile/123/456/Content/images/DoThis.png" alt="Do This"/></p>'
         out = self._overlay(html)
         assert "TemplateAssets/paper.png" in out
-        assert "<h3" in out
+        assert "<h2" in out
         assert "Do This" in out
 
     def test_legacy_course_owned_explore_icon_without_alt_uses_basename_label(self):
         html = '<p><img src="standardImages/exploreThis.png"/></p>'
         out = self._overlay(html)
         assert "TemplateAssets/folder.png" in out
-        assert "<h3" in out
+        assert "<h2" in out
         assert "Explore This" in out
 
     def test_legacy_course_owned_do_this_icon_without_alt_uses_basename_label(self):
         html = '<p><img src="standardImages/doThis.png"/></p>'
         out = self._overlay(html)
         assert "TemplateAssets/paper.png" in out
-        assert "<h3" in out
+        assert "<h2" in out
         assert "Do This" in out
 
 
@@ -988,6 +988,35 @@ class TestLearningActivitiesTitleSpacing:
         assert "View" in out
         assert "book.png" in out
         assert "folder.png" in out
+        assert re.search(r"<h2[^>]*>.*?book\.png.*?<strong>Read</strong>", out, re.IGNORECASE | re.DOTALL)
+        assert re.search(r"<h2[^>]*>.*?folder\.png.*?<strong>Explore This</strong>", out, re.IGNORECASE | re.DOTALL)
+
+    def test_template_icon_heading_h3_is_promoted_to_h2_and_nbsp_trimmed(self):
+        html = (
+            '<body><h3 style="color: #ac1a2f;"><img src="../TemplateAssets/book.png" alt="" '
+            'style="width: 45px; height: auto; vertical-align: middle; margin-right: 8px;">'
+            '&nbsp;<span style="color: #ac1a2f;"><strong>Read</strong></span></h3></body>'
+        )
+        ctx = TemplateOverlayContext(
+            template_package=Path("."),
+            alias_map_source="test",
+            alias_map={},
+            assets_by_basename={"book.png": ["TemplateAssets/book.png"]},
+            file_name_collisions={},
+            icon_label_by_basename={"book.png": "Read"},
+            apply_visual_standards=True,
+            apply_color_standards=True,
+            apply_divider_standards=True,
+            image_layout_mode="safe-block",
+        )
+        out, _, _, _ = apply_template_overlay(
+            html,
+            file_path="Module 1 Practice Activity for Quiz.html",
+            context=ctx,
+        )
+        assert out.count("<h2") == 1
+        assert "<h3" not in out
+        assert "&nbsp;" not in out
 
 
 class TestRepairMissingLocalReferences:
@@ -1323,7 +1352,22 @@ class TestAccessibilityMarkupFixes:
 
         assert 'background-color: #000000' in result
         assert 'color: #ffffff' in result
-        assert 'span style="color: #ffffff;' in result or '<span>Header</span>' in result
+        assert 'span style="color: #ffffff;' in result or '<span>Header</span>' in result or '<span >Header</span>' in result
+        assert any("black table header cells" in c.description.lower() for c in changes)
+
+    def test_black_table_header_cells_strip_nested_white_color_spans(self):
+        html = (
+            '<table><tr>'
+            '<th style="background-color: #000000; color: #ffffff;">'
+            '<span style="color: #ffffff;">Header</span>'
+            '</th></tr></table>'
+        )
+        result, changes = apply_accessibility_markup_fixes(html)
+
+        assert 'background-color: #000000' in result
+        assert 'color: #ffffff' in result
+        assert '<span style="color: #ffffff;' not in result
+        assert '<span>Header</span>' in result or '<span >Header</span>' in result
         assert any("black table header cells" in c.description.lower() for c in changes)
 
     def test_styled_block_heading_strips_conflicting_nested_black_color(self):

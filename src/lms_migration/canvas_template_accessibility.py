@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from .canvas_api import (
@@ -14,7 +15,107 @@ from .canvas_api import (
     update_course_page_body,
     update_discussion_topic_message,
 )
-from .html_tools import AppliedChange, apply_accessibility_markup_fixes
+from .html_tools import (
+    AppliedChange,
+    _extract_inline_style_map,
+    _is_blackish_color,
+    _merge_inline_style,
+    _normalize_descendant_white_text_styles,
+    apply_accessibility_markup_fixes,
+)
+
+
+_HEADING_BLOCK_RE = re.compile(
+    r"(?P<open><h(?P<level>[1-6])(?P<attrs>\b[^>]*)>)(?P<body>.*?)(?P<close></h(?P=level)>)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _normalize_title_key(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def _demote_body_h1s_to_h2(content: str) -> tuple[str, int]:
+    updates = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal updates
+        level = int(match.group("level"))
+        if level != 1:
+            return match.group(0)
+        updates += 1
+        return f"<h2{match.group('attrs')}>{match.group('body')}</h2>"
+
+    updated = _HEADING_BLOCK_RE.sub(replace, content)
+    return updated, updates
+
+
+def _normalize_gray_heading_blocks(content: str) -> tuple[str, int]:
+    updates = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal updates
+        open_tag = match.group("open")
+        body = match.group("body")
+        style_map = _extract_inline_style_map(open_tag)
+        background_value = (
+            style_map.get("background-color")
+            or style_map.get("background")
+            or ""
+        ).replace(" ", "").lower()
+        if "#cacaca" not in background_value and "rgb(202,202,202)" not in background_value:
+            return match.group(0)
+
+        updated_open, open_changed = _merge_inline_style(
+            open_tag,
+            {
+                "color": "#000000",
+                "background": "#CACACA",
+                "padding-left": "5px",
+                "text-align": "left",
+            },
+        )
+        rebuilt_body, nested_changes = _normalize_descendant_white_text_styles(body)
+        if not open_changed and nested_changes == 0:
+            return match.group(0)
+        updates += 1
+        return f"{updated_open}{rebuilt_body}{match.group('close')}"
+
+    updated = _HEADING_BLOCK_RE.sub(replace, content)
+    return updated, updates
+
+
+def apply_template_page_accessibility_presets(
+    *,
+    title: str,
+    body_html: str,
+) -> tuple[str, list[AppliedChange]]:
+    normalized_title = _normalize_title_key(title)
+    updated = body_html
+    applied: list[AppliedChange] = []
+
+    if normalized_title == "template: image customizations":
+        updated, gray_heading_updates = _normalize_gray_heading_blocks(updated)
+        if gray_heading_updates:
+            applied.append(
+                AppliedChange(
+                    category="accessibility",
+                    description="Normalized gray template section headings to use accessible black-on-gray contrast",
+                    count=gray_heading_updates,
+                )
+            )
+
+        updated, demoted_h1_count = _demote_body_h1s_to_h2(updated)
+        if demoted_h1_count:
+            applied.append(
+                AppliedChange(
+                    category="accessibility",
+                    description="Demoted body H1 headings to H2 on template reference pages",
+                    count=demoted_h1_count,
+                )
+            )
+
+    return updated, applied
 
 
 def _serialize_changes(changes: list[AppliedChange]) -> list[dict[str, object]]:
@@ -80,6 +181,11 @@ def auto_fix_template_accessibility(
         fixed_body, changes = apply_accessibility_markup_fixes(
             body, repair_heading_jumps=True
         )
+        fixed_body, preset_changes = apply_template_page_accessibility_presets(
+            title=str(page.get("title", "")).strip(),
+            body_html=fixed_body,
+        )
+        changes.extend(preset_changes)
         changed = fixed_body != body
         if changed and not dry_run:
             update_course_page_body(

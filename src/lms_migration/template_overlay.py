@@ -140,6 +140,16 @@ _HEADING_PATTERN = re.compile(
 )
 
 
+def _normalize_template_icon_heading_body(value: str) -> str:
+    updated = value.replace("\xa0", " ")
+    updated = re.sub(r">\s*&nbsp;\s*<", "><", updated, flags=re.IGNORECASE)
+    updated = re.sub(r">\s+<", "><", updated)
+    updated = re.sub(r"(<img\b[^>]*>)\s+", r"\1", updated, flags=re.IGNORECASE)
+    updated = re.sub(r"\s*&nbsp;\s*", " ", updated, flags=re.IGNORECASE)
+    updated = re.sub(r"\s{2,}", " ", updated)
+    return updated.strip()
+
+
 def _normalize_basename(value: str) -> str:
     return posixpath.basename(value.strip().replace("\\", "/")).strip().lower()
 
@@ -2094,6 +2104,22 @@ def apply_template_overlay(
             return replacement
 
         updated = _HEADING_PATTERN.sub(normalize_semantic_section_heading, updated)
+
+        def normalize_template_icon_heading_markup(match: re.Match[str]) -> str:
+            nonlocal page_heading_updates
+            level = int(match.group("level"))
+            body = match.group("body")
+            if not _is_template_asset_url(body):
+                return match.group(0)
+            attrs = _template_heading_attrs(match.group("attrs"), context=context)
+            normalized_body = _normalize_template_icon_heading_body(body)
+            new_level = 2 if level in {3, 4} else level
+            replacement = f"<h{new_level}{attrs}>{normalized_body}</h{new_level}>"
+            if replacement != match.group(0):
+                page_heading_updates += 1
+            return replacement
+
+        updated = _HEADING_PATTERN.sub(normalize_template_icon_heading_markup, updated)
 
     if context.inject_default_banner:
         if not re.search(
