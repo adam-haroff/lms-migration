@@ -30,6 +30,8 @@ from .canvas_front_page import auto_set_course_front_page
 from .canvas_preview import CanvasPreviewError, run_preview
 from .canvas_post_import import auto_relink_missing_links
 from .canvas_assessment_templates import auto_wrap_assessment_descriptions
+from .canvas_checklist_title_sync import sync_intro_checklist_titles
+from .canvas_import_artifact_cleanup import cleanup_import_artifacts
 from .canvas_new_quiz_asset_repair import reconcile_new_quiz_assets
 from .canvas_template_accessibility import auto_fix_template_accessibility
 from .canvas_live_audit import run_live_link_audit
@@ -236,6 +238,8 @@ class LMSMigrationUI:
         self.post_import_fix_accessibility_var = tk.BooleanVar(value=True)
         self.post_import_organize_files_var = tk.BooleanVar(value=True)
         self.post_import_set_front_page_var = tk.BooleanVar(value=True)
+        self.post_import_sync_checklists_var = tk.BooleanVar(value=True)
+        self.post_import_report_import_artifacts_var = tk.BooleanVar(value=True)
         self.ab_variant_var = tk.StringVar(value="A")
         self.ab_include_auto_relink_var = tk.BooleanVar(value=True)
         self.show_canvas_advanced_var = tk.BooleanVar(value=False)
@@ -1692,9 +1696,19 @@ class LMSMigrationUI:
             text="Set the correct division Home Page as Front Page",
             variable=self.post_import_set_front_page_var,
         ).grid(row=7, column=1, sticky="w", pady=(0, 3))
+        ttk.Checkbutton(
+            self.canvas_advanced_frame,
+            text="Sync Introduction and Checklist page item names to final live Canvas names",
+            variable=self.post_import_sync_checklists_var,
+        ).grid(row=8, column=1, sticky="w", pady=(0, 3))
+        ttk.Checkbutton(
+            self.canvas_advanced_frame,
+            text="Generate import-artifact cleanup report (dry run only)",
+            variable=self.post_import_report_import_artifacts_var,
+        ).grid(row=9, column=1, sticky="w", pady=(0, 3))
 
         ab_row = ttk.Frame(self.canvas_advanced_frame)
-        ab_row.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(2, 4))
+        ab_row.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(2, 4))
         ttk.Label(ab_row, text="A/B variant").grid(row=0, column=0, sticky="w")
         self.ab_variant_combo = ttk.Combobox(
             ab_row,
@@ -1715,7 +1729,7 @@ class LMSMigrationUI:
         self.run_ab_variant_cycle_btn.grid(row=0, column=3, sticky="e", padx=(12, 0))
 
         sec_btns = ttk.Frame(self.canvas_advanced_frame)
-        sec_btns.grid(row=7, column=0, columnspan=3, sticky="e", pady=(4, 0))
+        sec_btns.grid(row=11, column=0, columnspan=3, sticky="e", pady=(4, 0))
         self.fetch_canvas_imports_btn = ttk.Button(
             sec_btns,
             text="Find Latest Import",
@@ -2720,8 +2734,14 @@ class LMSMigrationUI:
             front_page_report_path = (
                 output_dir / f"{artifact_prefix}.canvas-front-page-report.json"
             )
+            checklist_sync_report_path = (
+                output_dir / f"{artifact_prefix}.canvas-checklist-title-sync.json"
+            )
             new_quiz_asset_report_path = (
                 output_dir / f"{artifact_prefix}.canvas-new-quiz-asset-repair.json"
+            )
+            import_artifact_cleanup_report_path = (
+                output_dir / f"{artifact_prefix}.canvas-import-artifact-cleanup.json"
             )
             live_audit_json = (
                 output_dir / f"{artifact_prefix}.canvas-live-link-audit.json"
@@ -2740,8 +2760,14 @@ class LMSMigrationUI:
                 output_dir / "canvas-file-organizer-report.json"
             )
             front_page_report_path = output_dir / "canvas-front-page-report.json"
+            checklist_sync_report_path = (
+                output_dir / "canvas-checklist-title-sync.json"
+            )
             new_quiz_asset_report_path = (
                 output_dir / "canvas-new-quiz-asset-repair.json"
+            )
+            import_artifact_cleanup_report_path = (
+                output_dir / "canvas-import-artifact-cleanup.json"
             )
             live_audit_json = output_dir / "canvas-live-link-audit.json"
         cleanup_audit_json = output_dir / "canvas-cleanup-audit.json"
@@ -2754,6 +2780,10 @@ class LMSMigrationUI:
         fix_accessibility = bool(self.post_import_fix_accessibility_var.get())
         organize_files = bool(self.post_import_organize_files_var.get())
         set_front_page = bool(self.post_import_set_front_page_var.get())
+        sync_checklists = bool(self.post_import_sync_checklists_var.get())
+        report_import_artifacts = bool(
+            self.post_import_report_import_artifacts_var.get()
+        )
         course_code = self.sinclair_course_code_var.get().strip()
         alias_map_path = self._resolve_alias_map_path(show_warning=True)
         if self.use_template_alias_map_var.get() and alias_map_path is None:
@@ -2798,10 +2828,16 @@ class LMSMigrationUI:
             update_actions.append("organize Canvas files")
         if set_front_page:
             update_actions.append("set the correct Home Page as Front Page")
+        if sync_checklists:
+            update_actions.append(
+                "sync checklist item wording to final live Canvas item names"
+            )
         if source_zip is not None:
             update_actions.append(
                 "repair New Quiz image/file assets from the source zip"
             )
+        if report_import_artifacts:
+            update_actions.append("generate an import-artifact cleanup report")
         if apply_safe_fixes:
             update_actions.append("live-audit safe fixes")
         if update_actions:
@@ -3055,6 +3091,39 @@ class LMSMigrationUI:
                     ),
                 )
 
+            checklist_sync_report = None
+            checklist_sync_error = ""
+            if sync_checklists:
+                try:
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            "[Full Post-Import] Syncing Introduction and Checklist page item names..."
+                        ),
+                    )
+                    checklist_sync_report = sync_intro_checklist_titles(
+                        base_url=base_url,
+                        course_id=course_id,
+                        token=token,
+                        output_json_path=checklist_sync_report_path,
+                        dry_run=False,
+                    )
+                except Exception as exc:  # pragma: no cover - network/runtime dependent
+                    checklist_sync_error = str(exc)
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            f"[WARN] [Full Post-Import] Checklist title sync failed; continuing with cleanup audit + live audit + post export: {exc}"
+                        ),
+                    )
+            else:
+                self.root.after(
+                    0,
+                    lambda: self._log(
+                        "[Full Post-Import] Checklist title sync skipped by toggle."
+                    ),
+                )
+
             cleanup_audit_report = None
             cleanup_audit_error = ""
             try:
@@ -3077,6 +3146,39 @@ class LMSMigrationUI:
                     0,
                     lambda: self._log(
                         f"[WARN] [Full Post-Import] Cleanup audit failed; continuing with post export: {exc}"
+                    ),
+                )
+
+            import_artifact_cleanup_report = None
+            import_artifact_cleanup_error = ""
+            if report_import_artifacts:
+                try:
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            "[Full Post-Import] Generating import-artifact cleanup report..."
+                        ),
+                    )
+                    import_artifact_cleanup_report = cleanup_import_artifacts(
+                        base_url=base_url,
+                        course_id=course_id,
+                        token=token,
+                        output_json_path=import_artifact_cleanup_report_path,
+                        apply_deletes=False,
+                    )
+                except Exception as exc:  # pragma: no cover - network/runtime dependent
+                    import_artifact_cleanup_error = str(exc)
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            f"[WARN] [Full Post-Import] Import-artifact cleanup report failed; continuing with live audit + post export: {exc}"
+                        ),
+                    )
+            else:
+                self.root.after(
+                    0,
+                    lambda: self._log(
+                        "[Full Post-Import] Import-artifact cleanup report skipped by toggle."
                     ),
                 )
 
@@ -3169,6 +3271,11 @@ class LMSMigrationUI:
                     front_page_report_path if set_front_page else None
                 ),
                 "front_page_error": front_page_error,
+                "checklist_sync_report": checklist_sync_report,
+                "checklist_sync_report_path": (
+                    checklist_sync_report_path if sync_checklists else None
+                ),
+                "checklist_sync_error": checklist_sync_error,
                 "new_quiz_asset_report": new_quiz_asset_report,
                 "new_quiz_asset_report_path": (
                     new_quiz_asset_report_path if source_zip is not None else None
@@ -3177,6 +3284,13 @@ class LMSMigrationUI:
                 "cleanup_audit_json_path": cleanup_audit_json,
                 "cleanup_audit_report": cleanup_audit_report,
                 "cleanup_audit_error": cleanup_audit_error,
+                "import_artifact_cleanup_report": import_artifact_cleanup_report,
+                "import_artifact_cleanup_report_path": (
+                    import_artifact_cleanup_report_path
+                    if report_import_artifacts
+                    else None
+                ),
+                "import_artifact_cleanup_error": import_artifact_cleanup_error,
                 "live_audit_json_path": live_json_path,
                 "live_audit_md_path": live_md_path,
                 "live_audit_csv_path": live_csv_path,
@@ -3208,6 +3322,9 @@ class LMSMigrationUI:
         front_page_report = payload.get("front_page_report")
         front_page_report_path = payload.get("front_page_report_path")
         front_page_error = str(payload.get("front_page_error", "")).strip()
+        checklist_sync_report = payload.get("checklist_sync_report")
+        checklist_sync_report_path = payload.get("checklist_sync_report_path")
+        checklist_sync_error = str(payload.get("checklist_sync_error", "")).strip()
         new_quiz_asset_report = payload.get("new_quiz_asset_report")
         new_quiz_asset_report_path = payload.get("new_quiz_asset_report_path")
         new_quiz_asset_error = str(
@@ -3216,6 +3333,13 @@ class LMSMigrationUI:
         cleanup_audit_json_path = payload.get("cleanup_audit_json_path")
         cleanup_audit_report = payload.get("cleanup_audit_report")
         cleanup_audit_error = str(payload.get("cleanup_audit_error", "")).strip()
+        import_artifact_cleanup_report = payload.get("import_artifact_cleanup_report")
+        import_artifact_cleanup_report_path = payload.get(
+            "import_artifact_cleanup_report_path"
+        )
+        import_artifact_cleanup_error = str(
+            payload.get("import_artifact_cleanup_error", "")
+        ).strip()
         live_audit_report = payload.get("live_audit_report", {})
         live_audit_json_path = payload.get("live_audit_json_path")
         live_audit_md_path = payload.get("live_audit_md_path")
@@ -3321,6 +3445,20 @@ class LMSMigrationUI:
         if front_page_error:
             self._log(f"[WARN] Front Page error: {front_page_error}")
 
+        if checklist_sync_report_path:
+            self._log(f"Checklist title sync JSON: {checklist_sync_report_path}")
+        if isinstance(checklist_sync_report, dict):
+            summary = checklist_sync_report.get("summary", {})
+            self._log(
+                "Checklist title sync summary: "
+                f"pages={summary.get('intro_checklist_pages_scanned', 0)} | "
+                f"updated={summary.get('pages_updated', 0)} | "
+                f"anchor_rewrites={summary.get('anchor_label_rewrites', 0)} | "
+                f"text_rewrites={summary.get('text_reference_rewrites', 0)}"
+            )
+        if checklist_sync_error:
+            self._log(f"[WARN] Checklist title sync error: {checklist_sync_error}")
+
         if new_quiz_asset_report_path:
             self._log(f"New Quiz asset repair JSON: {new_quiz_asset_report_path}")
         if isinstance(new_quiz_asset_report, dict):
@@ -3352,6 +3490,25 @@ class LMSMigrationUI:
             )
         if cleanup_audit_error:
             self._log(f"[WARN] Cleanup audit error: {cleanup_audit_error}")
+
+        if import_artifact_cleanup_report_path:
+            self._log(
+                f"Import-artifact cleanup JSON: {import_artifact_cleanup_report_path}"
+            )
+        if isinstance(import_artifact_cleanup_report, dict):
+            summary = import_artifact_cleanup_report.get("summary", {})
+            self._log(
+                "Import-artifact cleanup summary: "
+                f"artifact_files={summary.get('artifact_file_candidates', 0)} | "
+                f"empty_folders={summary.get('empty_folder_candidates', 0)} | "
+                f"deleted_files={summary.get('deleted_files', 0)} | "
+                f"deleted_folders={summary.get('deleted_folders', 0)} | "
+                f"errors={summary.get('delete_errors', 0)}"
+            )
+        if import_artifact_cleanup_error:
+            self._log(
+                f"[WARN] Import-artifact cleanup error: {import_artifact_cleanup_error}"
+            )
 
         self._log(f"Live audit JSON: {live_audit_json_path}")
         self._log(f"Live audit Markdown: {live_audit_md_path}")

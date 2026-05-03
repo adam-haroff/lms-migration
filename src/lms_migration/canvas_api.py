@@ -166,6 +166,26 @@ def move_course_file(
     return payload
 
 
+def delete_canvas_file(
+    *,
+    base_url: str,
+    file_id: str | int,
+    token: str,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/files/{file_id}"
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="DELETE",
+    )
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, list) and not payload:
+        return {}
+    raise CanvasAPIError("Unexpected Canvas file delete response format.")
+
+
 def delete_canvas_folder(
     *,
     base_url: str,
