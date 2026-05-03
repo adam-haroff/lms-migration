@@ -324,6 +324,16 @@ Canvas-side repair after the package imported successfully.
   This should become a small library of trusted operations that the reviewer can run
   from the app without needing custom scripts for each course.
 
+- **Link-validator triage classifier** — Canvas Link Validator flattens many different
+  failure modes into the same `unreachable` label. Add a post-import triage pass that
+  groups validator findings into more useful buckets, such as:
+  1. internal unpublished/broken Canvas references,
+  2. likely dead or truly offline external links,
+  3. likely paywall / subscription-gated links, and
+  4. likely bot-blocked / cookie-wall / JavaScript-dependent external links.
+  The goal is to produce a clearer reviewer/CC handoff note so courses are not judged
+  solely by whether Canvas can successfully probe every public URL.
+
 - **Post-import checklist title sync to final Canvas item names** — Generated
   `Introduction and Checklist` pages can carry the correct checklist structure before
   upload, but the final page/assignment/discussion names sometimes still change after
