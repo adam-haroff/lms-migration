@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import mimetypes
+from pathlib import Path
 import re
 from typing import Any
 from urllib import error, parse, request
+import uuid
 
 
 class CanvasAPIError(RuntimeError):
@@ -227,6 +230,61 @@ def fetch_course_assignments(
     return _fetch_paginated_list(first_url=first_url, token=token)
 
 
+def fetch_new_quizzes(
+    *,
+    base_url: str,
+    course_id: str,
+    token: str,
+    per_page: int = 100,
+) -> list[dict[str, Any]]:
+    base = normalize_base_url(base_url)
+    path = f"/api/quiz/v1/courses/{course_id}/quizzes"
+    first_url = _build_url(base, path, {"per_page": per_page})
+    return _fetch_paginated_list(first_url=first_url, token=token)
+
+
+def fetch_new_quiz_items(
+    *,
+    base_url: str,
+    course_id: str,
+    assignment_id: str | int,
+    token: str,
+    per_page: int = 100,
+) -> list[dict[str, Any]]:
+    base = normalize_base_url(base_url)
+    path = f"/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}/items"
+    first_url = _build_url(base, path, {"per_page": per_page})
+    return _fetch_paginated_list(first_url=first_url, token=token)
+
+
+def update_new_quiz_item_body(
+    *,
+    base_url: str,
+    course_id: str,
+    assignment_id: str | int,
+    item_id: str | int,
+    item_body_html: str,
+    token: str,
+    entry_type: str | None = None,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = (
+        f"{base}/api/quiz/v1/courses/{course_id}/quizzes/{assignment_id}/items/{item_id}"
+    )
+    form_data: dict[str, Any] = {"item[entry][item_body]": item_body_html}
+    if entry_type:
+        form_data["item[entry_type]"] = entry_type
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="PATCH",
+        form_data=form_data,
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected New Quiz item update response format.")
+    return payload
+
+
 def update_course_assignment_description(
     *,
     base_url: str,
@@ -246,6 +304,67 @@ def update_course_assignment_description(
     if not isinstance(payload, dict):
         raise CanvasAPIError("Unexpected Canvas assignment update response format.")
     return payload
+
+
+def upload_course_file(
+    *,
+    base_url: str,
+    course_id: str,
+    folder_id: str | int,
+    file_path: str | Path,
+    token: str,
+    on_duplicate: str = "rename",
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    local_path = Path(file_path)
+    if not local_path.exists():
+        raise CanvasAPIError(f"File does not exist: {local_path}")
+    mime_type = mimetypes.guess_type(local_path.name)[0] or "application/octet-stream"
+    slot_url = f"{base}/api/v1/folders/{folder_id}/files"
+    slot_payload, _ = _request_json(
+        url=slot_url,
+        token=token,
+        method="POST",
+        form_data={
+            "name": local_path.name,
+            "size": str(local_path.stat().st_size),
+            "content_type": mime_type,
+            "on_duplicate": on_duplicate,
+        },
+    )
+    if not isinstance(slot_payload, dict):
+        raise CanvasAPIError("Unexpected Canvas file-upload slot response format.")
+
+    upload_url = str(slot_payload.get("upload_url") or "").strip()
+    upload_params = slot_payload.get("upload_params") or {}
+    if not upload_url or not isinstance(upload_params, dict):
+        raise CanvasAPIError("Canvas did not return a usable file upload URL.")
+
+    location_url, direct_payload = _post_multipart_file_and_capture_location(
+        url=upload_url,
+        fields={str(k): str(v) for k, v in upload_params.items()},
+        file_path=local_path,
+    )
+    if isinstance(direct_payload, dict) and direct_payload.get("id"):
+        return direct_payload
+
+    if not location_url:
+        raise CanvasAPIError(
+            f"Canvas did not return a completion URL for uploaded file {local_path.name}."
+        )
+
+    try:
+        completed_payload, _ = _request_json(url=location_url, token=token)
+    except CanvasAPIError:
+        completed_payload, _ = _request_json(
+            url=location_url,
+            token=token,
+            method="POST",
+            form_data={},
+        )
+    if not isinstance(completed_payload, dict):
+        raise CanvasAPIError("Unexpected Canvas file completion response format.")
+    return completed_payload
 
 
 def fetch_course_discussion_topics(
@@ -502,6 +621,81 @@ def _request_json(
         raise CanvasAPIError(message) from exc
     except error.URLError as exc:
         raise CanvasAPIError(f"Could not connect to Canvas API: {exc.reason}") from exc
+
+
+def _encode_multipart(
+    fields: dict[str, str],
+    file_field: str,
+    file_path: Path,
+) -> tuple[bytes, str]:
+    boundary = uuid.uuid4().hex
+    parts: list[bytes] = []
+    for key, value in fields.items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n'
+                f"\r\n"
+                f"{value}\r\n"
+            ).encode("utf-8")
+        )
+    file_bytes = file_path.read_bytes()
+    file_name = file_path.name
+    content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+    parts.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{file_field}"; filename="{file_name}"\r\n'
+            f"Content-Type: {content_type}\r\n"
+            "\r\n"
+        ).encode("utf-8")
+        + file_bytes
+        + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+class _NoRedirectHandler(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def _post_multipart_file_and_capture_location(
+    *,
+    url: str,
+    fields: dict[str, str],
+    file_path: Path,
+) -> tuple[str, dict[str, Any] | None]:
+    body, content_type = _encode_multipart(fields, "file", file_path)
+    req = request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": content_type},
+        method="POST",
+    )
+    opener = request.build_opener(_NoRedirectHandler)
+    try:
+        with opener.open(req, timeout=120) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            payload: dict[str, Any] | None = None
+            if raw.strip():
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    payload = parsed
+            location = str(resp.headers.get("Location") or "").strip()
+            return location, payload
+    except error.HTTPError as exc:
+        if exc.code in (301, 302, 303):
+            location = str(exc.headers.get("Location") or "").strip()
+            return location, None
+        body_text = exc.read().decode("utf-8", errors="replace")
+        raise CanvasAPIError(f"File upload HTTP {exc.code}: {body_text[:200]}") from exc
+    except error.URLError as exc:
+        raise CanvasAPIError(f"File upload network error: {exc.reason}") from exc
 
 
 def _build_url(base_url: str, path: str, params: dict[str, Any] | None = None) -> str:

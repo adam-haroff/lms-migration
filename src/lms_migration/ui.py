@@ -30,6 +30,7 @@ from .canvas_front_page import auto_set_course_front_page
 from .canvas_preview import CanvasPreviewError, run_preview
 from .canvas_post_import import auto_relink_missing_links
 from .canvas_assessment_templates import auto_wrap_assessment_descriptions
+from .canvas_new_quiz_asset_repair import reconcile_new_quiz_assets
 from .canvas_template_accessibility import auto_fix_template_accessibility
 from .canvas_live_audit import run_live_link_audit
 from .canvas_snapshot import snapshot_canvas_course
@@ -2719,6 +2720,9 @@ class LMSMigrationUI:
             front_page_report_path = (
                 output_dir / f"{artifact_prefix}.canvas-front-page-report.json"
             )
+            new_quiz_asset_report_path = (
+                output_dir / f"{artifact_prefix}.canvas-new-quiz-asset-repair.json"
+            )
             live_audit_json = (
                 output_dir / f"{artifact_prefix}.canvas-live-link-audit.json"
             )
@@ -2736,6 +2740,9 @@ class LMSMigrationUI:
                 output_dir / "canvas-file-organizer-report.json"
             )
             front_page_report_path = output_dir / "canvas-front-page-report.json"
+            new_quiz_asset_report_path = (
+                output_dir / "canvas-new-quiz-asset-repair.json"
+            )
             live_audit_json = output_dir / "canvas-live-link-audit.json"
         cleanup_audit_json = output_dir / "canvas-cleanup-audit.json"
         live_audit_md = live_audit_json.with_suffix(".md")
@@ -2760,6 +2767,24 @@ class LMSMigrationUI:
         )
         manual_review_dirs = [output_dir, output_root]
 
+        source_zip: Path | None = None
+        source_zip_text = self.input_zip_var.get().strip()
+        if source_zip_text:
+            candidate = Path(source_zip_text)
+            if candidate.exists():
+                source_zip = candidate
+        if source_zip is None:
+            migration_report_json = self._find_latest_matching_file(
+                output_dir, "*.migration-report.json"
+            )
+            report_payload = self._load_json_file(migration_report_json)
+            if isinstance(report_payload, dict):
+                input_zip_text = str(report_payload.get("input_zip") or "").strip()
+                if input_zip_text:
+                    candidate = Path(input_zip_text)
+                    if candidate.exists():
+                        source_zip = candidate
+
         update_actions: list[str] = []
         if include_auto_relink:
             update_actions.append("auto-relink missing page/file links")
@@ -2773,6 +2798,10 @@ class LMSMigrationUI:
             update_actions.append("organize Canvas files")
         if set_front_page:
             update_actions.append("set the correct Home Page as Front Page")
+        if source_zip is not None:
+            update_actions.append(
+                "repair New Quiz image/file assets from the source zip"
+            )
         if apply_safe_fixes:
             update_actions.append("live-audit safe fixes")
         if update_actions:
@@ -2989,6 +3018,43 @@ class LMSMigrationUI:
                     ),
                 )
 
+            new_quiz_asset_report = None
+            new_quiz_asset_error = ""
+            if source_zip is not None:
+                try:
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            "[Full Post-Import] Repairing New Quiz image/file assets..."
+                        ),
+                    )
+                    report_path = reconcile_new_quiz_assets(
+                        base_url=base_url,
+                        course_id=course_id,
+                        token=token,
+                        source_zip_path=source_zip,
+                        output_json_path=new_quiz_asset_report_path,
+                        dry_run=False,
+                    )
+                    new_quiz_asset_report = json.loads(
+                        report_path.read_text(encoding="utf-8")
+                    )
+                except Exception as exc:  # pragma: no cover - network/runtime dependent
+                    new_quiz_asset_error = str(exc)
+                    self.root.after(
+                        0,
+                        lambda: self._log(
+                            f"[WARN] [Full Post-Import] New Quiz asset repair failed; continuing with cleanup audit + live audit + post export: {exc}"
+                        ),
+                    )
+            else:
+                self.root.after(
+                    0,
+                    lambda: self._log(
+                        "[Full Post-Import] New Quiz asset repair skipped; no source D2L zip could be resolved."
+                    ),
+                )
+
             cleanup_audit_report = None
             cleanup_audit_error = ""
             try:
@@ -3103,6 +3169,11 @@ class LMSMigrationUI:
                     front_page_report_path if set_front_page else None
                 ),
                 "front_page_error": front_page_error,
+                "new_quiz_asset_report": new_quiz_asset_report,
+                "new_quiz_asset_report_path": (
+                    new_quiz_asset_report_path if source_zip is not None else None
+                ),
+                "new_quiz_asset_error": new_quiz_asset_error,
                 "cleanup_audit_json_path": cleanup_audit_json,
                 "cleanup_audit_report": cleanup_audit_report,
                 "cleanup_audit_error": cleanup_audit_error,
@@ -3137,6 +3208,11 @@ class LMSMigrationUI:
         front_page_report = payload.get("front_page_report")
         front_page_report_path = payload.get("front_page_report_path")
         front_page_error = str(payload.get("front_page_error", "")).strip()
+        new_quiz_asset_report = payload.get("new_quiz_asset_report")
+        new_quiz_asset_report_path = payload.get("new_quiz_asset_report_path")
+        new_quiz_asset_error = str(
+            payload.get("new_quiz_asset_error", "")
+        ).strip()
         cleanup_audit_json_path = payload.get("cleanup_audit_json_path")
         cleanup_audit_report = payload.get("cleanup_audit_report")
         cleanup_audit_error = str(payload.get("cleanup_audit_error", "")).strip()
@@ -3244,6 +3320,22 @@ class LMSMigrationUI:
             )
         if front_page_error:
             self._log(f"[WARN] Front Page error: {front_page_error}")
+
+        if new_quiz_asset_report_path:
+            self._log(f"New Quiz asset repair JSON: {new_quiz_asset_report_path}")
+        if isinstance(new_quiz_asset_report, dict):
+            summary = new_quiz_asset_report.get("summary", {})
+            self._log(
+                "New Quiz asset repair summary: "
+                f"items={summary.get('items_with_candidate_refs', 0)} | "
+                f"updated={summary.get('items_updated', 0)} | "
+                f"uploaded={summary.get('assets_uploaded', 0)} | "
+                f"rewrites={summary.get('refs_rewritten', 0)} | "
+                f"lookup_issues={summary.get('source_lookup_issues', 0)} | "
+                f"upload_failures={summary.get('upload_failures', 0)}"
+            )
+        if new_quiz_asset_error:
+            self._log(f"[WARN] New Quiz asset repair error: {new_quiz_asset_error}")
 
         if cleanup_audit_json_path:
             self._log(f"Cleanup audit JSON: {cleanup_audit_json_path}")
