@@ -217,6 +217,9 @@ class LMSMigrationUI:
         self.visual_converted_zip_var = tk.StringVar(value="")
         self.visual_audit_output_var = tk.StringVar(value="")
         self.math_audit_output_var = tk.StringVar(value="")
+        self.page_review_json_path_var = tk.StringVar(value="")
+        self.page_review_md_path_var = tk.StringVar(value="")
+        self.page_review_shortlist_csv_var = tk.StringVar(value="")
         self.review_draft_json_var = tk.StringVar(value="")
         self.reviewed_zip_output_var = tk.StringVar(value="")
         self.pattern_report_output_var = tk.StringVar(value="")
@@ -1309,9 +1312,61 @@ class LMSMigrationUI:
         )
         self.open_page_review_btn.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
+        review_artifacts = ttk.LabelFrame(
+            parent, text="Current Review Artifacts", padding=10
+        )
+        review_artifacts.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        review_artifacts.columnconfigure(1, weight=1)
+        self._add_file_row(
+            review_artifacts,
+            0,
+            "Page review JSON",
+            self.page_review_json_path_var,
+            "Browse",
+            [("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        self._add_file_row(
+            review_artifacts,
+            1,
+            "Page review Markdown",
+            self.page_review_md_path_var,
+            "Browse",
+            [("Markdown files", "*.md"), ("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        self._add_file_row(
+            review_artifacts,
+            2,
+            "Page review HTML workbench",
+            self.page_review_html_var,
+            "Browse",
+            [("HTML files", "*.html"), ("All files", "*.*")],
+        )
+        self._add_file_row(
+            review_artifacts,
+            3,
+            "Page review shortlist CSV",
+            self.page_review_shortlist_csv_var,
+            "Browse",
+            [("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        review_artifact_btns = ttk.Frame(review_artifacts)
+        review_artifact_btns.grid(row=4, column=0, columnspan=3, sticky="e", pady=(8, 0))
+        self.open_review_shortlist_btn = ttk.Button(
+            review_artifact_btns,
+            text="Open Shortlist ↗",
+            command=self._open_page_review_shortlist,
+        )
+        self.open_review_shortlist_btn.grid(row=0, column=0, padx=(0, 8))
+        self.copy_review_paths_btn = ttk.Button(
+            review_artifact_btns,
+            text="Copy Review Paths",
+            command=self._copy_review_paths_clicked,
+        )
+        self.copy_review_paths_btn.grid(row=0, column=1)
+
         # ZIP review tools
         visual = ttk.LabelFrame(parent, text="ZIP Review Tools", padding=10)
-        visual.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        visual.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         visual.columnconfigure(1, weight=1)
 
         self._add_file_row(
@@ -2007,6 +2062,13 @@ class LMSMigrationUI:
                 self._sync_link_validator_outputs_from_input(Path(path))
             elif variable is self.visual_converted_zip_var:
                 self._sync_review_outputs_from_converted_zip(Path(path))
+            elif variable is self.page_review_json_path_var:
+                page_review_json = Path(path)
+                self.page_review_md_path_var.set(str(page_review_json.with_suffix(".md")))
+                self.page_review_html_var.set(str(page_review_json.with_suffix(".html")))
+                self.page_review_shortlist_csv_var.set(
+                    str(page_review_json.with_name(f"{page_review_json.stem}-shortlist.csv"))
+                )
 
     def _browse_directory(self, variable: tk.StringVar) -> None:
         path = filedialog.askdirectory()
@@ -2034,6 +2096,24 @@ class LMSMigrationUI:
             self.pattern_report_output_var.set(
                 str(_default_pattern_report_json_path(converted_zip))
             )
+        self._sync_page_review_artifacts_from_converted_zip(converted_zip)
+
+    def _sync_page_review_artifacts_from_converted_zip(self, converted_zip: Path) -> None:
+        if not converted_zip.exists():
+            return
+        page_review_json = _default_page_review_json_path(converted_zip)
+        page_review_md = page_review_json.with_suffix(".md")
+        page_review_html = page_review_json.with_suffix(".html")
+        shortlist_csv = page_review_json.with_name(f"{page_review_json.stem}-shortlist.csv")
+
+        if page_review_json.exists() or not self.page_review_json_path_var.get().strip():
+            self.page_review_json_path_var.set(str(page_review_json))
+        if page_review_md.exists() or not self.page_review_md_path_var.get().strip():
+            self.page_review_md_path_var.set(str(page_review_md))
+        if page_review_html.exists() or not self.page_review_html_var.get().strip():
+            self.page_review_html_var.set(str(page_review_html))
+        if shortlist_csv.exists() or not self.page_review_shortlist_csv_var.get().strip():
+            self.page_review_shortlist_csv_var.set(str(shortlist_csv))
 
     def _sync_link_validator_outputs_from_input(self, input_path: Path) -> None:
         if not input_path.exists():
@@ -2162,6 +2242,8 @@ class LMSMigrationUI:
         self.snapshot_canvas_course_btn.configure(state=state)
         self.build_approval_report_btn.configure(state=state)
         self.open_page_review_btn.configure(state=state)
+        self.open_review_shortlist_btn.configure(state=state)
+        self.copy_review_paths_btn.configure(state=state)
         self.live_link_audit_btn.configure(state=state)
         self.import_artifact_report_btn.configure(state=state)
         self.import_artifact_apply_btn.configure(state=state)
@@ -3990,6 +4072,52 @@ class LMSMigrationUI:
                 'No page review workbench found. Run "Prepare Canvas Package" first.',
             )
 
+    def _open_page_review_shortlist(self) -> None:
+        shortlist_path_str = self.page_review_shortlist_csv_var.get().strip()
+        shortlist_path = Path(shortlist_path_str) if shortlist_path_str else None
+        if shortlist_path is None or not shortlist_path.exists():
+            output_dir_text = self.output_dir_var.get().strip()
+            output_dir = (
+                Path(output_dir_text)
+                if output_dir_text
+                else (self._resolve_workspace_root() / "output")
+            )
+            shortlist_path = self._find_latest_matching_file(
+                output_dir, "*.page-review-shortlist.csv"
+            )
+            if shortlist_path is None:
+                shortlist_path = self._find_latest_matching_file(
+                    output_dir, "*-shortlist.csv"
+                )
+        if shortlist_path and shortlist_path.exists():
+            webbrowser.open(shortlist_path.as_uri())
+        else:
+            messagebox.showinfo(
+                "No shortlist",
+                "No page review shortlist CSV found. Build the page review workbench first.",
+            )
+
+    def _copy_review_paths_clicked(self) -> None:
+        values = [
+            ("Page review JSON", self.page_review_json_path_var.get().strip()),
+            ("Page review Markdown", self.page_review_md_path_var.get().strip()),
+            ("Page review HTML", self.page_review_html_var.get().strip()),
+            ("Page review shortlist CSV", self.page_review_shortlist_csv_var.get().strip()),
+            ("Review draft JSON", self.review_draft_json_var.get().strip()),
+            ("Reviewed ZIP output", self.reviewed_zip_output_var.get().strip()),
+        ]
+        lines = [f"{label}: {value}" for label, value in values if value]
+        if not lines:
+            messagebox.showinfo(
+                "No review paths",
+                "No page review artifacts are currently selected or discovered.",
+            )
+            return
+        payload = "\n".join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(payload)
+        self._log("Page review artifact paths copied to clipboard.")
+
     def _generate_safe_summary_clicked(self) -> None:
         report_path = Path(self.report_json_var.get().strip())
         output_text = self.safe_summary_path_var.get().strip()
@@ -4380,6 +4508,12 @@ class LMSMigrationUI:
         html_path: Path,
         summary: dict,
     ) -> None:
+        self.page_review_json_path_var.set(str(json_path))
+        self.page_review_md_path_var.set(str(md_path))
+        self.page_review_html_var.set(str(html_path))
+        self.page_review_shortlist_csv_var.set(
+            str(json_path.with_name(f"{json_path.stem}-shortlist.csv"))
+        )
         self._log(f"Page review JSON: {json_path}")
         self._log(f"Page review Markdown: {md_path}")
         self._log(f"Page review HTML workbench: {html_path}")
@@ -4698,8 +4832,13 @@ class LMSMigrationUI:
                 f"raw_tex={math_summary.get('total_converted_raw_tex_delimiters', 0)}"
             )
         if page_review_json is not None:
+            self.page_review_json_path_var.set(str(page_review_json))
+            self.page_review_shortlist_csv_var.set(
+                str(page_review_json.with_name(f"{page_review_json.stem}-shortlist.csv"))
+            )
             self._log(f"Reviewed page review JSON: {page_review_json}")
             if page_review_markdown is not None:
+                self.page_review_md_path_var.set(str(page_review_markdown))
                 self._log(f"Reviewed page review Markdown: {page_review_markdown}")
             if page_review_html is not None:
                 self.page_review_html_var.set(str(page_review_html))
@@ -5634,6 +5773,19 @@ class LMSMigrationUI:
         snapshot_report = self._load_json_file(snapshot_path)
         issues_report = self._load_json_file(issues_path)
         live_audit_report = self._load_json_file(live_audit_path)
+
+        if page_review_path is not None:
+            self.page_review_json_path_var.set(str(page_review_path))
+            self.page_review_md_path_var.set(str(page_review_path.with_suffix(".md")))
+            self.page_review_html_var.set(str(page_review_path.with_suffix(".html")))
+            self.page_review_shortlist_csv_var.set(
+                str(page_review_path.with_name(f"{page_review_path.stem}-shortlist.csv"))
+            )
+        else:
+            self.page_review_json_path_var.set("")
+            self.page_review_md_path_var.set("")
+            self.page_review_html_var.set("")
+            self.page_review_shortlist_csv_var.set("")
 
         if isinstance(migration_report, dict):
             summary = migration_report.get("summary", {})
