@@ -32,6 +32,7 @@ from .canvas_post_import import auto_relink_missing_links
 from .canvas_assessment_templates import auto_wrap_assessment_descriptions
 from .canvas_checklist_title_sync import sync_intro_checklist_titles
 from .canvas_import_artifact_cleanup import cleanup_import_artifacts
+from .canvas_link_validator_triage import build_link_validator_triage_report
 from .canvas_new_quiz_asset_repair import reconcile_new_quiz_assets
 from .canvas_template_accessibility import auto_fix_template_accessibility
 from .canvas_live_audit import run_live_link_audit
@@ -193,6 +194,9 @@ class LMSMigrationUI:
 
         self.best_practices_file_var = tk.StringVar(value="")
         self.best_practices_sheet_var = tk.StringVar(value="")
+        self.link_validator_input_var = tk.StringVar(value="")
+        self.link_validator_triage_json_var = tk.StringVar(value="")
+        self.link_validator_triage_md_var = tk.StringVar(value="")
 
         self.ref_instructions_docx_var = tk.StringVar(
             value=str(reference_doc_defaults.get("instructions_docx") or "")
@@ -1882,6 +1886,52 @@ class LMSMigrationUI:
         )
         self.run_reference_audit_btn.grid(row=6, column=2, sticky="e", pady=(6, 0))
 
+        # Link validator triage
+        triage = ttk.LabelFrame(parent, text="Link Validator Triage", padding=10)
+        triage.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        triage.columnconfigure(1, weight=1)
+        ttk.Label(
+            triage,
+            text=(
+                "Save or paste Canvas Link Validator results into a text file, then generate "
+                "a first-pass triage report that preserves issue order and adds suggested categories."
+            ),
+            wraplength=980,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        self._add_file_row(
+            triage,
+            1,
+            "Validator text input",
+            self.link_validator_input_var,
+            "Browse File",
+            [("Text files", "*.txt *.md"), ("All files", "*.*")],
+        )
+        self._add_file_row(
+            triage,
+            2,
+            "Triage JSON output",
+            self.link_validator_triage_json_var,
+            "Save As",
+            [("JSON files", "*.json"), ("All files", "*.*")],
+            save_mode=True,
+        )
+        self._add_file_row(
+            triage,
+            3,
+            "Triage Markdown output",
+            self.link_validator_triage_md_var,
+            "Save As",
+            [("Markdown files", "*.md"), ("Text files", "*.txt"), ("All files", "*.*")],
+            save_mode=True,
+        )
+        self.run_link_validator_triage_btn = ttk.Button(
+            triage,
+            text="Build Link Triage",
+            command=self._run_link_validator_triage_clicked,
+        )
+        self.run_link_validator_triage_btn.grid(row=4, column=2, sticky="e", pady=(6, 0))
+
     def _add_file_row(
         self,
         parent: ttk.LabelFrame,
@@ -1935,6 +1985,8 @@ class LMSMigrationUI:
             if variable is self.input_zip_var:
                 self._remember_input_zip_path(path)
                 self._apply_input_zip_inference()
+            elif variable is self.link_validator_input_var:
+                self._sync_link_validator_outputs_from_input(Path(path))
             elif variable is self.visual_converted_zip_var:
                 self._sync_review_outputs_from_converted_zip(Path(path))
 
@@ -1963,6 +2015,19 @@ class LMSMigrationUI:
         if not self.pattern_report_output_var.get().strip():
             self.pattern_report_output_var.set(
                 str(_default_pattern_report_json_path(converted_zip))
+            )
+
+    def _sync_link_validator_outputs_from_input(self, input_path: Path) -> None:
+        if not input_path.exists():
+            return
+        stem = input_path.stem
+        if not self.link_validator_triage_json_var.get().strip():
+            self.link_validator_triage_json_var.set(
+                str(input_path.with_name(f"{stem}.triage.json"))
+            )
+        if not self.link_validator_triage_md_var.get().strip():
+            self.link_validator_triage_md_var.set(
+                str(input_path.with_name(f"{stem}.triage.md"))
             )
 
     def _bind_mousewheel(self, event: tk.Event | None = None) -> None:
@@ -2065,6 +2130,7 @@ class LMSMigrationUI:
         )
         self.run_audit_btn.configure(state=state)
         self.run_reference_audit_btn.configure(state=state)
+        self.run_link_validator_triage_btn.configure(state=state)
         self.run_visual_audit_btn.configure(state=state)
         self.run_math_audit_btn.configure(state=state)
         self.build_page_review_btn.configure(state=state)
@@ -4007,6 +4073,54 @@ class LMSMigrationUI:
         self._log(f"Reference audit JSON: {json_path}")
         self._log(f"Reference audit Markdown: {md_path}")
         self._task_succeeded("Run reference docs audit")
+
+    def _run_link_validator_triage_clicked(self) -> None:
+        input_path = Path(self.link_validator_input_var.get().strip())
+        json_text = self.link_validator_triage_json_var.get().strip()
+        md_text = self.link_validator_triage_md_var.get().strip()
+
+        if not input_path.exists():
+            messagebox.showwarning(
+                "Missing input",
+                "Select a valid text file containing Canvas Link Validator results.",
+            )
+            return
+
+        output_json = (
+            Path(json_text)
+            if json_text
+            else input_path.with_name(f"{input_path.stem}.triage.json")
+        )
+        output_md = (
+            Path(md_text)
+            if md_text
+            else input_path.with_name(f"{input_path.stem}.triage.md")
+        )
+
+        def task() -> None:
+            source_text = input_path.read_text(encoding="utf-8")
+            build_link_validator_triage_report(
+                source_text=source_text,
+                output_json_path=output_json,
+                output_markdown_path=output_md,
+            )
+            self.root.after(
+                0,
+                lambda: self._handle_link_validator_triage_result(
+                    output_json, output_md
+                ),
+            )
+
+        self._run_background("Build link validator triage", task)
+
+    def _handle_link_validator_triage_result(
+        self, output_json: Path, output_md: Path
+    ) -> None:
+        self.link_validator_triage_json_var.set(str(output_json))
+        self.link_validator_triage_md_var.set(str(output_md))
+        self._log(f"Link validator triage JSON: {output_json}")
+        self._log(f"Link validator triage Markdown: {output_md}")
+        self._task_succeeded("Build link validator triage")
 
     def _run_visual_audit_clicked(self) -> None:
         original_zip = Path(self.visual_original_zip_var.get().strip())
