@@ -234,6 +234,12 @@ class LMSMigrationUI:
         self.canvas_issues_output_var = tk.StringVar(
             value=str(default_output / "canvas-migration-issues.json")
         )
+        self.cleanup_audit_json_var = tk.StringVar(value="")
+        self.live_audit_json_var = tk.StringVar(value="")
+        self.live_audit_md_var = tk.StringVar(value="")
+        self.import_artifact_cleanup_json_var = tk.StringVar(value="")
+        self.checklist_sync_json_var = tk.StringVar(value="")
+        self.new_quiz_asset_repair_json_var = tk.StringVar(value="")
         self.template_alias_map_var = tk.StringVar(
             value=str(
                 self._resolve_workspace_root() / "rules" / "template_asset_aliases.json"
@@ -260,6 +266,7 @@ class LMSMigrationUI:
         self.canvas_preview_output_var = tk.StringVar(value="")
         self._active_scroll_canvas: tk.Canvas | None = None
         self._tab_canvases: list[tk.Canvas] = []
+        self._artifact_open_buttons: list[ttk.Button] = []
         self._upload_page_urls: list[str] = []
         self.page_review_html_var = tk.StringVar(value="")
         self.auto_open_page_review_var = tk.BooleanVar(value=True)
@@ -1826,6 +1833,67 @@ class LMSMigrationUI:
         )
         self.build_fix_checklist_btn.grid(row=0, column=2)
 
+        reports = ttk.LabelFrame(parent, text="Current Post-Import Reports", padding=10)
+        reports.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        reports.columnconfigure(1, weight=1)
+        self._add_artifact_row(
+            reports,
+            0,
+            "Cleanup audit JSON",
+            self.cleanup_audit_json_var,
+            "Open",
+        )
+        self._add_artifact_row(
+            reports,
+            1,
+            "Live audit JSON",
+            self.live_audit_json_var,
+            "Open",
+        )
+        self._add_artifact_row(
+            reports,
+            2,
+            "Live audit Markdown",
+            self.live_audit_md_var,
+            "Open",
+        )
+        self._add_artifact_row(
+            reports,
+            3,
+            "Import-artifact cleanup JSON",
+            self.import_artifact_cleanup_json_var,
+            "Open",
+        )
+        self._add_artifact_row(
+            reports,
+            4,
+            "Checklist title sync JSON",
+            self.checklist_sync_json_var,
+            "Open",
+        )
+        self._add_artifact_row(
+            reports,
+            5,
+            "New Quiz asset repair JSON",
+            self.new_quiz_asset_repair_json_var,
+            "Open",
+        )
+        self._add_artifact_row(
+            reports,
+            6,
+            "Link validator triage Markdown",
+            self.link_validator_triage_md_var,
+            "Open",
+        )
+        report_btns = ttk.Frame(reports)
+        report_btns.grid(row=7, column=0, columnspan=3, sticky="e", pady=(8, 0))
+        self.copy_post_import_paths_btn = ttk.Button(
+            report_btns,
+            text="Copy Post-Import Paths",
+            command=self._copy_post_import_paths_clicked,
+        )
+        self.copy_post_import_paths_btn.grid(row=0, column=0)
+
         self._apply_canvas_advanced_visibility()
 
     def _build_tools_tab(self, parent: ttk.Frame) -> None:
@@ -2024,6 +2092,28 @@ class LMSMigrationUI:
             text=button_text,
             command=lambda: self._browse_file(variable, filetypes, save_mode=save_mode),
         ).grid(row=row, column=2, sticky="e", pady=3)
+
+    def _add_artifact_row(
+        self,
+        parent: ttk.LabelFrame,
+        row: int,
+        label: str,
+        variable: tk.StringVar,
+        button_text: str,
+    ) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=3)
+        ttk.Entry(parent, textvariable=variable).grid(
+            row=row, column=1, sticky="ew", padx=6, pady=3
+        )
+        button = ttk.Button(
+            parent,
+            text=button_text,
+            command=lambda v=variable, l=label: self._open_local_artifact_from_var(
+                v, l
+            ),
+        )
+        button.grid(row=row, column=2, sticky="e", pady=3)
+        self._artifact_open_buttons.append(button)
 
     def _add_dir_row(
         self,
@@ -2247,12 +2337,15 @@ class LMSMigrationUI:
         self.live_link_audit_btn.configure(state=state)
         self.import_artifact_report_btn.configure(state=state)
         self.import_artifact_apply_btn.configure(state=state)
+        self.copy_post_import_paths_btn.configure(state=state)
         self.run_ab_variant_cycle_btn.configure(state=state)
         self.canvas_advanced_toggle_btn.configure(state=state)
         self.optional_tools_toggle_btn.configure(state=state)
         self.run_canvas_upload_btn.configure(state=state)
         self.clear_log_btn.configure(state=state)
         self.ab_variant_combo.configure(state="disabled" if busy else "readonly")
+        for button in self._artifact_open_buttons:
+            button.configure(state=state)
 
     def _run_background(self, task_name: str, target: Callable[[], None]) -> None:
         if self.is_busy:
@@ -3635,6 +3728,7 @@ class LMSMigrationUI:
             self._log(f"[WARN] Front Page error: {front_page_error}")
 
         if checklist_sync_report_path:
+            self.checklist_sync_json_var.set(str(checklist_sync_report_path))
             self._log(f"Checklist title sync JSON: {checklist_sync_report_path}")
         if isinstance(checklist_sync_report, dict):
             summary = checklist_sync_report.get("summary", {})
@@ -3649,6 +3743,7 @@ class LMSMigrationUI:
             self._log(f"[WARN] Checklist title sync error: {checklist_sync_error}")
 
         if new_quiz_asset_report_path:
+            self.new_quiz_asset_repair_json_var.set(str(new_quiz_asset_report_path))
             self._log(f"New Quiz asset repair JSON: {new_quiz_asset_report_path}")
         if isinstance(new_quiz_asset_report, dict):
             summary = new_quiz_asset_report.get("summary", {})
@@ -3665,6 +3760,7 @@ class LMSMigrationUI:
             self._log(f"[WARN] New Quiz asset repair error: {new_quiz_asset_error}")
 
         if cleanup_audit_json_path:
+            self.cleanup_audit_json_var.set(str(cleanup_audit_json_path))
             self._log(f"Cleanup audit JSON: {cleanup_audit_json_path}")
         if isinstance(cleanup_audit_report, dict):
             summary = cleanup_audit_report.get("summary", {})
@@ -3681,6 +3777,9 @@ class LMSMigrationUI:
             self._log(f"[WARN] Cleanup audit error: {cleanup_audit_error}")
 
         if import_artifact_cleanup_report_path:
+            self.import_artifact_cleanup_json_var.set(
+                str(import_artifact_cleanup_report_path)
+            )
             self._log(
                 f"Import-artifact cleanup JSON: {import_artifact_cleanup_report_path}"
             )
@@ -3699,6 +3798,10 @@ class LMSMigrationUI:
                 f"[WARN] Import-artifact cleanup error: {import_artifact_cleanup_error}"
             )
 
+        if live_audit_json_path:
+            self.live_audit_json_var.set(str(live_audit_json_path))
+        if live_audit_md_path:
+            self.live_audit_md_var.set(str(live_audit_md_path))
         self._log(f"Live audit JSON: {live_audit_json_path}")
         self._log(f"Live audit Markdown: {live_audit_md_path}")
         self._log(f"Live audit CSV: {live_audit_csv_path}")
@@ -4117,6 +4220,56 @@ class LMSMigrationUI:
         self.root.clipboard_clear()
         self.root.clipboard_append(payload)
         self._log("Page review artifact paths copied to clipboard.")
+
+    def _open_local_artifact_from_var(
+        self, variable: tk.StringVar, label: str
+    ) -> None:
+        path_text = variable.get().strip()
+        if not path_text:
+            messagebox.showinfo(
+                "No artifact",
+                f"No {label.lower()} path is currently selected or discovered.",
+            )
+            return
+        artifact_path = Path(path_text)
+        if not artifact_path.exists():
+            messagebox.showinfo(
+                "Missing artifact",
+                f"{label} was not found at:\n\n{artifact_path}",
+            )
+            return
+        webbrowser.open(artifact_path.as_uri())
+
+    def _copy_post_import_paths_clicked(self) -> None:
+        values = [
+            ("Cleanup audit JSON", self.cleanup_audit_json_var.get().strip()),
+            ("Live audit JSON", self.live_audit_json_var.get().strip()),
+            ("Live audit Markdown", self.live_audit_md_var.get().strip()),
+            (
+                "Import-artifact cleanup JSON",
+                self.import_artifact_cleanup_json_var.get().strip(),
+            ),
+            ("Checklist title sync JSON", self.checklist_sync_json_var.get().strip()),
+            (
+                "New Quiz asset repair JSON",
+                self.new_quiz_asset_repair_json_var.get().strip(),
+            ),
+            (
+                "Link validator triage Markdown",
+                self.link_validator_triage_md_var.get().strip(),
+            ),
+        ]
+        lines = [f"{label}: {value}" for label, value in values if value]
+        if not lines:
+            messagebox.showinfo(
+                "No post-import paths",
+                "No post-import report artifacts are currently selected or discovered.",
+            )
+            return
+        payload = "\n".join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(payload)
+        self._log("Post-import report paths copied to clipboard.")
 
     def _generate_safe_summary_clicked(self) -> None:
         report_path = Path(self.report_json_var.get().strip())
@@ -5355,6 +5508,8 @@ class LMSMigrationUI:
     ) -> None:
         counts = report.get("counts", {})
         safe_fix = report.get("safe_fix_summary", {})
+        self.live_audit_json_var.set(str(json_path))
+        self.live_audit_md_var.set(str(md_path))
         self._log(f"Live audit JSON: {json_path}")
         self._log(f"Live audit Markdown: {md_path}")
         self._log(f"Live audit CSV: {csv_path}")
@@ -5431,6 +5586,7 @@ class LMSMigrationUI:
         apply_deletes: bool,
     ) -> None:
         summary = report.get("summary", {})
+        self.import_artifact_cleanup_json_var.set(str(output_json))
         self._log(f"Import-artifact cleanup JSON: {output_json}")
         self._log(
             "Import-artifact cleanup summary: "
@@ -5672,6 +5828,74 @@ class LMSMigrationUI:
             or (self._resolve_workspace_root() / "output")
         )
 
+    def _sync_post_import_artifacts_from_output_dir(self, output_dir: Path) -> None:
+        cleanup_audit_json = output_dir / "canvas-cleanup-audit.json"
+        live_audit_json = output_dir / "canvas-live-link-audit.json"
+        import_artifact_cleanup_json = (
+            output_dir / "canvas-import-artifact-cleanup.json"
+        )
+        checklist_sync_json = output_dir / "canvas-checklist-title-sync.json"
+        new_quiz_asset_repair_json = (
+            output_dir / "canvas-new-quiz-asset-repair.json"
+        )
+
+        cleanup_audit_latest = cleanup_audit_json
+        if not cleanup_audit_latest.exists():
+            cleanup_audit_latest = self._find_latest_matching_file(
+                output_dir, "*cleanup-audit*.json"
+            ) or cleanup_audit_json
+
+        live_audit_latest = live_audit_json
+        if not live_audit_latest.exists():
+            live_audit_latest = self._find_latest_matching_file(
+                output_dir, "*canvas-live-link-audit*.json"
+            ) or live_audit_json
+        live_audit_md_latest = live_audit_latest.with_suffix(".md")
+
+        import_artifact_latest = import_artifact_cleanup_json
+        if not import_artifact_latest.exists():
+            import_artifact_latest = self._find_latest_matching_file(
+                output_dir, "*canvas-import-artifact-cleanup*.json"
+            ) or import_artifact_cleanup_json
+
+        checklist_sync_latest = checklist_sync_json
+        if not checklist_sync_latest.exists():
+            checklist_sync_latest = self._find_latest_matching_file(
+                output_dir, "*canvas-checklist-title-sync*.json"
+            ) or checklist_sync_json
+
+        new_quiz_asset_latest = new_quiz_asset_repair_json
+        if not new_quiz_asset_latest.exists():
+            new_quiz_asset_latest = self._find_latest_matching_file(
+                output_dir, "*canvas-new-quiz-asset-repair*.json"
+            ) or new_quiz_asset_repair_json
+
+        triage_md_latest = self._find_latest_matching_file(output_dir, "*.triage.md")
+
+        self.cleanup_audit_json_var.set(
+            str(cleanup_audit_latest) if cleanup_audit_latest.exists() else ""
+        )
+        self.live_audit_json_var.set(
+            str(live_audit_latest) if live_audit_latest.exists() else ""
+        )
+        self.live_audit_md_var.set(
+            str(live_audit_md_latest) if live_audit_md_latest.exists() else ""
+        )
+        self.import_artifact_cleanup_json_var.set(
+            str(import_artifact_latest) if import_artifact_latest.exists() else ""
+        )
+        self.checklist_sync_json_var.set(
+            str(checklist_sync_latest) if checklist_sync_latest.exists() else ""
+        )
+        self.new_quiz_asset_repair_json_var.set(
+            str(new_quiz_asset_latest) if new_quiz_asset_latest.exists() else ""
+        )
+        if triage_md_latest is not None and triage_md_latest.exists():
+            self.link_validator_triage_md_var.set(str(triage_md_latest))
+            triage_json = triage_md_latest.with_suffix(".json")
+            if triage_json.exists():
+                self.link_validator_triage_json_var.set(str(triage_json))
+
     def _resolve_import_artifact_cleanup_report_path(self) -> Path:
         output_dir = self._resolve_canvas_output_dir()
         variant = self.ab_variant_var.get().strip().upper() or "A"
@@ -5715,6 +5939,7 @@ class LMSMigrationUI:
             if output_dir_text
             else (self._resolve_workspace_root() / "output")
         )
+        self._sync_post_import_artifacts_from_output_dir(output_dir)
 
         migration_report_path = self._find_latest_matching_file(
             output_dir, "*.migration-report.json"
