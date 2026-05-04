@@ -1621,9 +1621,21 @@ class LMSMigrationUI:
             row2, text="Live Link Audit", command=self._run_live_link_audit_clicked
         )
         self.live_link_audit_btn.grid(row=0, column=1, padx=(0, 8))
+        self.import_artifact_report_btn = ttk.Button(
+            row2,
+            text="Artifact Cleanup Report",
+            command=self._run_import_artifact_cleanup_report_clicked,
+        )
+        self.import_artifact_report_btn.grid(row=0, column=2, padx=(0, 8))
+        self.import_artifact_apply_btn = ttk.Button(
+            row2,
+            text="Apply Artifact Cleanup",
+            command=self._apply_import_artifact_cleanup_clicked,
+        )
+        self.import_artifact_apply_btn.grid(row=0, column=3, padx=(0, 8))
         ttk.Checkbutton(
             row2, text="Apply Safe Fixes", variable=self.live_audit_apply_safe_fixes_var
-        ).grid(row=0, column=2, padx=(4, 0))
+        ).grid(row=0, column=4, padx=(4, 0))
 
         # Advanced toggle
         self.canvas_advanced_toggle_btn = ttk.Button(
@@ -2151,6 +2163,8 @@ class LMSMigrationUI:
         self.build_approval_report_btn.configure(state=state)
         self.open_page_review_btn.configure(state=state)
         self.live_link_audit_btn.configure(state=state)
+        self.import_artifact_report_btn.configure(state=state)
+        self.import_artifact_apply_btn.configure(state=state)
         self.run_ab_variant_cycle_btn.configure(state=state)
         self.canvas_advanced_toggle_btn.configure(state=state)
         self.optional_tools_toggle_btn.configure(state=state)
@@ -5222,6 +5236,78 @@ class LMSMigrationUI:
         )
         self._task_succeeded("Run live Canvas link audit")
 
+    def _run_import_artifact_cleanup_report_clicked(self) -> None:
+        self._run_import_artifact_cleanup_clicked(apply_deletes=False)
+
+    def _apply_import_artifact_cleanup_clicked(self) -> None:
+        self._run_import_artifact_cleanup_clicked(apply_deletes=True)
+
+    def _run_import_artifact_cleanup_clicked(self, *, apply_deletes: bool) -> None:
+        self._maybe_apply_course_folder_defaults()
+        creds = self._get_canvas_credentials()
+        if creds is None:
+            return
+        base_url, course_id, token = creds
+        output_json = self._resolve_import_artifact_cleanup_report_path()
+
+        if apply_deletes:
+            proceed = messagebox.askyesno(
+                "Confirm Import-Artifact Deletes",
+                "Apply Artifact Cleanup will delete the current file and folder "
+                "candidates selected by the import-artifact cleanup rules.\n\n"
+                "Continue?",
+            )
+            if not proceed:
+                return
+
+        def task() -> None:
+            report = cleanup_import_artifacts(
+                base_url=base_url,
+                course_id=course_id,
+                token=token,
+                output_json_path=output_json,
+                apply_deletes=apply_deletes,
+            )
+            self.root.after(
+                0,
+                lambda: self._handle_import_artifact_cleanup_result(
+                    output_json=output_json,
+                    report=report,
+                    apply_deletes=apply_deletes,
+                ),
+            )
+
+        task_name = (
+            "Apply import-artifact cleanup"
+            if apply_deletes
+            else "Build import-artifact cleanup report"
+        )
+        self._run_background(task_name, task)
+
+    def _handle_import_artifact_cleanup_result(
+        self,
+        *,
+        output_json: Path,
+        report: dict,
+        apply_deletes: bool,
+    ) -> None:
+        summary = report.get("summary", {})
+        self._log(f"Import-artifact cleanup JSON: {output_json}")
+        self._log(
+            "Import-artifact cleanup summary: "
+            f"artifact_files={summary.get('artifact_file_candidates', 0)} | "
+            f"empty_folders={summary.get('empty_folder_candidates', 0)} | "
+            f"deleted_files={summary.get('deleted_files', 0)} | "
+            f"deleted_folders={summary.get('deleted_folders', 0)} | "
+            f"errors={summary.get('delete_errors', 0)}"
+        )
+        task_name = (
+            "Apply import-artifact cleanup"
+            if apply_deletes
+            else "Build import-artifact cleanup report"
+        )
+        self._task_succeeded(task_name)
+
     def _snapshot_canvas_course_clicked(self) -> None:
         self._maybe_apply_course_folder_defaults()
         creds = self._get_canvas_credentials()
@@ -5437,6 +5523,23 @@ class LMSMigrationUI:
             if exact.exists():
                 return exact
         return self._find_latest_matching_file(folder, "canvas-course-*.snapshot.json")
+
+    def _resolve_canvas_output_dir(self) -> Path:
+        output_text = self.canvas_issues_output_var.get().strip()
+        if output_text:
+            return Path(output_text).parent
+        return Path(
+            self.output_dir_var.get().strip()
+            or (self._resolve_workspace_root() / "output")
+        )
+
+    def _resolve_import_artifact_cleanup_report_path(self) -> Path:
+        output_dir = self._resolve_canvas_output_dir()
+        variant = self.ab_variant_var.get().strip().upper() or "A"
+        artifact_prefix = self._ab_artifact_prefix(variant)
+        if "/ab-test/" in str(output_dir).replace("\\", "/").lower():
+            return output_dir / f"{artifact_prefix}.canvas-import-artifact-cleanup.json"
+        return output_dir / "canvas-import-artifact-cleanup.json"
 
     def _default_approval_report_json_path(self, folder: Path) -> Path:
         report_path = self._find_latest_matching_file(folder, "*.migration-report.json")
