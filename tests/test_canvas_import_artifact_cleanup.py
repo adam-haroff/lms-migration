@@ -98,3 +98,77 @@ def test_cleanup_import_artifacts_reports_candidates_without_deleting(
         "imsmanifest.xml",
         "Module 1.html",
     }
+
+
+def test_cleanup_import_artifacts_applies_deletes_for_candidates(
+    monkeypatch, tmp_path
+) -> None:
+    deleted_files: list[str] = []
+    deleted_folders: list[str] = []
+
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.fetch_course",
+        lambda **_: {"id": 1, "syllabus_body": ""},
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.fetch_course_pages",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.fetch_course_modules",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.fetch_course_assignments",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.fetch_course_discussion_topics",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.fetch_course_announcements",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.fetch_course_files",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.fetch_course_folders",
+        lambda **_: [],
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.audit_course_cleanup_data",
+        lambda **_: {
+            "unused_files": [
+                {
+                    "id": "10",
+                    "name": "imsmanifest.xml",
+                    "folder_path": "course files",
+                }
+            ],
+            "empty_folders": [{"id": "99", "full_name": "course files/Uploaded Media"}],
+        },
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.delete_canvas_file",
+        lambda file_id, **_: deleted_files.append(str(file_id)) or {},
+    )
+    monkeypatch.setattr(
+        "lms_migration.canvas_import_artifact_cleanup.delete_canvas_folder",
+        lambda folder_id, **_: deleted_folders.append(str(folder_id)) or {},
+    )
+
+    report = cleanup_import_artifacts(
+        base_url="https://example.instructure.com",
+        course_id="123",
+        token="token",
+        output_json_path=tmp_path / "artifact-cleanup.json",
+        apply_deletes=True,
+    )
+
+    assert deleted_files == ["10"]
+    assert deleted_folders == ["99"]
+    assert report["summary"]["deleted_files"] == 1
+    assert report["summary"]["deleted_folders"] == 1

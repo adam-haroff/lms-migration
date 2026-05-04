@@ -244,6 +244,7 @@ class LMSMigrationUI:
         self.post_import_set_front_page_var = tk.BooleanVar(value=True)
         self.post_import_sync_checklists_var = tk.BooleanVar(value=True)
         self.post_import_report_import_artifacts_var = tk.BooleanVar(value=True)
+        self.post_import_apply_import_artifacts_var = tk.BooleanVar(value=False)
         self.ab_variant_var = tk.StringVar(value="A")
         self.ab_include_auto_relink_var = tk.BooleanVar(value=True)
         self.show_canvas_advanced_var = tk.BooleanVar(value=False)
@@ -1710,9 +1711,14 @@ class LMSMigrationUI:
             text="Generate import-artifact cleanup report (dry run only)",
             variable=self.post_import_report_import_artifacts_var,
         ).grid(row=9, column=1, sticky="w", pady=(0, 3))
+        ttk.Checkbutton(
+            self.canvas_advanced_frame,
+            text="Apply import-artifact file/folder deletes using the same candidate rules",
+            variable=self.post_import_apply_import_artifacts_var,
+        ).grid(row=10, column=1, sticky="w", pady=(0, 3))
 
         ab_row = ttk.Frame(self.canvas_advanced_frame)
-        ab_row.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(2, 4))
+        ab_row.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(2, 4))
         ttk.Label(ab_row, text="A/B variant").grid(row=0, column=0, sticky="w")
         self.ab_variant_combo = ttk.Combobox(
             ab_row,
@@ -1733,7 +1739,7 @@ class LMSMigrationUI:
         self.run_ab_variant_cycle_btn.grid(row=0, column=3, sticky="e", padx=(12, 0))
 
         sec_btns = ttk.Frame(self.canvas_advanced_frame)
-        sec_btns.grid(row=11, column=0, columnspan=3, sticky="e", pady=(4, 0))
+        sec_btns.grid(row=12, column=0, columnspan=3, sticky="e", pady=(4, 0))
         self.fetch_canvas_imports_btn = ttk.Button(
             sec_btns,
             text="Find Latest Import",
@@ -2850,6 +2856,9 @@ class LMSMigrationUI:
         report_import_artifacts = bool(
             self.post_import_report_import_artifacts_var.get()
         )
+        apply_import_artifact_deletes = bool(
+            self.post_import_apply_import_artifacts_var.get()
+        )
         course_code = self.sinclair_course_code_var.get().strip()
         alias_map_path = self._resolve_alias_map_path(show_warning=True)
         if self.use_template_alias_map_var.get() and alias_map_path is None:
@@ -2904,6 +2913,10 @@ class LMSMigrationUI:
             )
         if report_import_artifacts:
             update_actions.append("generate an import-artifact cleanup report")
+        if apply_import_artifact_deletes:
+            update_actions.append(
+                "delete import-artifact file/folder candidates selected by the cleanup rules"
+            )
         if apply_safe_fixes:
             update_actions.append("live-audit safe fixes")
         if update_actions:
@@ -2912,6 +2925,15 @@ class LMSMigrationUI:
                 "Full post-import will update Canvas content via: "
                 + ", ".join(update_actions)
                 + ".\n\nContinue?",
+            )
+            if not proceed:
+                return
+        if apply_import_artifact_deletes:
+            proceed = messagebox.askyesno(
+                "Confirm Import-Artifact Deletes",
+                "Import-artifact delete mode is ON. The app will delete only the "
+                "current cleanup candidates selected by the import-artifact rules.\n\n"
+                "This is still a destructive action. Continue?",
             )
             if not proceed:
                 return
@@ -3217,12 +3239,17 @@ class LMSMigrationUI:
 
             import_artifact_cleanup_report = None
             import_artifact_cleanup_error = ""
-            if report_import_artifacts:
+            if report_import_artifacts or apply_import_artifact_deletes:
                 try:
                     self.root.after(
                         0,
                         lambda: self._log(
-                            "[Full Post-Import] Generating import-artifact cleanup report..."
+                            "[Full Post-Import] "
+                            + (
+                                "Applying import-artifact cleanup deletes..."
+                                if apply_import_artifact_deletes
+                                else "Generating import-artifact cleanup report..."
+                            )
                         ),
                     )
                     import_artifact_cleanup_report = cleanup_import_artifacts(
@@ -3230,7 +3257,7 @@ class LMSMigrationUI:
                         course_id=course_id,
                         token=token,
                         output_json_path=import_artifact_cleanup_report_path,
-                        apply_deletes=False,
+                        apply_deletes=apply_import_artifact_deletes,
                     )
                 except Exception as exc:  # pragma: no cover - network/runtime dependent
                     import_artifact_cleanup_error = str(exc)
@@ -3244,7 +3271,7 @@ class LMSMigrationUI:
                 self.root.after(
                     0,
                     lambda: self._log(
-                        "[Full Post-Import] Import-artifact cleanup report skipped by toggle."
+                        "[Full Post-Import] Import-artifact cleanup skipped by toggle."
                     ),
                 )
 
@@ -3353,7 +3380,7 @@ class LMSMigrationUI:
                 "import_artifact_cleanup_report": import_artifact_cleanup_report,
                 "import_artifact_cleanup_report_path": (
                     import_artifact_cleanup_report_path
-                    if report_import_artifacts
+                    if report_import_artifacts or apply_import_artifact_deletes
                     else None
                 ),
                 "import_artifact_cleanup_error": import_artifact_cleanup_error,
