@@ -16,4 +16,5 @@ __all__ = [
     "policy_profiles",
     "math_audit",
     "math_tools",
+    "canvas_operations",
 ]

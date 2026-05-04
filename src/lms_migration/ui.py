@@ -34,6 +34,12 @@ from .canvas_checklist_title_sync import sync_intro_checklist_titles
 from .canvas_import_artifact_cleanup import cleanup_import_artifacts
 from .canvas_link_validator_triage import build_link_validator_triage_report
 from .canvas_new_quiz_asset_repair import reconcile_new_quiz_assets
+from .canvas_operations import (
+    _parse_points_possible,
+    bulk_replace_page_text,
+    bulk_set_publish_state,
+    bulk_update_assignment_settings,
+)
 from .canvas_template_accessibility import auto_fix_template_accessibility
 from .canvas_live_audit import run_live_link_audit
 from .canvas_snapshot import snapshot_canvas_course
@@ -240,6 +246,22 @@ class LMSMigrationUI:
         self.import_artifact_cleanup_json_var = tk.StringVar(value="")
         self.checklist_sync_json_var = tk.StringVar(value="")
         self.new_quiz_asset_repair_json_var = tk.StringVar(value="")
+        self.canvas_ops_title_pattern_var = tk.StringVar(value="")
+        self.canvas_ops_match_mode_var = tk.StringVar(value="contains")
+        self.canvas_ops_case_sensitive_var = tk.BooleanVar(value=False)
+        self.canvas_ops_find_text_var = tk.StringVar(value="")
+        self.canvas_ops_replace_text_var = tk.StringVar(value="")
+        self.canvas_ops_regex_replace_var = tk.BooleanVar(value=False)
+        self.canvas_ops_assignment_points_var = tk.StringVar(value="")
+        self.canvas_ops_assignment_submission_preset_var = tk.StringVar(
+            value="keep-current"
+        )
+        self.canvas_ops_include_pages_var = tk.BooleanVar(value=True)
+        self.canvas_ops_include_assignments_var = tk.BooleanVar(value=False)
+        self.canvas_ops_include_discussions_var = tk.BooleanVar(value=False)
+        self.canvas_ops_publish_target_var = tk.StringVar(value="unpublish")
+        self.canvas_ops_report_json_var = tk.StringVar(value="")
+        self.canvas_ops_report_md_var = tk.StringVar(value="")
         self.template_alias_map_var = tk.StringVar(
             value=str(
                 self._resolve_workspace_root() / "rules" / "template_asset_aliases.json"
@@ -829,7 +851,7 @@ class LMSMigrationUI:
 
         ttk.Label(
             top_bar,
-            text="Workflow:  1 Convert  ›  2 Review  ›  3 Upload to Canvas  ›  4 Post-Import",
+            text="Workflow:  1 Convert  ›  2 Review  ›  3 Upload to Canvas  ›  4 Post-Import  ›  Optional Canvas Ops",
             font=("TkDefaultFont", 9),
             foreground="#666666",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
@@ -843,12 +865,14 @@ class LMSMigrationUI:
         review_inner = self._make_scrollable_tab("  2 · Review  ")
         upload_inner = self._make_scrollable_tab("  3 · Upload to Canvas  ")
         postimport_inner = self._make_scrollable_tab("  4 · Post-Import  ")
+        canvas_ops_inner = self._make_scrollable_tab("  Canvas Ops  ")
         tools_inner = self._make_scrollable_tab("  Tools  ")
 
         self._build_convert_tab(convert_inner)
         self._build_review_tab(review_inner)
         self._build_upload_tab(upload_inner)
         self._build_postimport_tab(postimport_inner)
+        self._build_canvas_ops_tab(canvas_ops_inner)
         self._build_tools_tab(tools_inner)
 
         # ── Log frame (always visible) ────────────────────────────────────
@@ -1896,6 +1920,219 @@ class LMSMigrationUI:
 
         self._apply_canvas_advanced_visibility()
 
+    def _build_canvas_ops_tab(self, parent: ttk.Frame) -> None:
+        """Canvas Operations tab: task-based bulk API actions."""
+        parent.columnconfigure(1, weight=1)
+        parent.columnconfigure(2, weight=0)
+
+        intro = ttk.LabelFrame(parent, text="About This Step", padding=10)
+        intro.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        ttk.Label(
+            intro,
+            text=(
+                "Canvas Operations is for repeated live-course actions that are awkward "
+                "to do manually in Canvas. Start with a narrow title pattern, run a "
+                "dry run first, then apply the change when the preview looks correct."
+            ),
+            wraplength=1080,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+
+        scope = ttk.LabelFrame(parent, text="Shared Scope", padding=10)
+        scope.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        scope.columnconfigure(1, weight=1)
+        ttk.Label(scope, text="Title pattern").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Entry(scope, textvariable=self.canvas_ops_title_pattern_var).grid(
+            row=0, column=1, sticky="ew", padx=6, pady=3
+        )
+        ttk.Label(
+            scope,
+            text="Use a narrow pattern, for example `Introduction and Checklist` or `Discussion:`.",
+            foreground="#555555",
+        ).grid(row=0, column=2, sticky="w", pady=3)
+        ttk.Label(scope, text="Match mode").grid(row=1, column=0, sticky="w", pady=3)
+        self.canvas_ops_match_mode_combo = ttk.Combobox(
+            scope,
+            textvariable=self.canvas_ops_match_mode_var,
+            values=("contains", "exact", "regex"),
+            state="readonly",
+            width=14,
+        )
+        self.canvas_ops_match_mode_combo.grid(
+            row=1, column=1, sticky="w", padx=6, pady=3
+        )
+        ttk.Checkbutton(
+            scope,
+            text="Case-sensitive matching",
+            variable=self.canvas_ops_case_sensitive_var,
+        ).grid(row=1, column=2, sticky="w", pady=3)
+
+        page_replace = ttk.LabelFrame(parent, text="Page Text Replace", padding=10)
+        page_replace.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        page_replace.columnconfigure(1, weight=1)
+        ttk.Label(page_replace, text="Find text").grid(
+            row=0, column=0, sticky="w", pady=3
+        )
+        ttk.Entry(page_replace, textvariable=self.canvas_ops_find_text_var).grid(
+            row=0, column=1, sticky="ew", padx=6, pady=3
+        )
+        ttk.Label(page_replace, text="Replace with").grid(
+            row=1, column=0, sticky="w", pady=3
+        )
+        ttk.Entry(page_replace, textvariable=self.canvas_ops_replace_text_var).grid(
+            row=1, column=1, sticky="ew", padx=6, pady=3
+        )
+        ttk.Checkbutton(
+            page_replace,
+            text="Treat find text as regex",
+            variable=self.canvas_ops_regex_replace_var,
+        ).grid(row=2, column=1, sticky="w", pady=(0, 3))
+        page_replace_btns = ttk.Frame(page_replace)
+        page_replace_btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        self.run_canvas_page_replace_preview_btn = ttk.Button(
+            page_replace_btns,
+            text="Preview Replace",
+            command=lambda: self._run_canvas_page_replace_clicked(apply_changes=False),
+        )
+        self.run_canvas_page_replace_preview_btn.grid(row=0, column=0, padx=(0, 8))
+        self.run_canvas_page_replace_apply_btn = ttk.Button(
+            page_replace_btns,
+            text="Apply Replace",
+            command=lambda: self._run_canvas_page_replace_clicked(apply_changes=True),
+        )
+        self.run_canvas_page_replace_apply_btn.grid(row=0, column=1)
+
+        assignment_settings = ttk.LabelFrame(
+            parent, text="Assignment Settings Update", padding=10
+        )
+        assignment_settings.grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10)
+        )
+        assignment_settings.columnconfigure(1, weight=1)
+        ttk.Label(assignment_settings, text="Points possible").grid(
+            row=0, column=0, sticky="w", pady=3
+        )
+        ttk.Entry(
+            assignment_settings, textvariable=self.canvas_ops_assignment_points_var
+        ).grid(row=0, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(
+            assignment_settings,
+            text="Leave blank to keep current points.",
+            foreground="#555555",
+        ).grid(row=0, column=2, sticky="w", pady=3)
+        ttk.Label(assignment_settings, text="Submission preset").grid(
+            row=1, column=0, sticky="w", pady=3
+        )
+        self.canvas_ops_submission_preset_combo = ttk.Combobox(
+            assignment_settings,
+            textvariable=self.canvas_ops_assignment_submission_preset_var,
+            values=(
+                "keep-current",
+                "file-upload-only",
+                "text-entry-only",
+                "external-tool",
+                "no-submission",
+                "on-paper",
+            ),
+            state="readonly",
+            width=18,
+        )
+        self.canvas_ops_submission_preset_combo.grid(
+            row=1, column=1, sticky="w", padx=6, pady=3
+        )
+        assignment_btns = ttk.Frame(assignment_settings)
+        assignment_btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        self.run_canvas_assignment_settings_preview_btn = ttk.Button(
+            assignment_btns,
+            text="Preview Settings",
+            command=lambda: self._run_canvas_assignment_settings_clicked(
+                apply_changes=False
+            ),
+        )
+        self.run_canvas_assignment_settings_preview_btn.grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        self.run_canvas_assignment_settings_apply_btn = ttk.Button(
+            assignment_btns,
+            text="Apply Settings",
+            command=lambda: self._run_canvas_assignment_settings_clicked(
+                apply_changes=True
+            ),
+        )
+        self.run_canvas_assignment_settings_apply_btn.grid(row=0, column=1)
+
+        publish_ops = ttk.LabelFrame(parent, text="Publish / Unpublish", padding=10)
+        publish_ops.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        publish_ops.columnconfigure(1, weight=1)
+        ttk.Label(publish_ops, text="Target state").grid(
+            row=0, column=0, sticky="w", pady=3
+        )
+        self.canvas_ops_publish_target_combo = ttk.Combobox(
+            publish_ops,
+            textvariable=self.canvas_ops_publish_target_var,
+            values=("publish", "unpublish"),
+            state="readonly",
+            width=14,
+        )
+        self.canvas_ops_publish_target_combo.grid(
+            row=0, column=1, sticky="w", padx=6, pady=3
+        )
+        type_row = ttk.Frame(publish_ops)
+        type_row.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        ttk.Checkbutton(
+            type_row, text="Pages", variable=self.canvas_ops_include_pages_var
+        ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(
+            type_row,
+            text="Assignments",
+            variable=self.canvas_ops_include_assignments_var,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(
+            type_row,
+            text="Discussions",
+            variable=self.canvas_ops_include_discussions_var,
+        ).grid(row=0, column=2, sticky="w")
+        publish_btns = ttk.Frame(publish_ops)
+        publish_btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        self.run_canvas_publish_state_preview_btn = ttk.Button(
+            publish_btns,
+            text="Preview State Change",
+            command=lambda: self._run_canvas_publish_state_clicked(
+                apply_changes=False
+            ),
+        )
+        self.run_canvas_publish_state_preview_btn.grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        self.run_canvas_publish_state_apply_btn = ttk.Button(
+            publish_btns,
+            text="Apply State Change",
+            command=lambda: self._run_canvas_publish_state_clicked(apply_changes=True),
+        )
+        self.run_canvas_publish_state_apply_btn.grid(row=0, column=1)
+
+        reports = ttk.LabelFrame(parent, text="Current Operation Report", padding=10)
+        reports.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        reports.columnconfigure(1, weight=1)
+        self._add_artifact_row(
+            reports, 0, "Operation report JSON", self.canvas_ops_report_json_var, "Open"
+        )
+        self._add_artifact_row(
+            reports,
+            1,
+            "Operation report Markdown",
+            self.canvas_ops_report_md_var,
+            "Open",
+        )
+        self.copy_canvas_ops_paths_btn = ttk.Button(
+            reports,
+            text="Copy Operation Paths",
+            command=self._copy_canvas_ops_paths_clicked,
+        )
+        self.copy_canvas_ops_paths_btn.grid(
+            row=2, column=0, columnspan=3, sticky="e", pady=(8, 0)
+        )
+
     def _build_tools_tab(self, parent: ttk.Frame) -> None:
         """Tools tab: summary/clipboard, spreadsheet audit, reference docs audit."""
         parent.columnconfigure(1, weight=1)
@@ -2338,12 +2575,28 @@ class LMSMigrationUI:
         self.import_artifact_report_btn.configure(state=state)
         self.import_artifact_apply_btn.configure(state=state)
         self.copy_post_import_paths_btn.configure(state=state)
+        self.run_canvas_page_replace_preview_btn.configure(state=state)
+        self.run_canvas_page_replace_apply_btn.configure(state=state)
+        self.run_canvas_assignment_settings_preview_btn.configure(state=state)
+        self.run_canvas_assignment_settings_apply_btn.configure(state=state)
+        self.run_canvas_publish_state_preview_btn.configure(state=state)
+        self.run_canvas_publish_state_apply_btn.configure(state=state)
+        self.copy_canvas_ops_paths_btn.configure(state=state)
         self.run_ab_variant_cycle_btn.configure(state=state)
         self.canvas_advanced_toggle_btn.configure(state=state)
         self.optional_tools_toggle_btn.configure(state=state)
         self.run_canvas_upload_btn.configure(state=state)
         self.clear_log_btn.configure(state=state)
         self.ab_variant_combo.configure(state="disabled" if busy else "readonly")
+        self.canvas_ops_match_mode_combo.configure(
+            state="disabled" if busy else "readonly"
+        )
+        self.canvas_ops_submission_preset_combo.configure(
+            state="disabled" if busy else "readonly"
+        )
+        self.canvas_ops_publish_target_combo.configure(
+            state="disabled" if busy else "readonly"
+        )
         for button in self._artifact_open_buttons:
             button.configure(state=state)
 
@@ -4271,6 +4524,23 @@ class LMSMigrationUI:
         self.root.clipboard_append(payload)
         self._log("Post-import report paths copied to clipboard.")
 
+    def _copy_canvas_ops_paths_clicked(self) -> None:
+        values = [
+            ("Operation report JSON", self.canvas_ops_report_json_var.get().strip()),
+            ("Operation report Markdown", self.canvas_ops_report_md_var.get().strip()),
+        ]
+        lines = [f"{label}: {value}" for label, value in values if value]
+        if not lines:
+            messagebox.showinfo(
+                "No operation paths",
+                "No Canvas operation report artifacts are currently selected or discovered.",
+            )
+            return
+        payload = "\n".join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(payload)
+        self._log("Canvas operation report paths copied to clipboard.")
+
     def _generate_safe_summary_clicked(self) -> None:
         report_path = Path(self.report_json_var.get().strip())
         output_text = self.safe_summary_path_var.get().strip()
@@ -4443,6 +4713,225 @@ class LMSMigrationUI:
         self._log(f"Link validator triage JSON: {output_json}")
         self._log(f"Link validator triage Markdown: {output_md}")
         self._task_succeeded("Build link validator triage")
+
+    def _handle_canvas_operation_result(
+        self,
+        *,
+        task_name: str,
+        output_json: Path,
+        output_md: Path,
+        report: dict,
+    ) -> None:
+        summary = report.get("summary", {})
+        self.canvas_ops_report_json_var.set(str(output_json))
+        self.canvas_ops_report_md_var.set(str(output_md))
+        self._log(f"Canvas operation JSON: {output_json}")
+        self._log(f"Canvas operation Markdown: {output_md}")
+        summary_text = " | ".join(
+            f"{key}={value}" for key, value in summary.items() if key != "dry_run"
+        )
+        if summary_text:
+            self._log(f"Canvas operation summary: {summary_text}")
+        self._task_succeeded(task_name)
+
+    def _run_canvas_page_replace_clicked(self, *, apply_changes: bool) -> None:
+        self._maybe_apply_course_folder_defaults()
+        creds = self._get_canvas_credentials()
+        if creds is None:
+            return
+        base_url, course_id, token = creds
+        title_pattern = self.canvas_ops_title_pattern_var.get().strip()
+        if not title_pattern:
+            messagebox.showwarning(
+                "Missing title pattern",
+                "Enter a title pattern before running a Canvas operation.",
+            )
+            return
+        find_text = self.canvas_ops_find_text_var.get()
+        if not find_text:
+            messagebox.showwarning(
+                "Missing find text",
+                "Enter the text to find before running Page Text Replace.",
+            )
+            return
+        if apply_changes:
+            proceed = messagebox.askyesno(
+                "Confirm Page Text Replace",
+                "Apply Replace will update live Canvas page bodies that match the current pattern.\n\nContinue?",
+            )
+            if not proceed:
+                return
+        output_json, output_md = self._resolve_canvas_ops_report_paths("page-replace")
+        task_name = "Apply Canvas page text replace" if apply_changes else "Preview Canvas page text replace"
+
+        def task() -> None:
+            report = bulk_replace_page_text(
+                base_url=base_url,
+                course_id=course_id,
+                token=token,
+                title_pattern=title_pattern,
+                match_mode=self.canvas_ops_match_mode_var.get().strip() or "contains",
+                case_sensitive=bool(self.canvas_ops_case_sensitive_var.get()),
+                find_text=find_text,
+                replace_text=self.canvas_ops_replace_text_var.get(),
+                regex=bool(self.canvas_ops_regex_replace_var.get()),
+                dry_run=not apply_changes,
+                output_json_path=output_json,
+                output_markdown_path=output_md,
+            )
+            self.root.after(
+                0,
+                lambda: self._handle_canvas_operation_result(
+                    task_name=task_name,
+                    output_json=output_json,
+                    output_md=output_md,
+                    report=report,
+                ),
+            )
+
+        self._run_background(task_name, task)
+
+    def _run_canvas_assignment_settings_clicked(self, *, apply_changes: bool) -> None:
+        self._maybe_apply_course_folder_defaults()
+        creds = self._get_canvas_credentials()
+        if creds is None:
+            return
+        base_url, course_id, token = creds
+        title_pattern = self.canvas_ops_title_pattern_var.get().strip()
+        if not title_pattern:
+            messagebox.showwarning(
+                "Missing title pattern",
+                "Enter a title pattern before running a Canvas operation.",
+            )
+            return
+        try:
+            points_possible = _parse_points_possible(
+                self.canvas_ops_assignment_points_var.get()
+            )
+        except ValueError:
+            messagebox.showwarning(
+                "Invalid points value",
+                "Points possible must be blank or a numeric value.",
+            )
+            return
+        submission_preset = (
+            self.canvas_ops_assignment_submission_preset_var.get().strip()
+            or "keep-current"
+        )
+        if points_possible is None and submission_preset == "keep-current":
+            messagebox.showwarning(
+                "No assignment changes selected",
+                "Set points possible and/or choose a submission preset before running this operation.",
+            )
+            return
+        if apply_changes:
+            proceed = messagebox.askyesno(
+                "Confirm Assignment Settings Update",
+                "Apply Settings will update live Canvas assignments that match the current pattern.\n\nContinue?",
+            )
+            if not proceed:
+                return
+        output_json, output_md = self._resolve_canvas_ops_report_paths(
+            "assignment-settings"
+        )
+        task_name = (
+            "Apply Canvas assignment settings"
+            if apply_changes
+            else "Preview Canvas assignment settings"
+        )
+
+        def task() -> None:
+            report = bulk_update_assignment_settings(
+                base_url=base_url,
+                course_id=course_id,
+                token=token,
+                title_pattern=title_pattern,
+                match_mode=self.canvas_ops_match_mode_var.get().strip() or "contains",
+                case_sensitive=bool(self.canvas_ops_case_sensitive_var.get()),
+                points_possible=points_possible,
+                submission_preset=submission_preset,
+                dry_run=not apply_changes,
+                output_json_path=output_json,
+                output_markdown_path=output_md,
+            )
+            self.root.after(
+                0,
+                lambda: self._handle_canvas_operation_result(
+                    task_name=task_name,
+                    output_json=output_json,
+                    output_md=output_md,
+                    report=report,
+                ),
+            )
+
+        self._run_background(task_name, task)
+
+    def _run_canvas_publish_state_clicked(self, *, apply_changes: bool) -> None:
+        self._maybe_apply_course_folder_defaults()
+        creds = self._get_canvas_credentials()
+        if creds is None:
+            return
+        base_url, course_id, token = creds
+        title_pattern = self.canvas_ops_title_pattern_var.get().strip()
+        if not title_pattern:
+            messagebox.showwarning(
+                "Missing title pattern",
+                "Enter a title pattern before running a Canvas operation.",
+            )
+            return
+        include_pages = bool(self.canvas_ops_include_pages_var.get())
+        include_assignments = bool(self.canvas_ops_include_assignments_var.get())
+        include_discussions = bool(self.canvas_ops_include_discussions_var.get())
+        if not any((include_pages, include_assignments, include_discussions)):
+            messagebox.showwarning(
+                "No content types selected",
+                "Select at least one content type before running Publish / Unpublish.",
+            )
+            return
+        publish = self.canvas_ops_publish_target_var.get().strip().lower() == "publish"
+        if apply_changes:
+            proceed = messagebox.askyesno(
+                "Confirm Publish State Update",
+                "Apply State Change will update live Canvas publish states for matching items.\n\nContinue?",
+            )
+            if not proceed:
+                return
+        output_json, output_md = self._resolve_canvas_ops_report_paths(
+            "publish-state"
+        )
+        task_name = (
+            "Apply Canvas publish state update"
+            if apply_changes
+            else "Preview Canvas publish state update"
+        )
+
+        def task() -> None:
+            report = bulk_set_publish_state(
+                base_url=base_url,
+                course_id=course_id,
+                token=token,
+                title_pattern=title_pattern,
+                match_mode=self.canvas_ops_match_mode_var.get().strip() or "contains",
+                case_sensitive=bool(self.canvas_ops_case_sensitive_var.get()),
+                include_pages=include_pages,
+                include_assignments=include_assignments,
+                include_discussions=include_discussions,
+                publish=publish,
+                dry_run=not apply_changes,
+                output_json_path=output_json,
+                output_markdown_path=output_md,
+            )
+            self.root.after(
+                0,
+                lambda: self._handle_canvas_operation_result(
+                    task_name=task_name,
+                    output_json=output_json,
+                    output_md=output_md,
+                    report=report,
+                ),
+            )
+
+        self._run_background(task_name, task)
 
     def _run_visual_audit_clicked(self) -> None:
         original_zip = Path(self.visual_original_zip_var.get().strip())
@@ -5828,6 +6317,17 @@ class LMSMigrationUI:
             or (self._resolve_workspace_root() / "output")
         )
 
+    def _resolve_canvas_ops_report_paths(self, operation_slug: str) -> tuple[Path, Path]:
+        output_dir = self._resolve_canvas_output_dir()
+        variant = self.ab_variant_var.get().strip().upper() or "A"
+        artifact_prefix = self._ab_artifact_prefix(variant)
+        normalized_output_dir = str(output_dir).replace("\\", "/").lower()
+        if "/ab-test/" in normalized_output_dir:
+            json_path = output_dir / f"{artifact_prefix}.canvas-ops-{operation_slug}.json"
+        else:
+            json_path = output_dir / f"canvas-ops-{operation_slug}.json"
+        return json_path, json_path.with_suffix(".md")
+
     def _sync_post_import_artifacts_from_output_dir(self, output_dir: Path) -> None:
         cleanup_audit_json = output_dir / "canvas-cleanup-audit.json"
         live_audit_json = output_dir / "canvas-live-link-audit.json"
@@ -5896,6 +6396,16 @@ class LMSMigrationUI:
             if triage_json.exists():
                 self.link_validator_triage_json_var.set(str(triage_json))
 
+    def _sync_canvas_ops_reports_from_output_dir(self, output_dir: Path) -> None:
+        latest_json = self._find_latest_matching_file(output_dir, "*canvas-ops-*.json")
+        if latest_json is None:
+            self.canvas_ops_report_json_var.set("")
+            self.canvas_ops_report_md_var.set("")
+            return
+        latest_md = latest_json.with_suffix(".md")
+        self.canvas_ops_report_json_var.set(str(latest_json))
+        self.canvas_ops_report_md_var.set(str(latest_md) if latest_md.exists() else "")
+
     def _resolve_import_artifact_cleanup_report_path(self) -> Path:
         output_dir = self._resolve_canvas_output_dir()
         variant = self.ab_variant_var.get().strip().upper() or "A"
@@ -5940,6 +6450,7 @@ class LMSMigrationUI:
             else (self._resolve_workspace_root() / "output")
         )
         self._sync_post_import_artifacts_from_output_dir(output_dir)
+        self._sync_canvas_ops_reports_from_output_dir(output_dir)
 
         migration_report_path = self._find_latest_matching_file(
             output_dir, "*.migration-report.json"

@@ -326,6 +326,43 @@ def update_course_assignment_description(
     return payload
 
 
+def update_course_assignment(
+    *,
+    base_url: str,
+    course_id: str,
+    assignment_id: str | int,
+    token: str,
+    description_html: str | None = None,
+    published: bool | None = None,
+    points_possible: float | int | None = None,
+    submission_types: list[str] | None = None,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/courses/{course_id}/assignments/{assignment_id}"
+    form_data: dict[str, Any] = {}
+    if description_html is not None:
+        form_data["assignment[description]"] = description_html
+    if published is not None:
+        form_data["assignment[published]"] = "true" if published else "false"
+    if points_possible is not None:
+        form_data["assignment[points_possible]"] = str(points_possible)
+    if submission_types is not None:
+        form_data["assignment[submission_types][]"] = [
+            str(value) for value in submission_types
+        ]
+    if not form_data:
+        raise CanvasAPIError("At least one assignment field must be provided.")
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="PUT",
+        form_data=form_data,
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas assignment update response format.")
+    return payload
+
+
 def upload_course_file(
     *,
     base_url: str,
@@ -421,6 +458,35 @@ def update_discussion_topic_message(
     return payload
 
 
+def update_discussion_topic(
+    *,
+    base_url: str,
+    course_id: str,
+    topic_id: str | int,
+    token: str,
+    message_html: str | None = None,
+    published: bool | None = None,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/courses/{course_id}/discussion_topics/{topic_id}"
+    form_data: dict[str, Any] = {}
+    if message_html is not None:
+        form_data["message"] = message_html
+    if published is not None:
+        form_data["published"] = "true" if published else "false"
+    if not form_data:
+        raise CanvasAPIError("At least one discussion field must be provided.")
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="PUT",
+        form_data=form_data,
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas discussion update response format.")
+    return payload
+
+
 def fetch_course_announcements(
     *,
     base_url: str,
@@ -475,6 +541,39 @@ def update_course_page_body(
         token=token,
         method="PUT",
         form_data={"wiki_page[body]": body_html},
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas page update response format.")
+    return payload
+
+
+def update_course_page(
+    *,
+    base_url: str,
+    course_id: str,
+    page_url: str,
+    token: str,
+    body_html: str | None = None,
+    title: str | None = None,
+    published: bool | None = None,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    page_part = parse.quote(page_url.strip(), safe="")
+    url = f"{base}/api/v1/courses/{course_id}/pages/{page_part}"
+    form_data: dict[str, Any] = {}
+    if body_html is not None:
+        form_data["wiki_page[body]"] = body_html
+    if title is not None:
+        form_data["wiki_page[title]"] = title
+    if published is not None:
+        form_data["wiki_page[published]"] = "true" if published else "false"
+    if not form_data:
+        raise CanvasAPIError("At least one page field must be provided.")
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="PUT",
+        form_data=form_data,
     )
     if not isinstance(payload, dict):
         raise CanvasAPIError("Unexpected Canvas page update response format.")

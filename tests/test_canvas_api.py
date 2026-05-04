@@ -20,7 +20,10 @@ from lms_migration.canvas_api import (
     fetch_course_pages,
     normalize_base_url,
     set_course_front_page,
+    update_course_assignment,
     update_course_default_view,
+    update_course_page,
+    update_discussion_topic,
 )
 
 
@@ -474,4 +477,76 @@ class TestSetCourseFrontPage:
         assert req.get_method() == "PUT"
         assert "home-page-lcs" in req.full_url
         assert b"wiki_page%5Bfront_page%5D=true" in req.data
+        assert b"wiki_page%5Bpublished%5D=true" in req.data
+
+
+class TestUpdateCourseAssignment:
+    def test_updates_multiple_assignment_fields(self):
+        body = json.dumps({"id": 5, "name": "Essay"}).encode()
+        with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
+            mock_open.return_value = _fake_response(body, {})
+            result = update_course_assignment(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                assignment_id=5,
+                token="tok",
+                published=False,
+                points_possible=25,
+                submission_types=["online_upload"],
+            )
+        assert result == {"id": 5, "name": "Essay"}
+        req = mock_open.call_args[0][0]
+        assert req.get_method() == "PUT"
+        assert "assignments/5" in req.full_url
+        assert b"assignment%5Bpublished%5D=false" in req.data
+        assert b"assignment%5Bpoints_possible%5D=25" in req.data
+        assert b"assignment%5Bsubmission_types%5D%5B%5D=online_upload" in req.data
+
+    def test_requires_at_least_one_field(self):
+        with pytest.raises(CanvasAPIError, match="At least one assignment field"):
+            update_course_assignment(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                assignment_id=5,
+                token="tok",
+            )
+
+
+class TestUpdateDiscussionTopic:
+    def test_updates_published_flag(self):
+        body = json.dumps({"id": 9, "published": False}).encode()
+        with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
+            mock_open.return_value = _fake_response(body, {})
+            result = update_discussion_topic(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                topic_id=9,
+                token="tok",
+                published=False,
+            )
+        assert result == {"id": 9, "published": False}
+        req = mock_open.call_args[0][0]
+        assert req.get_method() == "PUT"
+        assert "discussion_topics/9" in req.full_url
+        assert b"published=false" in req.data
+
+
+class TestUpdateCoursePage:
+    def test_updates_body_and_publish_state(self):
+        body = json.dumps({"url": "page-a"}).encode()
+        with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
+            mock_open.return_value = _fake_response(body, {})
+            result = update_course_page(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                page_url="page-a",
+                token="tok",
+                body_html="<p>Updated</p>",
+                published=True,
+            )
+        assert result == {"url": "page-a"}
+        req = mock_open.call_args[0][0]
+        assert req.get_method() == "PUT"
+        assert "pages/page-a" in req.full_url
+        assert b"wiki_page%5Bbody%5D=%3Cp%3EUpdated%3C%2Fp%3E" in req.data
         assert b"wiki_page%5Bpublished%5D=true" in req.data
