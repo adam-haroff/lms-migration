@@ -40,6 +40,7 @@ from .canvas_operations import (
     bulk_replace_page_text,
     bulk_set_publish_state,
     bulk_update_assignment_settings,
+    scaffold_modules_from_csv,
 )
 from .canvas_template_accessibility import auto_fix_template_accessibility
 from .canvas_live_audit import run_live_link_audit
@@ -259,6 +260,7 @@ class LMSMigrationUI:
         self.canvas_ops_assignment_submission_preset_var = tk.StringVar(
             value="keep-current"
         )
+        self.canvas_ops_scaffold_csv_var = tk.StringVar(value="")
         self.canvas_ops_include_pages_var = tk.BooleanVar(value=True)
         self.canvas_ops_include_assignments_var = tk.BooleanVar(value=False)
         self.canvas_ops_include_discussions_var = tk.BooleanVar(value=False)
@@ -2166,8 +2168,47 @@ class LMSMigrationUI:
         )
         self.run_canvas_publish_state_apply_btn.grid(row=0, column=1)
 
+        scaffold = ttk.LabelFrame(parent, text="CSV Module / Page Scaffold", padding=10)
+        scaffold.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        scaffold.columnconfigure(1, weight=1)
+        self._add_file_row(
+            scaffold,
+            0,
+            "Scaffold CSV",
+            self.canvas_ops_scaffold_csv_var,
+            "Browse CSV",
+            [("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        ttk.Label(
+            scaffold,
+            text=(
+                "Supported columns: `module_name` (required), `module_position`, "
+                "`module_published`, `page_title`, `page_kind` (`plain` or "
+                "`intro_checklist`), `page_published`, `page_body_html`, "
+                "`introduction_html`, `checklist_items` (split with `||`), and "
+                "`item_indent`."
+            ),
+            wraplength=1040,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        scaffold_btns = ttk.Frame(scaffold)
+        scaffold_btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        self.run_canvas_scaffold_preview_btn = ttk.Button(
+            scaffold_btns,
+            text="Preview Scaffold",
+            command=lambda: self._run_canvas_scaffold_clicked(apply_changes=False),
+        )
+        self.run_canvas_scaffold_preview_btn.grid(row=0, column=0, padx=(0, 8))
+        self.run_canvas_scaffold_apply_btn = ttk.Button(
+            scaffold_btns,
+            text="Apply Scaffold",
+            command=lambda: self._run_canvas_scaffold_clicked(apply_changes=True),
+        )
+        self.run_canvas_scaffold_apply_btn.grid(row=0, column=1)
+
         reports = ttk.LabelFrame(parent, text="Current Operation Report", padding=10)
-        reports.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        reports.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         reports.columnconfigure(1, weight=1)
         self._add_artifact_row(
             reports, 0, "Operation report JSON", self.canvas_ops_report_json_var, "Open"
@@ -2638,6 +2679,8 @@ class LMSMigrationUI:
         self.run_canvas_assignment_settings_apply_btn.configure(state=state)
         self.run_canvas_publish_state_preview_btn.configure(state=state)
         self.run_canvas_publish_state_apply_btn.configure(state=state)
+        self.run_canvas_scaffold_preview_btn.configure(state=state)
+        self.run_canvas_scaffold_apply_btn.configure(state=state)
         self.copy_canvas_ops_paths_btn.configure(state=state)
         self.run_ab_variant_cycle_btn.configure(state=state)
         self.canvas_advanced_toggle_btn.configure(state=state)
@@ -5047,6 +5090,64 @@ class LMSMigrationUI:
                 include_assignments=include_assignments,
                 include_discussions=include_discussions,
                 publish=publish,
+                dry_run=not apply_changes,
+                output_json_path=output_json,
+                output_markdown_path=output_md,
+            )
+            self.root.after(
+                0,
+                lambda: self._handle_canvas_operation_result(
+                    task_name=task_name,
+                    output_json=output_json,
+                    output_md=output_md,
+                    report=report,
+                ),
+            )
+
+        self._run_background(task_name, task)
+
+    def _run_canvas_scaffold_clicked(self, *, apply_changes: bool) -> None:
+        self._maybe_apply_course_folder_defaults()
+        creds = self._get_canvas_credentials()
+        if creds is None:
+            return
+        base_url, course_id, token = creds
+        csv_text = self.canvas_ops_scaffold_csv_var.get().strip()
+        if not csv_text:
+            messagebox.showwarning(
+                "Missing scaffold CSV",
+                "Select a scaffold CSV file before running this operation.",
+            )
+            return
+        csv_path = Path(csv_text)
+        if not csv_path.exists():
+            messagebox.showwarning(
+                "Missing scaffold CSV",
+                "Select a valid scaffold CSV file before running this operation.",
+            )
+            return
+        if apply_changes:
+            proceed = messagebox.askyesno(
+                "Confirm CSV Scaffold",
+                "Apply Scaffold will create or update live Canvas modules, pages, and module items from the selected CSV.\n\nContinue?",
+            )
+            if not proceed:
+                return
+        output_json, output_md = self._resolve_canvas_ops_report_paths(
+            "module-scaffold"
+        )
+        task_name = (
+            "Apply Canvas scaffold from CSV"
+            if apply_changes
+            else "Preview Canvas scaffold from CSV"
+        )
+
+        def task() -> None:
+            report = scaffold_modules_from_csv(
+                base_url=base_url,
+                course_id=course_id,
+                token=token,
+                csv_path=csv_path,
                 dry_run=not apply_changes,
                 output_json_path=output_json,
                 output_markdown_path=output_md,

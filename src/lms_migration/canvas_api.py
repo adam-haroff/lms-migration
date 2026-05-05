@@ -237,6 +237,70 @@ def fetch_course_modules(
     return _fetch_paginated_list(first_url=first_url, token=token)
 
 
+def create_course_module(
+    *,
+    base_url: str,
+    course_id: str,
+    token: str,
+    name: str,
+    position: int | None = None,
+    published: bool | None = None,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/courses/{course_id}/modules"
+    form_data: dict[str, Any] = {"module[name]": name}
+    if position is not None:
+        form_data["module[position]"] = str(position)
+    if published is not None:
+        form_data["module[published]"] = "true" if published else "false"
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="POST",
+        form_data=form_data,
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas module creation response format.")
+    return payload
+
+
+def create_course_module_item(
+    *,
+    base_url: str,
+    course_id: str,
+    module_id: str | int,
+    token: str,
+    item_type: str,
+    title: str | None = None,
+    page_url: str | None = None,
+    content_id: str | int | None = None,
+    position: int | None = None,
+    indent: int | None = None,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/courses/{course_id}/modules/{module_id}/items"
+    form_data: dict[str, Any] = {"module_item[type]": item_type}
+    if title is not None:
+        form_data["module_item[title]"] = title
+    if page_url is not None:
+        form_data["module_item[page_url]"] = page_url
+    if content_id is not None:
+        form_data["module_item[content_id]"] = str(content_id)
+    if position is not None:
+        form_data["module_item[position]"] = str(position)
+    if indent is not None:
+        form_data["module_item[indent]"] = str(indent)
+    payload, _ = _request_json(
+        url=url,
+        token=token,
+        method="POST",
+        form_data=form_data,
+    )
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas module item creation response format.")
+    return payload
+
+
 def fetch_course_assignments(
     *,
     base_url: str,

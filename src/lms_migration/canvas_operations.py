@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import json
 import re
+import csv
 from pathlib import Path
 from typing import Any
 
 from .canvas_api import (
+    create_course_module,
+    create_course_module_item,
+    create_or_update_course_page,
     fetch_course_assignment,
     fetch_course_assignments,
     fetch_course_discussion_topic,
     fetch_course_discussion_topics,
+    fetch_course_modules,
     fetch_course_page,
     fetch_course_pages,
     update_course_assignment,
@@ -27,6 +32,8 @@ _SUBMISSION_PRESETS: dict[str, list[str] | None] = {
     "no-submission": ["none"],
     "on-paper": ["on_paper"],
 }
+
+_SCAFFOLD_PAGE_KINDS = {"plain", "intro_checklist"}
 
 
 def _ensure_parent(path: Path) -> None:
@@ -111,6 +118,66 @@ def _resolve_submission_preset(preset: str) -> list[str] | None:
     if normalized not in _SUBMISSION_PRESETS:
         raise ValueError(f"Unsupported submission preset: {preset}")
     return _SUBMISSION_PRESETS[normalized]
+
+
+def _slug_from_title(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+
+
+def _parse_bool(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Unsupported boolean value: {value}")
+
+
+def _parse_optional_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return int(text)
+
+
+def _split_checklist_items(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    parts = [item.strip() for item in str(value).split("||")]
+    return [item for item in parts if item]
+
+
+def _build_scaffold_page_html(
+    *,
+    page_kind: str,
+    introduction_html: str,
+    checklist_items: list[str],
+    page_body_html: str,
+) -> str:
+    normalized_kind = page_kind.strip().lower() or "plain"
+    if normalized_kind not in _SCAFFOLD_PAGE_KINDS:
+        raise ValueError(f"Unsupported page kind: {page_kind}")
+    if page_body_html.strip():
+        return page_body_html.strip()
+    if normalized_kind == "plain":
+        return introduction_html.strip() or "<p>Content coming soon.</p>"
+    intro_block = introduction_html.strip() or (
+        "<p>Review the materials for this module and complete the checklist below.</p>"
+    )
+    checklist_markup = "".join(f"<li>{item}</li>" for item in checklist_items)
+    if not checklist_markup:
+        checklist_markup = "<li>Review the module materials.</li>"
+    return (
+        f"{intro_block}\n"
+        "<h2>Module Checklist</h2>\n"
+        f"<ol>\n{checklist_markup}\n</ol>"
+    )
 
 
 def _markdown_for_page_replace(report: dict[str, Any]) -> str:
@@ -201,6 +268,39 @@ def _markdown_for_publish_state(report: dict[str, Any]) -> str:
             f" before=`{item.get('published_before', False)}`"
             f" target=`{item.get('published_target', False)}`"
             f" updated=`{item.get('updated', False)}`"
+        )
+    return "\n".join(lines)
+
+
+def _markdown_for_module_scaffold(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {})
+    lines = [
+        "# Canvas Operations Report",
+        "",
+        "## Module Scaffold From CSV",
+        "",
+        f"- Dry run: `{summary.get('dry_run', True)}`",
+        f"- Rows processed: `{summary.get('rows_processed', 0)}`",
+        f"- Modules created: `{summary.get('modules_created', 0)}`",
+        f"- Modules reused: `{summary.get('modules_reused', 0)}`",
+        f"- Pages created or updated: `{summary.get('pages_written', 0)}`",
+        f"- Module items created: `{summary.get('module_items_created', 0)}`",
+        "",
+        "## Rows",
+        "",
+    ]
+    rows = report.get("rows", [])
+    if not rows:
+        lines.append("- No scaffold rows were processed.")
+        return "\n".join(lines)
+    for item in rows:
+        lines.append(
+            f"- row `{item.get('row_number', 0)}`"
+            f" module=`{item.get('module_name', '')}`"
+            f" module_created=`{item.get('module_created', False)}`"
+            f" page_title=`{item.get('page_title', '')}`"
+            f" page_written=`{item.get('page_written', False)}`"
+            f" module_item_created=`{item.get('module_item_created', False)}`"
         )
     return "\n".join(lines)
 
@@ -775,6 +875,163 @@ def bulk_set_publish_state(
     )
 
 
+def scaffold_modules_from_csv(
+    *,
+    base_url: str,
+    course_id: str,
+    token: str,
+    csv_path: Path,
+    dry_run: bool,
+    output_json_path: Path,
+    output_markdown_path: Path,
+) -> dict[str, Any]:
+    modules = fetch_course_modules(base_url=base_url, course_id=course_id, token=token)
+    existing_modules_by_name: dict[str, dict[str, Any]] = {}
+    existing_module_page_keys: set[tuple[int, str]] = set()
+    for module in modules:
+        module_name = str(module.get("name") or "").strip()
+        module_id = module.get("id")
+        if module_name and module_name not in existing_modules_by_name:
+            existing_modules_by_name[module_name] = module
+        if module_id in (None, ""):
+            continue
+        module_id_int = int(module_id)
+        for item in module.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").strip() != "Page":
+                continue
+            title = str(item.get("title") or "").strip()
+            page_url = str(item.get("page_url") or "").strip()
+            if title:
+                existing_module_page_keys.add((module_id_int, title.lower()))
+            if page_url:
+                existing_module_page_keys.add((module_id_int, page_url.lower()))
+
+    rows_report: list[dict[str, Any]] = []
+    modules_created = 0
+    modules_reused = 0
+    pages_written = 0
+    module_items_created = 0
+
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError("Scaffold CSV must include a header row.")
+        for row_number, raw_row in enumerate(reader, start=2):
+            module_name = str(raw_row.get("module_name") or "").strip()
+            if not module_name:
+                continue
+            module_position = _parse_optional_int(raw_row.get("module_position"))
+            module_published = _parse_bool(raw_row.get("module_published"), False)
+            page_title = str(raw_row.get("page_title") or "").strip()
+            page_kind = str(raw_row.get("page_kind") or "plain").strip() or "plain"
+            page_published = _parse_bool(raw_row.get("page_published"), False)
+            page_body_html = str(raw_row.get("page_body_html") or "")
+            introduction_html = str(raw_row.get("introduction_html") or "")
+            checklist_items = _split_checklist_items(raw_row.get("checklist_items"))
+            item_indent = _parse_optional_int(raw_row.get("item_indent"))
+            page_url = _slug_from_title(page_title) if page_title else ""
+
+            module = existing_modules_by_name.get(module_name)
+            module_created = False
+            if module is None:
+                if dry_run:
+                    module = {
+                        "id": -1000 - row_number,
+                        "name": module_name,
+                        "published": module_published,
+                    }
+                else:
+                    module = create_course_module(
+                        base_url=base_url,
+                        course_id=course_id,
+                        token=token,
+                        name=module_name,
+                        position=module_position,
+                        published=module_published,
+                    )
+                existing_modules_by_name[module_name] = module
+                module_created = True
+                modules_created += 1
+            else:
+                modules_reused += 1
+
+            page_written = False
+            module_item_created = False
+            module_id_int = int(module.get("id"))
+            if page_title:
+                page_html = _build_scaffold_page_html(
+                    page_kind=page_kind,
+                    introduction_html=introduction_html,
+                    checklist_items=checklist_items,
+                    page_body_html=page_body_html,
+                )
+                if not dry_run:
+                    create_or_update_course_page(
+                        base_url=base_url,
+                        course_id=course_id,
+                        title=page_title,
+                        body_html=page_html,
+                        token=token,
+                        published=page_published,
+                    )
+                page_written = True
+                pages_written += 1
+                page_keys = {(module_id_int, page_title.lower()), (module_id_int, page_url.lower())}
+                already_in_module = any(key in existing_module_page_keys for key in page_keys)
+                if not already_in_module:
+                    if not dry_run:
+                        create_course_module_item(
+                            base_url=base_url,
+                            course_id=course_id,
+                            module_id=module_id_int,
+                            token=token,
+                            item_type="Page",
+                            title=page_title,
+                            page_url=page_url,
+                            indent=item_indent,
+                        )
+                    module_item_created = True
+                    module_items_created += 1
+                    existing_module_page_keys.update(page_keys)
+
+            rows_report.append(
+                {
+                    "row_number": row_number,
+                    "module_name": module_name,
+                    "module_created": module_created,
+                    "page_title": page_title,
+                    "page_kind": page_kind,
+                    "page_written": page_written,
+                    "module_item_created": module_item_created,
+                }
+            )
+
+    report = {
+        "operation": "module_scaffold_from_csv",
+        "parameters": {
+            "csv_path": str(csv_path),
+            "dry_run": dry_run,
+        },
+        "summary": {
+            "dry_run": dry_run,
+            "rows_processed": len(rows_report),
+            "modules_created": modules_created,
+            "modules_reused": modules_reused,
+            "pages_written": pages_written,
+            "module_items_created": module_items_created,
+        },
+        "rows": rows_report,
+    }
+    return _write_report(
+        report=report,
+        output_json_path=output_json_path,
+        output_markdown_path=output_markdown_path,
+        markdown_text=_markdown_for_module_scaffold(report),
+    )
+
+
 __all__ = [
     "bulk_replace_description_text",
     "bulk_replace_page_text",
@@ -782,4 +1039,5 @@ __all__ = [
     "bulk_update_assignment_settings",
     "_parse_points_possible",
     "_resolve_submission_preset",
+    "scaffold_modules_from_csv",
 ]

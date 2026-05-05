@@ -15,6 +15,8 @@ from lms_migration.canvas_api import (
     _fetch_paginated_list,
     _parse_next_link,
     _request_json,
+    create_course_module,
+    create_course_module_item,
     create_or_update_course_page,
     fetch_course,
     fetch_course_assignment,
@@ -408,6 +410,52 @@ class TestFetchSingleObjects:
                 token="tok",
             )
         assert result == {"id": 9, "title": "Prompt"}
+
+
+class TestCreateCourseModule:
+    def test_posts_name_position_and_published(self):
+        body = json.dumps({"id": 50, "name": "Module 1"}).encode()
+        with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
+            mock_open.return_value = _fake_response(body, {})
+            result = create_course_module(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                token="tok",
+                name="Module 1",
+                position=1,
+                published=False,
+            )
+        assert result == {"id": 50, "name": "Module 1"}
+        req = mock_open.call_args[0][0]
+        assert req.get_method() == "POST"
+        assert "courses/42/modules" in req.full_url
+        assert b"module%5Bname%5D=Module+1" in req.data
+        assert b"module%5Bposition%5D=1" in req.data
+        assert b"module%5Bpublished%5D=false" in req.data
+
+
+class TestCreateCourseModuleItem:
+    def test_posts_page_item_fields(self):
+        body = json.dumps({"id": 61, "title": "Module 1: Introduction and Checklist"}).encode()
+        with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
+            mock_open.return_value = _fake_response(body, {})
+            result = create_course_module_item(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                module_id=50,
+                token="tok",
+                item_type="Page",
+                title="Module 1: Introduction and Checklist",
+                page_url="module-1-introduction-and-checklist",
+                indent=1,
+            )
+        assert result["id"] == 61
+        req = mock_open.call_args[0][0]
+        assert req.get_method() == "POST"
+        assert "courses/42/modules/50/items" in req.full_url
+        assert b"module_item%5Btype%5D=Page" in req.data
+        assert b"module_item%5Bpage_url%5D=module-1-introduction-and-checklist" in req.data
+        assert b"module_item%5Bindent%5D=1" in req.data
 
 
 # ─── create_or_update_course_page ────────────────────────────────────────────

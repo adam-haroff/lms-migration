@@ -229,6 +229,63 @@ def test_bulk_set_publish_state_pages_and_discussions(tmp_path, monkeypatch) -> 
     assert len(discussion_calls) == 1
 
 
+def test_scaffold_modules_from_csv_apply(tmp_path, monkeypatch) -> None:
+    csv_path = tmp_path / "scaffold.csv"
+    csv_path.write_text(
+        "module_name,module_position,module_published,page_title,page_kind,introduction_html,checklist_items,item_indent\n"
+        "Module 1: Start Here,1,false,Module 1: Introduction and Checklist,intro_checklist,<p>Intro</p>,Review syllabus||Complete quiz,1\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        canvas_operations,
+        "fetch_course_modules",
+        lambda **_: [],
+    )
+
+    module_calls: list[dict] = []
+    page_calls: list[dict] = []
+    module_item_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        canvas_operations,
+        "create_course_module",
+        lambda **kwargs: module_calls.append(kwargs) or {"id": 100, "name": kwargs["name"]},
+    )
+    monkeypatch.setattr(
+        canvas_operations,
+        "create_or_update_course_page",
+        lambda **kwargs: page_calls.append(kwargs) or {"url": "module-1-introduction-and-checklist"},
+    )
+    monkeypatch.setattr(
+        canvas_operations,
+        "create_course_module_item",
+        lambda **kwargs: module_item_calls.append(kwargs) or {"id": 101},
+    )
+
+    output_json = tmp_path / "scaffold.json"
+    output_md = tmp_path / "scaffold.md"
+    report = canvas_operations.scaffold_modules_from_csv(
+        base_url="https://canvas.example.com",
+        course_id="42",
+        token="tok",
+        csv_path=csv_path,
+        dry_run=False,
+        output_json_path=output_json,
+        output_markdown_path=output_md,
+    )
+
+    assert report["summary"]["rows_processed"] == 1
+    assert report["summary"]["modules_created"] == 1
+    assert report["summary"]["pages_written"] == 1
+    assert report["summary"]["module_items_created"] == 1
+    assert len(module_calls) == 1
+    assert len(page_calls) == 1
+    assert len(module_item_calls) == 1
+    assert "<h2>Module Checklist</h2>" in page_calls[0]["body_html"]
+    assert "Review syllabus" in page_calls[0]["body_html"]
+
+
 def test_parse_points_possible_blank_returns_none() -> None:
     assert canvas_operations._parse_points_possible("") is None
 
