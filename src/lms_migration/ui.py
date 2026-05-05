@@ -40,6 +40,7 @@ from .canvas_operations import (
     bulk_replace_page_text,
     bulk_set_publish_state,
     bulk_update_assignment_settings,
+    build_operation_preview,
     scaffold_modules_from_csv,
 )
 from .canvas_template_accessibility import auto_fix_template_accessibility
@@ -267,6 +268,9 @@ class LMSMigrationUI:
         self.canvas_ops_publish_target_var = tk.StringVar(value="unpublish")
         self.canvas_ops_report_json_var = tk.StringVar(value="")
         self.canvas_ops_report_md_var = tk.StringVar(value="")
+        self.canvas_ops_preview_summary_var = tk.StringVar(
+            value="Run a Canvas operation preview to inspect matches here."
+        )
         self.template_alias_map_var = tk.StringVar(
             value=str(
                 self._resolve_workspace_root() / "rules" / "template_asset_aliases.json"
@@ -294,6 +298,7 @@ class LMSMigrationUI:
         self._active_scroll_canvas: tk.Canvas | None = None
         self._tab_canvases: list[tk.Canvas] = []
         self._artifact_open_buttons: list[ttk.Button] = []
+        self.canvas_ops_preview_tree: ttk.Treeview | None = None
         self._upload_page_urls: list[str] = []
         self.page_review_html_var = tk.StringVar(value="")
         self.auto_open_page_review_var = tk.BooleanVar(value=True)
@@ -2207,8 +2212,43 @@ class LMSMigrationUI:
         )
         self.run_canvas_scaffold_apply_btn.grid(row=0, column=1)
 
+        preview = ttk.LabelFrame(parent, text="Operation Preview", padding=10)
+        preview.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(0, 10))
+        preview.columnconfigure(0, weight=1)
+        preview.rowconfigure(1, weight=1)
+        ttk.Label(
+            preview,
+            textvariable=self.canvas_ops_preview_summary_var,
+            wraplength=1040,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        preview_table = ttk.Frame(preview)
+        preview_table.grid(row=1, column=0, sticky="nsew")
+        preview_table.columnconfigure(0, weight=1)
+        preview_table.rowconfigure(0, weight=1)
+        self.canvas_ops_preview_tree = ttk.Treeview(
+            preview_table,
+            columns=("kind", "title", "details", "status"),
+            show="headings",
+            height=10,
+        )
+        self.canvas_ops_preview_tree.grid(row=0, column=0, sticky="nsew")
+        self.canvas_ops_preview_tree.heading("kind", text="Kind")
+        self.canvas_ops_preview_tree.heading("title", text="Title / Module")
+        self.canvas_ops_preview_tree.heading("details", text="Details")
+        self.canvas_ops_preview_tree.heading("status", text="Status")
+        self.canvas_ops_preview_tree.column("kind", width=120, anchor="w", stretch=False)
+        self.canvas_ops_preview_tree.column("title", width=320, anchor="w")
+        self.canvas_ops_preview_tree.column("details", width=520, anchor="w")
+        self.canvas_ops_preview_tree.column("status", width=120, anchor="center", stretch=False)
+        preview_scroll = ttk.Scrollbar(
+            preview_table, orient="vertical", command=self.canvas_ops_preview_tree.yview
+        )
+        preview_scroll.grid(row=0, column=1, sticky="ns")
+        self.canvas_ops_preview_tree.configure(yscrollcommand=preview_scroll.set)
+
         reports = ttk.LabelFrame(parent, text="Current Operation Report", padding=10)
-        reports.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        reports.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         reports.columnconfigure(1, weight=1)
         self._add_artifact_row(
             reports, 0, "Operation report JSON", self.canvas_ops_report_json_var, "Open"
@@ -4641,6 +4681,34 @@ class LMSMigrationUI:
         self.root.clipboard_append(payload)
         self._log("Canvas operation report paths copied to clipboard.")
 
+    def _clear_canvas_ops_preview(self) -> None:
+        self.canvas_ops_preview_summary_var.set(
+            "Run a Canvas operation preview to inspect matches here."
+        )
+        if self.canvas_ops_preview_tree is None:
+            return
+        for item_id in self.canvas_ops_preview_tree.get_children():
+            self.canvas_ops_preview_tree.delete(item_id)
+
+    def _populate_canvas_ops_preview(self, report: dict) -> None:
+        summary_text, rows = build_operation_preview(report)
+        self.canvas_ops_preview_summary_var.set(summary_text)
+        if self.canvas_ops_preview_tree is None:
+            return
+        for item_id in self.canvas_ops_preview_tree.get_children():
+            self.canvas_ops_preview_tree.delete(item_id)
+        for row in rows:
+            self.canvas_ops_preview_tree.insert(
+                "",
+                "end",
+                values=(
+                    row.get("kind", ""),
+                    row.get("title", ""),
+                    row.get("details", ""),
+                    row.get("status", ""),
+                ),
+            )
+
     def _generate_safe_summary_clicked(self) -> None:
         report_path = Path(self.report_json_var.get().strip())
         output_text = self.safe_summary_path_var.get().strip()
@@ -4825,6 +4893,7 @@ class LMSMigrationUI:
         summary = report.get("summary", {})
         self.canvas_ops_report_json_var.set(str(output_json))
         self.canvas_ops_report_md_var.set(str(output_md))
+        self._populate_canvas_ops_preview(report)
         self._log(f"Canvas operation JSON: {output_json}")
         self._log(f"Canvas operation Markdown: {output_md}")
         summary_text = " | ".join(
@@ -6632,10 +6701,16 @@ class LMSMigrationUI:
         if latest_json is None:
             self.canvas_ops_report_json_var.set("")
             self.canvas_ops_report_md_var.set("")
+            self._clear_canvas_ops_preview()
             return
         latest_md = latest_json.with_suffix(".md")
         self.canvas_ops_report_json_var.set(str(latest_json))
         self.canvas_ops_report_md_var.set(str(latest_md) if latest_md.exists() else "")
+        report = self._load_json_file(latest_json)
+        if isinstance(report, dict):
+            self._populate_canvas_ops_preview(report)
+        else:
+            self._clear_canvas_ops_preview()
 
     def _resolve_import_artifact_cleanup_report_path(self) -> Path:
         output_dir = self._resolve_canvas_output_dir()

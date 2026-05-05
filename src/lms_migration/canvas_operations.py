@@ -305,6 +305,129 @@ def _markdown_for_module_scaffold(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def build_operation_preview(report: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
+    operation = str(report.get("operation") or "").strip()
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+    rows: list[dict[str, str]] = []
+
+    if operation == "page_text_replace":
+        summary_text = (
+            f"Pages matched: {summary.get('pages_matched', 0)} | "
+            f"Pages with replacements: {summary.get('pages_with_replacements', 0)} | "
+            f"Pages updated: {summary.get('pages_updated', 0)} | "
+            f"Total replacements: {summary.get('total_replacements', 0)}"
+        )
+        for item in report.get("matches", []):
+            rows.append(
+                {
+                    "kind": "page",
+                    "title": str(item.get("title") or ""),
+                    "details": (
+                        f"url={item.get('page_url', '')} | "
+                        f"replacements={item.get('replacement_count', 0)}"
+                    ),
+                    "status": "updated" if item.get("updated") else "preview",
+                }
+            )
+        return summary_text, rows
+
+    if operation == "description_text_replace":
+        summary_text = (
+            f"Items matched: {summary.get('items_matched', 0)} | "
+            f"Items with replacements: {summary.get('items_with_replacements', 0)} | "
+            f"Items updated: {summary.get('items_updated', 0)} | "
+            f"Total replacements: {summary.get('total_replacements', 0)}"
+        )
+        for item in report.get("matches", []):
+            rows.append(
+                {
+                    "kind": str(item.get("kind") or ""),
+                    "title": str(item.get("title") or ""),
+                    "details": (
+                        f"id={item.get('identifier', '')} | "
+                        f"replacements={item.get('replacement_count', 0)}"
+                    ),
+                    "status": "updated" if item.get("updated") else "preview",
+                }
+            )
+        return summary_text, rows
+
+    if operation == "assignment_settings_update":
+        summary_text = (
+            f"Assignments matched: {summary.get('assignments_matched', 0)} | "
+            f"Assignments needing changes: {summary.get('assignments_needing_changes', 0)} | "
+            f"Assignments updated: {summary.get('assignments_updated', 0)}"
+        )
+        for item in report.get("matches", []):
+            changes = item.get("changes", {})
+            change_parts: list[str] = []
+            if "points_possible" in changes:
+                points = changes["points_possible"]
+                change_parts.append(
+                    f"points {points.get('before', '')}->{points.get('after', '')}"
+                )
+            if "submission_types" in changes:
+                sub = changes["submission_types"]
+                change_parts.append(
+                    f"submission {sub.get('before', [])}->{sub.get('after', [])}"
+                )
+            rows.append(
+                {
+                    "kind": "assignment",
+                    "title": str(item.get("title") or ""),
+                    "details": " | ".join(change_parts) or "settings change",
+                    "status": "updated" if item.get("updated") else "preview",
+                }
+            )
+        return summary_text, rows
+
+    if operation == "publish_state_update":
+        summary_text = (
+            f"Items matched: {summary.get('items_matched', 0)} | "
+            f"Items needing changes: {summary.get('items_needing_changes', 0)} | "
+            f"Items updated: {summary.get('items_updated', 0)}"
+        )
+        for item in report.get("matches", []):
+            rows.append(
+                {
+                    "kind": str(item.get("kind") or ""),
+                    "title": str(item.get("title") or ""),
+                    "details": (
+                        f"id={item.get('identifier', '')} | "
+                        f"{item.get('published_before', False)}->{item.get('published_target', False)}"
+                    ),
+                    "status": "updated" if item.get("updated") else "preview",
+                }
+            )
+        return summary_text, rows
+
+    if operation == "module_scaffold_from_csv":
+        summary_text = (
+            f"Rows processed: {summary.get('rows_processed', 0)} | "
+            f"Modules created: {summary.get('modules_created', 0)} | "
+            f"Pages written: {summary.get('pages_written', 0)} | "
+            f"Module items created: {summary.get('module_items_created', 0)}"
+        )
+        for item in report.get("rows", []):
+            rows.append(
+                {
+                    "kind": "scaffold",
+                    "title": str(item.get("module_name") or ""),
+                    "details": (
+                        f"row={item.get('row_number', 0)} | "
+                        f"page={item.get('page_title', '')} | "
+                        f"page_written={item.get('page_written', False)} | "
+                        f"module_item_created={item.get('module_item_created', False)}"
+                    ),
+                    "status": "created" if item.get("module_created") else "reused",
+                }
+            )
+        return summary_text, rows
+
+    summary_text = "No preview is available for this operation report."
+    return summary_text, rows
+
+
 def _markdown_for_description_replace(report: dict[str, Any]) -> str:
     summary = report.get("summary", {})
     lines = [
@@ -1037,6 +1160,7 @@ __all__ = [
     "bulk_replace_page_text",
     "bulk_set_publish_state",
     "bulk_update_assignment_settings",
+    "build_operation_preview",
     "_parse_points_possible",
     "_resolve_submission_preset",
     "scaffold_modules_from_csv",

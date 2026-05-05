@@ -286,6 +286,37 @@ def test_scaffold_modules_from_csv_apply(tmp_path, monkeypatch) -> None:
     assert "Review syllabus" in page_calls[0]["body_html"]
 
 
+def test_build_operation_preview_for_assignment_settings() -> None:
+    summary_text, rows = canvas_operations.build_operation_preview(
+        {
+            "operation": "assignment_settings_update",
+            "summary": {
+                "assignments_matched": 2,
+                "assignments_needing_changes": 1,
+                "assignments_updated": 1,
+            },
+            "matches": [
+                {
+                    "title": "Module 3: Assignment: Essay",
+                    "changes": {
+                        "points_possible": {"before": 10, "after": 15},
+                        "submission_types": {
+                            "before": ["online_text_entry"],
+                            "after": ["online_upload"],
+                        },
+                    },
+                    "updated": True,
+                }
+            ],
+        }
+    )
+    assert "Assignments matched: 2" in summary_text
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "assignment"
+    assert "points 10->15" in rows[0]["details"]
+    assert rows[0]["status"] == "updated"
+
+
 def test_parse_points_possible_blank_returns_none() -> None:
     assert canvas_operations._parse_points_possible("") is None
 
