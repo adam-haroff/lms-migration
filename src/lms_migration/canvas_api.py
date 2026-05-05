@@ -250,6 +250,21 @@ def fetch_course_assignments(
     return _fetch_paginated_list(first_url=first_url, token=token)
 
 
+def fetch_course_assignment(
+    *,
+    base_url: str,
+    course_id: str,
+    assignment_id: str | int,
+    token: str,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/courses/{course_id}/assignments/{assignment_id}"
+    payload, _ = _request_json(url=url, token=token)
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas assignment response format.")
+    return payload
+
+
 def fetch_new_quizzes(
     *,
     base_url: str,
@@ -435,6 +450,21 @@ def fetch_course_discussion_topics(
     path = f"/api/v1/courses/{course_id}/discussion_topics"
     first_url = _build_url(base, path, {"per_page": per_page})
     return _fetch_paginated_list(first_url=first_url, token=token)
+
+
+def fetch_course_discussion_topic(
+    *,
+    base_url: str,
+    course_id: str,
+    topic_id: str | int,
+    token: str,
+) -> dict[str, Any]:
+    base = normalize_base_url(base_url)
+    url = f"{base}/api/v1/courses/{course_id}/discussion_topics/{topic_id}"
+    payload, _ = _request_json(url=url, token=token)
+    if not isinstance(payload, dict):
+        raise CanvasAPIError("Unexpected Canvas discussion response format.")
+    return payload
 
 
 def update_discussion_topic_message(

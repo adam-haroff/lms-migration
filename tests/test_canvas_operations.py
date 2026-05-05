@@ -105,6 +105,73 @@ def test_bulk_update_assignment_settings_apply(tmp_path, monkeypatch) -> None:
     assert calls[0]["submission_types"] == ["online_upload"]
 
 
+def test_bulk_replace_description_text_updates_assignment_and_discussion(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        canvas_operations,
+        "fetch_course_assignments",
+        lambda **_: [{"id": 10, "name": "Module 3: Quiz: Gender Review"}],
+    )
+    monkeypatch.setattr(
+        canvas_operations,
+        "fetch_course_assignment",
+        lambda **_: {"description": "<p>Submit to the Dropbox.</p>"},
+    )
+    monkeypatch.setattr(
+        canvas_operations,
+        "fetch_course_discussion_topics",
+        lambda **_: [{"id": 20, "title": "Discussion: Reflection"}],
+    )
+    monkeypatch.setattr(
+        canvas_operations,
+        "fetch_course_discussion_topic",
+        lambda **_: {"message": "<p>Post to the Dropbox.</p>"},
+    )
+
+    assignment_calls: list[dict] = []
+    discussion_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        canvas_operations,
+        "update_course_assignment",
+        lambda **kwargs: assignment_calls.append(kwargs) or {"id": kwargs["assignment_id"]},
+    )
+    monkeypatch.setattr(
+        canvas_operations,
+        "update_discussion_topic",
+        lambda **kwargs: discussion_calls.append(kwargs) or {"id": kwargs["topic_id"]},
+    )
+
+    output_json = tmp_path / "description-replace.json"
+    output_md = tmp_path / "description-replace.md"
+    report = canvas_operations.bulk_replace_description_text(
+        base_url="https://canvas.example.com",
+        course_id="42",
+        token="tok",
+        title_pattern="Module 3|Reflection",
+        match_mode="regex",
+        case_sensitive=False,
+        find_text="Dropbox",
+        replace_text="assignment submission area",
+        regex=False,
+        include_assignments=True,
+        include_discussions=True,
+        dry_run=False,
+        output_json_path=output_json,
+        output_markdown_path=output_md,
+    )
+
+    assert report["summary"]["items_matched"] == 2
+    assert report["summary"]["items_with_replacements"] == 2
+    assert report["summary"]["items_updated"] == 2
+    assert report["summary"]["total_replacements"] == 2
+    assert len(assignment_calls) == 1
+    assert len(discussion_calls) == 1
+    assert "assignment submission area" in assignment_calls[0]["description_html"]
+    assert "assignment submission area" in discussion_calls[0]["message_html"]
+
+
 def test_bulk_set_publish_state_pages_and_discussions(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         canvas_operations,

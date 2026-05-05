@@ -36,6 +36,7 @@ from .canvas_link_validator_triage import build_link_validator_triage_report
 from .canvas_new_quiz_asset_repair import reconcile_new_quiz_assets
 from .canvas_operations import (
     _parse_points_possible,
+    bulk_replace_description_text,
     bulk_replace_page_text,
     bulk_set_publish_state,
     bulk_update_assignment_settings,
@@ -252,6 +253,8 @@ class LMSMigrationUI:
         self.canvas_ops_find_text_var = tk.StringVar(value="")
         self.canvas_ops_replace_text_var = tk.StringVar(value="")
         self.canvas_ops_regex_replace_var = tk.BooleanVar(value=False)
+        self.canvas_ops_description_include_assignments_var = tk.BooleanVar(value=True)
+        self.canvas_ops_description_include_discussions_var = tk.BooleanVar(value=True)
         self.canvas_ops_assignment_points_var = tk.StringVar(value="")
         self.canvas_ops_assignment_submission_preset_var = tk.StringVar(
             value="keep-current"
@@ -2002,11 +2005,63 @@ class LMSMigrationUI:
         )
         self.run_canvas_page_replace_apply_btn.grid(row=0, column=1)
 
+        description_replace = ttk.LabelFrame(
+            parent, text="Assignment / Discussion Description Replace", padding=10
+        )
+        description_replace.grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10)
+        )
+        description_replace.columnconfigure(1, weight=1)
+        ttk.Label(
+            description_replace,
+            text=(
+                "Uses the same Find / Replace text above, but applies it to assignment "
+                "descriptions (including quiz wrappers) and/or discussion messages."
+            ),
+            wraplength=980,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        description_type_row = ttk.Frame(description_replace)
+        description_type_row.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 4))
+        ttk.Checkbutton(
+            description_type_row,
+            text="Assignments / Quizzes",
+            variable=self.canvas_ops_description_include_assignments_var,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(
+            description_type_row,
+            text="Discussions",
+            variable=self.canvas_ops_description_include_discussions_var,
+        ).grid(row=0, column=1, sticky="w")
+        description_btns = ttk.Frame(description_replace)
+        description_btns.grid(
+            row=2, column=0, columnspan=3, sticky="e", pady=(6, 0)
+        )
+        self.run_canvas_description_replace_preview_btn = ttk.Button(
+            description_btns,
+            text="Preview Description Replace",
+            command=lambda: self._run_canvas_description_replace_clicked(
+                apply_changes=False
+            ),
+        )
+        self.run_canvas_description_replace_preview_btn.grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        self.run_canvas_description_replace_apply_btn = ttk.Button(
+            description_btns,
+            text="Apply Description Replace",
+            command=lambda: self._run_canvas_description_replace_clicked(
+                apply_changes=True
+            ),
+        )
+        self.run_canvas_description_replace_apply_btn.grid(row=0, column=1)
+
         assignment_settings = ttk.LabelFrame(
             parent, text="Assignment Settings Update", padding=10
         )
         assignment_settings.grid(
-            row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10)
+            row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10)
         )
         assignment_settings.columnconfigure(1, weight=1)
         ttk.Label(assignment_settings, text="Points possible").grid(
@@ -2062,7 +2117,7 @@ class LMSMigrationUI:
         self.run_canvas_assignment_settings_apply_btn.grid(row=0, column=1)
 
         publish_ops = ttk.LabelFrame(parent, text="Publish / Unpublish", padding=10)
-        publish_ops.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        publish_ops.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         publish_ops.columnconfigure(1, weight=1)
         ttk.Label(publish_ops, text="Target state").grid(
             row=0, column=0, sticky="w", pady=3
@@ -2112,7 +2167,7 @@ class LMSMigrationUI:
         self.run_canvas_publish_state_apply_btn.grid(row=0, column=1)
 
         reports = ttk.LabelFrame(parent, text="Current Operation Report", padding=10)
-        reports.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        reports.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         reports.columnconfigure(1, weight=1)
         self._add_artifact_row(
             reports, 0, "Operation report JSON", self.canvas_ops_report_json_var, "Open"
@@ -2577,6 +2632,8 @@ class LMSMigrationUI:
         self.copy_post_import_paths_btn.configure(state=state)
         self.run_canvas_page_replace_preview_btn.configure(state=state)
         self.run_canvas_page_replace_apply_btn.configure(state=state)
+        self.run_canvas_description_replace_preview_btn.configure(state=state)
+        self.run_canvas_description_replace_apply_btn.configure(state=state)
         self.run_canvas_assignment_settings_preview_btn.configure(state=state)
         self.run_canvas_assignment_settings_apply_btn.configure(state=state)
         self.run_canvas_publish_state_preview_btn.configure(state=state)
@@ -4775,6 +4832,79 @@ class LMSMigrationUI:
                 find_text=find_text,
                 replace_text=self.canvas_ops_replace_text_var.get(),
                 regex=bool(self.canvas_ops_regex_replace_var.get()),
+                dry_run=not apply_changes,
+                output_json_path=output_json,
+                output_markdown_path=output_md,
+            )
+            self.root.after(
+                0,
+                lambda: self._handle_canvas_operation_result(
+                    task_name=task_name,
+                    output_json=output_json,
+                    output_md=output_md,
+                    report=report,
+                ),
+            )
+
+        self._run_background(task_name, task)
+
+    def _run_canvas_description_replace_clicked(self, *, apply_changes: bool) -> None:
+        self._maybe_apply_course_folder_defaults()
+        creds = self._get_canvas_credentials()
+        if creds is None:
+            return
+        base_url, course_id, token = creds
+        title_pattern = self.canvas_ops_title_pattern_var.get().strip()
+        if not title_pattern:
+            messagebox.showwarning(
+                "Missing title pattern",
+                "Enter a title pattern before running a Canvas operation.",
+            )
+            return
+        find_text = self.canvas_ops_find_text_var.get()
+        if not find_text:
+            messagebox.showwarning(
+                "Missing find text",
+                "Enter the text to find before running Description Replace.",
+            )
+            return
+        include_assignments = bool(self.canvas_ops_description_include_assignments_var.get())
+        include_discussions = bool(self.canvas_ops_description_include_discussions_var.get())
+        if not any((include_assignments, include_discussions)):
+            messagebox.showwarning(
+                "No content types selected",
+                "Select assignments/quizzes and/or discussions before running Description Replace.",
+            )
+            return
+        if apply_changes:
+            proceed = messagebox.askyesno(
+                "Confirm Description Replace",
+                "Apply Description Replace will update live assignment/quiz descriptions and/or discussion messages that match the current pattern.\n\nContinue?",
+            )
+            if not proceed:
+                return
+        output_json, output_md = self._resolve_canvas_ops_report_paths(
+            "description-replace"
+        )
+        task_name = (
+            "Apply Canvas description replace"
+            if apply_changes
+            else "Preview Canvas description replace"
+        )
+
+        def task() -> None:
+            report = bulk_replace_description_text(
+                base_url=base_url,
+                course_id=course_id,
+                token=token,
+                title_pattern=title_pattern,
+                match_mode=self.canvas_ops_match_mode_var.get().strip() or "contains",
+                case_sensitive=bool(self.canvas_ops_case_sensitive_var.get()),
+                find_text=find_text,
+                replace_text=self.canvas_ops_replace_text_var.get(),
+                regex=bool(self.canvas_ops_regex_replace_var.get()),
+                include_assignments=include_assignments,
+                include_discussions=include_discussions,
                 dry_run=not apply_changes,
                 output_json_path=output_json,
                 output_markdown_path=output_md,

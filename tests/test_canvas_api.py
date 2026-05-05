@@ -17,6 +17,8 @@ from lms_migration.canvas_api import (
     _request_json,
     create_or_update_course_page,
     fetch_course,
+    fetch_course_assignment,
+    fetch_course_discussion_topic,
     fetch_course_pages,
     normalize_base_url,
     set_course_front_page,
@@ -380,6 +382,32 @@ class TestFetchCoursePages:
                 base_url="https://canvas.example.com", course_id="42", token="tok"
             )
         assert result == [{"url": "week-1", "title": "Week 1"}]
+
+
+class TestFetchSingleObjects:
+    def test_fetch_course_assignment_returns_dict(self):
+        body = json.dumps({"id": 10, "name": "Essay"}).encode()
+        with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
+            mock_open.return_value = _fake_response(body, {})
+            result = fetch_course_assignment(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                assignment_id=10,
+                token="tok",
+            )
+        assert result == {"id": 10, "name": "Essay"}
+
+    def test_fetch_course_discussion_topic_returns_dict(self):
+        body = json.dumps({"id": 9, "title": "Prompt"}).encode()
+        with patch("lms_migration.canvas_api.request.urlopen") as mock_open:
+            mock_open.return_value = _fake_response(body, {})
+            result = fetch_course_discussion_topic(
+                base_url="https://canvas.example.com",
+                course_id="42",
+                topic_id=9,
+                token="tok",
+            )
+        assert result == {"id": 9, "title": "Prompt"}
 
 
 # ─── create_or_update_course_page ────────────────────────────────────────────

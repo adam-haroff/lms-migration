@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from .canvas_api import (
+    fetch_course_assignment,
     fetch_course_assignments,
+    fetch_course_discussion_topic,
     fetch_course_discussion_topics,
     fetch_course_page,
     fetch_course_pages,
@@ -203,6 +205,37 @@ def _markdown_for_publish_state(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _markdown_for_description_replace(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {})
+    lines = [
+        "# Canvas Operations Report",
+        "",
+        "## Description Text Replace",
+        "",
+        f"- Dry run: `{summary.get('dry_run', True)}`",
+        f"- Assignments scanned: `{summary.get('assignments_scanned', 0)}`",
+        f"- Discussions scanned: `{summary.get('discussions_scanned', 0)}`",
+        f"- Items matched: `{summary.get('items_matched', 0)}`",
+        f"- Items with replacements: `{summary.get('items_with_replacements', 0)}`",
+        f"- Items updated: `{summary.get('items_updated', 0)}`",
+        f"- Total replacements: `{summary.get('total_replacements', 0)}`",
+        "",
+        "## Matches",
+        "",
+    ]
+    matches = report.get("matches", [])
+    if not matches:
+        lines.append("- No matching descriptions needed changes.")
+        return "\n".join(lines)
+    for item in matches:
+        lines.append(
+            f"- `{item.get('kind', '')}` `{item.get('title', '')}`"
+            f" replacements=`{item.get('replacement_count', 0)}`"
+            f" updated=`{item.get('updated', False)}`"
+        )
+    return "\n".join(lines)
+
+
 def bulk_replace_page_text(
     *,
     base_url: str,
@@ -294,6 +327,174 @@ def bulk_replace_page_text(
         output_json_path=output_json_path,
         output_markdown_path=output_markdown_path,
         markdown_text=_markdown_for_page_replace(report),
+    )
+
+
+def bulk_replace_description_text(
+    *,
+    base_url: str,
+    course_id: str,
+    token: str,
+    title_pattern: str,
+    match_mode: str,
+    case_sensitive: bool,
+    find_text: str,
+    replace_text: str,
+    regex: bool,
+    include_assignments: bool,
+    include_discussions: bool,
+    dry_run: bool,
+    output_json_path: Path,
+    output_markdown_path: Path,
+) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    assignments_scanned = 0
+    discussions_scanned = 0
+    items_matched = 0
+    items_updated = 0
+    total_replacements = 0
+
+    if include_assignments:
+        assignments = fetch_course_assignments(
+            base_url=base_url, course_id=course_id, token=token
+        )
+        assignments_scanned = len(assignments)
+        for assignment in assignments:
+            title = str(assignment.get("name") or "").strip()
+            assignment_id = assignment.get("id")
+            if not title or assignment_id in (None, ""):
+                continue
+            if not _title_matches(
+                title,
+                title_pattern,
+                match_mode=match_mode,
+                case_sensitive=case_sensitive,
+            ):
+                continue
+            items_matched += 1
+            assignment_payload = fetch_course_assignment(
+                base_url=base_url,
+                course_id=course_id,
+                assignment_id=assignment_id,
+                token=token,
+            )
+            description_html = str(assignment_payload.get("description") or "")
+            updated_body, replacement_count = _replace_text(
+                description_html,
+                find_text=find_text,
+                replace_text=replace_text,
+                regex=regex,
+                case_sensitive=case_sensitive,
+            )
+            if replacement_count <= 0:
+                continue
+            total_replacements += replacement_count
+            updated = False
+            if not dry_run:
+                update_course_assignment(
+                    base_url=base_url,
+                    course_id=course_id,
+                    assignment_id=assignment_id,
+                    token=token,
+                    description_html=updated_body,
+                )
+                updated = True
+                items_updated += 1
+            matches.append(
+                {
+                    "kind": "assignment",
+                    "title": title,
+                    "identifier": assignment_id,
+                    "replacement_count": replacement_count,
+                    "updated": updated,
+                }
+            )
+
+    if include_discussions:
+        discussions = fetch_course_discussion_topics(
+            base_url=base_url, course_id=course_id, token=token
+        )
+        discussions_scanned = len(discussions)
+        for discussion in discussions:
+            title = str(discussion.get("title") or "").strip()
+            discussion_id = discussion.get("id")
+            if not title or discussion_id in (None, ""):
+                continue
+            if not _title_matches(
+                title,
+                title_pattern,
+                match_mode=match_mode,
+                case_sensitive=case_sensitive,
+            ):
+                continue
+            items_matched += 1
+            discussion_payload = fetch_course_discussion_topic(
+                base_url=base_url,
+                course_id=course_id,
+                topic_id=discussion_id,
+                token=token,
+            )
+            message_html = str(discussion_payload.get("message") or "")
+            updated_body, replacement_count = _replace_text(
+                message_html,
+                find_text=find_text,
+                replace_text=replace_text,
+                regex=regex,
+                case_sensitive=case_sensitive,
+            )
+            if replacement_count <= 0:
+                continue
+            total_replacements += replacement_count
+            updated = False
+            if not dry_run:
+                update_discussion_topic(
+                    base_url=base_url,
+                    course_id=course_id,
+                    topic_id=discussion_id,
+                    token=token,
+                    message_html=updated_body,
+                )
+                updated = True
+                items_updated += 1
+            matches.append(
+                {
+                    "kind": "discussion",
+                    "title": title,
+                    "identifier": discussion_id,
+                    "replacement_count": replacement_count,
+                    "updated": updated,
+                }
+            )
+
+    report = {
+        "operation": "description_text_replace",
+        "parameters": {
+            "title_pattern": title_pattern,
+            "match_mode": match_mode,
+            "case_sensitive": case_sensitive,
+            "find_text": find_text,
+            "replace_text": replace_text,
+            "regex": regex,
+            "include_assignments": include_assignments,
+            "include_discussions": include_discussions,
+            "dry_run": dry_run,
+        },
+        "summary": {
+            "dry_run": dry_run,
+            "assignments_scanned": assignments_scanned,
+            "discussions_scanned": discussions_scanned,
+            "items_matched": items_matched,
+            "items_with_replacements": len(matches),
+            "items_updated": items_updated,
+            "total_replacements": total_replacements,
+        },
+        "matches": matches,
+    }
+    return _write_report(
+        report=report,
+        output_json_path=output_json_path,
+        output_markdown_path=output_markdown_path,
+        markdown_text=_markdown_for_description_replace(report),
     )
 
 
@@ -575,6 +776,7 @@ def bulk_set_publish_state(
 
 
 __all__ = [
+    "bulk_replace_description_text",
     "bulk_replace_page_text",
     "bulk_set_publish_state",
     "bulk_update_assignment_settings",
