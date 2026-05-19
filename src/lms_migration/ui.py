@@ -33,6 +33,7 @@ from .canvas_assessment_templates import auto_wrap_assessment_descriptions
 from .canvas_checklist_title_sync import sync_intro_checklist_titles
 from .canvas_import_artifact_cleanup import cleanup_import_artifacts
 from .canvas_link_validator_triage import build_link_validator_triage_report
+from .canvas_mathml_repair import auto_fix_canvas_mathml
 from .canvas_new_quiz_asset_repair import reconcile_new_quiz_assets
 from .canvas_operations import (
     _parse_points_possible,
@@ -248,6 +249,7 @@ class LMSMigrationUI:
         self.live_audit_md_var = tk.StringVar(value="")
         self.import_artifact_cleanup_json_var = tk.StringVar(value="")
         self.checklist_sync_json_var = tk.StringVar(value="")
+        self.mathml_repair_json_var = tk.StringVar(value="")
         self.new_quiz_asset_repair_json_var = tk.StringVar(value="")
         self.canvas_ops_title_pattern_var = tk.StringVar(value="")
         self.canvas_ops_match_mode_var = tk.StringVar(value="contains")
@@ -1908,19 +1910,26 @@ class LMSMigrationUI:
         self._add_artifact_row(
             reports,
             5,
+            "MathML repair JSON",
+            self.mathml_repair_json_var,
+            "Open",
+        )
+        self._add_artifact_row(
+            reports,
+            6,
             "New Quiz asset repair JSON",
             self.new_quiz_asset_repair_json_var,
             "Open",
         )
         self._add_artifact_row(
             reports,
-            6,
+            7,
             "Link validator triage Markdown",
             self.link_validator_triage_md_var,
             "Open",
         )
         report_btns = ttk.Frame(reports)
-        report_btns.grid(row=7, column=0, columnspan=3, sticky="e", pady=(8, 0))
+        report_btns.grid(row=8, column=0, columnspan=3, sticky="e", pady=(8, 0))
         self.copy_post_import_paths_btn = ttk.Button(
             report_btns,
             text="Copy Post-Import Paths",
@@ -2446,6 +2455,56 @@ class LMSMigrationUI:
         )
         self.run_link_validator_triage_btn.grid(row=4, column=2, sticky="e", pady=(6, 0))
 
+        mathml = ttk.LabelFrame(parent, text="Canvas MathML Repair", padding=10)
+        mathml.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        mathml.columnconfigure(1, weight=1)
+        ttk.Label(
+            mathml,
+            text=(
+                "Scan a live Canvas course for orphaned WIRIS/MathML JSON payloads that "
+                "Canvas can treat as `Unexpected text node` errors. This tool can repair "
+                "pages, assignment descriptions, discussion messages, and direct New Quiz "
+                "item bodies. Bank-backed item-bank entries are reported but skipped because "
+                "the supported API does not expose them as editable items."
+            ),
+            wraplength=980,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        self._add_file_row(
+            mathml,
+            1,
+            "MathML repair JSON output",
+            self.mathml_repair_json_var,
+            "Save As",
+            [("JSON files", "*.json"), ("All files", "*.*")],
+            save_mode=True,
+        )
+        ttk.Label(
+            mathml,
+            text=(
+                "Recommended workflow: run `Scan MathML Issues` on a sandbox first, review the "
+                "report, then run `Apply MathML Repair` only if the changed counts and skipped "
+                "bank-entry counts look correct."
+            ),
+            wraplength=980,
+            justify="left",
+            foreground="#555555",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        mathml_btns = ttk.Frame(mathml)
+        mathml_btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(6, 0))
+        self.run_mathml_repair_scan_btn = ttk.Button(
+            mathml_btns,
+            text="Scan MathML Issues",
+            command=lambda: self._run_canvas_mathml_repair_clicked(apply_changes=False),
+        )
+        self.run_mathml_repair_scan_btn.grid(row=0, column=0, padx=(0, 8))
+        self.run_mathml_repair_apply_btn = ttk.Button(
+            mathml_btns,
+            text="Apply MathML Repair",
+            command=lambda: self._run_canvas_mathml_repair_clicked(apply_changes=True),
+        )
+        self.run_mathml_repair_apply_btn.grid(row=0, column=1)
+
     def _add_file_row(
         self,
         parent: ttk.LabelFrame,
@@ -2692,6 +2751,8 @@ class LMSMigrationUI:
         self.run_audit_btn.configure(state=state)
         self.run_reference_audit_btn.configure(state=state)
         self.run_link_validator_triage_btn.configure(state=state)
+        self.run_mathml_repair_scan_btn.configure(state=state)
+        self.run_mathml_repair_apply_btn.configure(state=state)
         self.run_visual_audit_btn.configure(state=state)
         self.run_math_audit_btn.configure(state=state)
         self.build_page_review_btn.configure(state=state)
@@ -4643,6 +4704,7 @@ class LMSMigrationUI:
                 self.import_artifact_cleanup_json_var.get().strip(),
             ),
             ("Checklist title sync JSON", self.checklist_sync_json_var.get().strip()),
+            ("MathML repair JSON", self.mathml_repair_json_var.get().strip()),
             (
                 "New Quiz asset repair JSON",
                 self.new_quiz_asset_repair_json_var.get().strip(),
@@ -4881,6 +4943,68 @@ class LMSMigrationUI:
         self._log(f"Link validator triage JSON: {output_json}")
         self._log(f"Link validator triage Markdown: {output_md}")
         self._task_succeeded("Build link validator triage")
+
+    def _run_canvas_mathml_repair_clicked(self, *, apply_changes: bool) -> None:
+        self._maybe_apply_course_folder_defaults()
+        creds = self._get_canvas_credentials()
+        if creds is None:
+            return
+        base_url, course_id, token = creds
+        output_json = self._resolve_mathml_repair_report_path()
+
+        if apply_changes:
+            proceed = messagebox.askyesno(
+                "Confirm Canvas MathML Repair",
+                "Apply MathML Repair will update live Canvas pages, assignment descriptions, "
+                "discussion messages, and direct New Quiz items when the orphaned WIRIS/MathML "
+                "payload pattern is found.\n\n"
+                "Bank-backed item-bank entries will be reported but skipped.\n\nContinue?",
+            )
+            if not proceed:
+                return
+
+        def task() -> None:
+            report_path = auto_fix_canvas_mathml(
+                base_url=base_url,
+                course_id=course_id,
+                token=token,
+                output_json_path=output_json,
+                dry_run=not apply_changes,
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.root.after(
+                0,
+                lambda: self._handle_canvas_mathml_repair_result(
+                    output_json=report_path,
+                    report=report,
+                    apply_changes=apply_changes,
+                ),
+            )
+
+        task_name = "Apply Canvas MathML repair" if apply_changes else "Scan Canvas MathML issues"
+        self._run_background(task_name, task)
+
+    def _handle_canvas_mathml_repair_result(
+        self,
+        *,
+        output_json: Path,
+        report: dict,
+        apply_changes: bool,
+    ) -> None:
+        summary = report.get("summary", {})
+        self.mathml_repair_json_var.set(str(output_json))
+        self._log(f"Canvas MathML repair JSON: {output_json}")
+        self._log(
+            "Canvas MathML repair summary: "
+            f"pages_updated={summary.get('pages_updated', 0)} | "
+            f"assignments_updated={summary.get('assignments_updated', 0)} | "
+            f"discussions_updated={summary.get('discussions_updated', 0)} | "
+            f"quiz_items_updated={summary.get('quiz_items_updated', 0)} | "
+            f"bank_entries_skipped={summary.get('bank_entries_skipped', 0)} | "
+            f"payloads_repaired={summary.get('total_payloads_repaired', 0)}"
+        )
+        task_name = "Apply Canvas MathML repair" if apply_changes else "Scan Canvas MathML issues"
+        self._task_succeeded(task_name)
 
     def _handle_canvas_operation_result(
         self,
@@ -6635,6 +6759,7 @@ class LMSMigrationUI:
             output_dir / "canvas-import-artifact-cleanup.json"
         )
         checklist_sync_json = output_dir / "canvas-checklist-title-sync.json"
+        mathml_repair_json = output_dir / "canvas-mathml-repair.json"
         new_quiz_asset_repair_json = (
             output_dir / "canvas-new-quiz-asset-repair.json"
         )
@@ -6664,6 +6789,12 @@ class LMSMigrationUI:
                 output_dir, "*canvas-checklist-title-sync*.json"
             ) or checklist_sync_json
 
+        mathml_repair_latest = mathml_repair_json
+        if not mathml_repair_latest.exists():
+            mathml_repair_latest = self._find_latest_matching_file(
+                output_dir, "*canvas-mathml-repair*.json"
+            ) or mathml_repair_json
+
         new_quiz_asset_latest = new_quiz_asset_repair_json
         if not new_quiz_asset_latest.exists():
             new_quiz_asset_latest = self._find_latest_matching_file(
@@ -6686,6 +6817,9 @@ class LMSMigrationUI:
         )
         self.checklist_sync_json_var.set(
             str(checklist_sync_latest) if checklist_sync_latest.exists() else ""
+        )
+        self.mathml_repair_json_var.set(
+            str(mathml_repair_latest) if mathml_repair_latest.exists() else ""
         )
         self.new_quiz_asset_repair_json_var.set(
             str(new_quiz_asset_latest) if new_quiz_asset_latest.exists() else ""
@@ -6719,6 +6853,17 @@ class LMSMigrationUI:
         if "/ab-test/" in str(output_dir).replace("\\", "/").lower():
             return output_dir / f"{artifact_prefix}.canvas-import-artifact-cleanup.json"
         return output_dir / "canvas-import-artifact-cleanup.json"
+
+    def _resolve_mathml_repair_report_path(self) -> Path:
+        output_text = self.mathml_repair_json_var.get().strip()
+        if output_text:
+            return Path(output_text)
+        output_dir = self._resolve_canvas_output_dir()
+        variant = self.ab_variant_var.get().strip().upper() or "A"
+        artifact_prefix = self._ab_artifact_prefix(variant)
+        if "/ab-test/" in str(output_dir).replace("\\", "/").lower():
+            return output_dir / f"{artifact_prefix}.canvas-mathml-repair.json"
+        return output_dir / "canvas-mathml-repair.json"
 
     def _default_approval_report_json_path(self, folder: Path) -> Path:
         report_path = self._find_latest_matching_file(folder, "*.migration-report.json")

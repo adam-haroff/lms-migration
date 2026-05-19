@@ -17,6 +17,7 @@ from .css_parser import (
 from .math_tools import (
     find_equation_image_tags,
     normalize_math_handling,
+    repair_orphaned_wiris_payloads,
     strip_empty_mathml_stubs,
 )
 from .rules import BannerRule, LinkRewrite, ManualTrigger, RegexReplacement
@@ -1849,6 +1850,16 @@ def apply_canvas_sanitizer(
 
     math_handling = normalize_math_handling(applied_policy.math_handling)
     if math_handling != "audit-only":
+        updated, repaired_orphaned_wiris = repair_orphaned_wiris_payloads(updated)
+        if repaired_orphaned_wiris:
+            applied.append(
+                AppliedChange(
+                    category="sanitizer",
+                    description="Repaired orphaned WIRIS MathML payloads that Canvas would treat as unexpected text nodes",
+                    count=repaired_orphaned_wiris,
+                )
+            )
+
         updated, removed_empty_mathml = strip_empty_mathml_stubs(updated)
         if removed_empty_mathml:
             applied.append(

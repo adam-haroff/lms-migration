@@ -64,6 +64,59 @@ def _changes(html: str, **policy_kwargs) -> list:
 
 
 # ===========================================================================
+# MathML — orphaned WIRIS JSON payload repair
+# ===========================================================================
+
+
+class TestOrphanedWirisPayloadRepair:
+    def test_repairs_standalone_math_block_containing_wiris_json(self):
+        broken = (
+            '<p><math xmlns="http://www.w3.org/1998/Math/MathML">'
+            '{"version":"1.1","math":"&lt;math xmlns=\\"http://www.w3.org/1998/Math/MathML\\"&gt;'
+            '&lt;mn&gt;14&lt;/mn&gt;&lt;mo&gt;+&lt;/mo&gt;&lt;mn&gt;2&lt;/mn&gt;&lt;/math&gt;"}'
+            "</math></p>"
+        )
+        out = _sanitize(broken)
+        assert 'Unexpected text node' not in out
+        assert '<math xmlns="http://www.w3.org/1998/Math/MathML"><mn>14</mn><mo>+</mo><mn>2</mn></math>' in out
+        assert '{"version":"1.1","math":' not in out
+
+    def test_wraps_orphaned_wiris_payload_inside_existing_math_semantics(self):
+        broken = (
+            '<math xmlns="http://www.w3.org/1998/Math/MathML"><semantics>'
+            '<mn>14</mn><mo>+</mo><mn>2</mn>'
+            '{"version":"1.1","math":"&lt;math xmlns=\\"http://www.w3.org/1998/Math/MathML\\"&gt;'
+            '&lt;mn&gt;14&lt;/mn&gt;&lt;mo&gt;+&lt;/mo&gt;&lt;mn&gt;2&lt;/mn&gt;&lt;/math&gt;"}'
+            "</semantics></math>"
+        )
+        out = _sanitize(broken)
+        assert "<annotation encoding=\"wiris\">" in out
+        assert '{"version":"1.1","math":' in out
+        assert "<mn>14</mn><mo>+</mo><mn>2</mn>" in out
+
+    def test_leaves_valid_wiris_annotation_intact(self):
+        valid = (
+            '<math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mn>14</mn>'
+            '<annotation encoding="wiris">'
+            '{"version":"1.1","math":"&lt;math xmlns=\\"http://www.w3.org/1998/Math/MathML\\"&gt;'
+            '&lt;mn&gt;14&lt;/mn&gt;&lt;/math&gt;"}'
+            "</annotation></semantics></math>"
+        )
+        out = _sanitize(valid)
+        assert out == valid
+
+    def test_records_applied_change_when_orphaned_payloads_are_repaired(self):
+        broken = (
+            '<math xmlns="http://www.w3.org/1998/Math/MathML">'
+            '{"version":"1.1","math":"&lt;math xmlns=\\"http://www.w3.org/1998/Math/MathML\\"&gt;'
+            '&lt;mn&gt;5&lt;/mn&gt;&lt;/math&gt;"}'
+            "</math>"
+        )
+        changes = _changes(broken)
+        assert any("unexpected text nodes" in change.description.lower() for change in changes)
+
+
+# ===========================================================================
 # Bug 1 — image align / hspace / vspace  →  inline CSS
 # ===========================================================================
 

@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canvas MathML Fixer</title>
+  <style>
+    :root {
+      --bg: #f6f4ef;
+      --panel: #ffffff;
+      --ink: #181818;
+      --muted: #5a5a5a;
+      --line: #d8d0c2;
+      --accent: #ac1a2f;
+      --accent-2: #efe2d2;
+      --success: #1f6b43;
+      --warn: #7a4a00;
+      --code: #f3efe6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.45 Georgia, "Times New Roman", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, #ece3d2 0, transparent 25rem),
+        linear-gradient(180deg, #fbfaf7 0, var(--bg) 100%);
+    }
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 10px 28px rgba(0,0,0,0.06);
+    }
+    .hero {
+      padding: 24px;
+      margin-bottom: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -80px;
+      top: -80px;
+      width: 240px;
+      height: 240px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, rgba(172,26,47,0.12), rgba(239,226,210,0.8));
+    }
+    h1, h2 {
+      margin: 0 0 12px;
+      font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
+    }
+    h1 {
+      font-size: clamp(1.8rem, 2vw + 1rem, 2.8rem);
+      line-height: 1.1;
+      max-width: 46rem;
+    }
+    h2 {
+      font-size: 1.15rem;
+      color: var(--accent);
+    }
+    p { margin: 0 0 12px; }
+    .muted { color: var(--muted); }
+    .warning {
+      margin-top: 14px;
+      padding: 12px 14px;
+      background: var(--accent-2);
+      border-left: 5px solid var(--accent);
+      border-radius: 10px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: 20px;
+    }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .panel { padding: 18px; }
+    label {
+      display: block;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    textarea, input[type="text"] {
+      width: 100%;
+      min-height: 220px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font: 14px/1.45 "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      color: var(--ink);
+      background: #fffdfa;
+      resize: vertical;
+    }
+    .output {
+      min-height: 180px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: var(--code);
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+      align-items: center;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 16px;
+      font: 600 14px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+    .primary {
+      background: var(--accent);
+      color: white;
+    }
+    .secondary {
+      background: #ece5d8;
+      color: var(--ink);
+    }
+    .status {
+      font: 600 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 10px 12px;
+      border-radius: 10px;
+      margin-top: 12px;
+    }
+    .status.ok {
+      background: #e7f4eb;
+      color: var(--success);
+    }
+    .status.warn {
+      background: #fff3df;
+      color: var(--warn);
+    }
+    .checklist {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .meta {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      color: var(--muted);
+      font: 600 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .badge {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #f2eee6;
+      border: 1px solid var(--line);
+    }
+    details {
+      margin-top: 14px;
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    summary {
+      cursor: pointer;
+      font-weight: 700;
+    }
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      background: #f2eee6;
+      padding: 2px 5px;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>Canvas MathML Fixer</h1>
+      <p class="muted">
+        Paste the code that triggers Canvas’s <code>Unexpected text node</code> math error.
+        This tool extracts the real equation from the broken WIRIS payload and returns:
+      </p>
+      <ul class="checklist">
+        <li>corrected MathML for Canvas</li>
+        <li>a best-effort LaTeX version for the Equation Editor</li>
+      </ul>
+      <div class="warning">
+        <strong>Warning:</strong> the LaTeX output is a best-effort conversion. Faculty should still test the result in Canvas before using it in a live assessment.
+      </div>
+      <div class="meta">
+        <span class="badge">Static client-side page</span>
+        <span class="badge">No backend required</span>
+        <span class="badge">Can be uploaded to ordinary web hosting</span>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="panel">
+        <h2>Input</h2>
+        <label for="source">Broken Canvas/WIRIS code</label>
+        <textarea id="source" placeholder='Paste the full code or just the JSON payload here. Example: {"version":"1.1","math":"&lt;math ... &gt;...&lt;/math&gt;"}'></textarea>
+        <div class="controls">
+          <button class="primary" id="repairBtn">Repair</button>
+          <button class="secondary" id="clearBtn" type="button">Clear</button>
+          <button class="secondary" id="sampleBtn" type="button">Load Sample</button>
+        </div>
+        <div id="status" class="status warn">Paste a broken payload, then click Repair.</div>
+        <details>
+          <summary>What this tool is looking for</summary>
+          <p>
+            It looks for WIRIS JSON payloads where the real equation is stored in a
+            <code>"math"</code> field as HTML-escaped MathML. It then decodes that field and
+            returns the inner <code>&lt;math&gt;...&lt;/math&gt;</code>.
+          </p>
+        </details>
+      </section>
+
+      <section class="panel">
+        <h2>Output</h2>
+        <label for="mathmlOut">Corrected MathML</label>
+        <textarea id="mathmlOut" class="output" readonly></textarea>
+        <div class="controls">
+          <button class="secondary" id="copyMathmlBtn" type="button">Copy MathML</button>
+        </div>
+
+        <label for="latexOut" style="margin-top: 16px;">Best-effort LaTeX</label>
+        <textarea id="latexOut" class="output" readonly></textarea>
+        <div class="controls">
+          <button class="secondary" id="copyLatexBtn" type="button">Copy LaTeX</button>
+        </div>
+
+        <details>
+          <summary>LaTeX caveat</summary>
+          <p>
+            This LaTeX is generated from the decoded MathML. Most arithmetic and algebraic expressions
+            should convert well, but complex layout, tables, some operator semantics, and some
+            WIRIS-specific structures may need manual review in the Canvas Equation Editor.
+          </p>
+        </details>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const sourceEl = document.getElementById('source');
+    const mathmlOutEl = document.getElementById('mathmlOut');
+    const latexOutEl = document.getElementById('latexOut');
+    const statusEl = document.getElementById('status');
+
+    const SAMPLE = `Unexpected text node: '{"version":"1.1","math":"&lt;math xmlns=&quot;http://www.w3.org/1998/Math/MathML&quot;&gt;&lt;mn&gt;14&lt;/mn&gt;&lt;mo&gt;+&lt;/mo&gt;&lt;mfenced&gt;&lt;mrow&gt;&lt;mn&gt;42&lt;/mn&gt;&lt;mo&gt;÷&lt;/mo&gt;&lt;mn&gt;6&lt;/mn&gt;&lt;mo&gt;-&lt;/mo&gt;&lt;mn&gt;2&lt;/mn&gt;&lt;/mrow&gt;&lt;/mfenced&gt;&lt;mo&gt;×&lt;/mo&gt;&lt;mn&gt;3&lt;/mn&gt;&lt;mo&gt;=&lt;/mo&gt;&lt;/math&gt;"}'`;
+
+    function decodeHtmlEntities(value) {
+      const textarea = document.createElement('textarea');
+      textarea.innerHTML = value;
+      return textarea.value;
+    }
+
+    function extractWirisPayload(text) {
+      const re = /\{\s*"version"\s*:\s*"[^"]+"\s*,\s*"math"\s*:\s*"([\s\S]*?&lt;\/math&gt;)"\s*\}/i;
+      const match = text.match(re);
+      if (!match) return null;
+      return match[1];
+    }
+
+    function normalizeOperatorText(value) {
+      const map = {
+        '÷': '\\div',
+        '×': '\\times',
+        '−': '-',
+        '±': '\\pm',
+        '≤': '\\le',
+        '≥': '\\ge',
+        '≠': '\\ne',
+        '∞': '\\infty',
+        'π': '\\pi',
+        '∑': '\\sum',
+        '∫': '\\int'
+      };
+      return map[value] || value;
+    }
+
+    function wrapIfNeeded(text) {
+      if (!text) return '';
+      if (/^[a-zA-Z0-9]+$/.test(text)) return text;
+      if (/^\\[a-zA-Z]+$/.test(text)) return text;
+      return `{${text}}`;
+    }
+
+    function toLatexFromNode(node) {
+      if (!node) return '';
+      if (node.nodeType === Node.TEXT_NODE) {
+        return node.nodeValue.trim();
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+      const tag = node.localName.toLowerCase();
+      const children = Array.from(node.childNodes);
+      const childLatex = () => children.map(toLatexFromNode).join('');
+
+      switch (tag) {
+        case 'math':
+        case 'semantics':
+        case 'mstyle':
+        case 'mrow':
+          return childLatex();
+        case 'annotation':
+        case 'annotation-xml':
+          return '';
+        case 'mn':
+        case 'mi':
+          return node.textContent.trim();
+        case 'mtext':
+          return `\\text{${node.textContent.trim()}}`;
+        case 'mo':
+          return normalizeOperatorText(node.textContent.trim());
+        case 'mfenced': {
+          const open = node.getAttribute('open') || '(';
+          const close = node.getAttribute('close') || ')';
+          const inner = childLatex();
+          return `\\left${open}${inner}\\right${close}`;
+        }
+        case 'mfrac': {
+          const [num, den] = children.filter(n => n.nodeType === Node.ELEMENT_NODE);
+          return `\\frac{${toLatexFromNode(num)}}{${toLatexFromNode(den)}}`;
+        }
+        case 'msup': {
+          const [base, sup] = children.filter(n => n.nodeType === Node.ELEMENT_NODE);
+          return `${wrapIfNeeded(toLatexFromNode(base))}^{${toLatexFromNode(sup)}}`;
+        }
+        case 'msub': {
+          const [base, sub] = children.filter(n => n.nodeType === Node.ELEMENT_NODE);
+          return `${wrapIfNeeded(toLatexFromNode(base))}_{${toLatexFromNode(sub)}}`;
+        }
+        case 'msubsup': {
+          const [base, sub, sup] = children.filter(n => n.nodeType === Node.ELEMENT_NODE);
+          return `${wrapIfNeeded(toLatexFromNode(base))}_{${toLatexFromNode(sub)}}^{${toLatexFromNode(sup)}}`;
+        }
+        case 'msqrt': {
+          const inner = childLatex();
+          return `\\sqrt{${inner}}`;
+        }
+        case 'mroot': {
+          const [radicand, index] = children.filter(n => n.nodeType === Node.ELEMENT_NODE);
+          return `\\sqrt[${toLatexFromNode(index)}]{${toLatexFromNode(radicand)}}`;
+        }
+        case 'mover':
+        case 'munder':
+        case 'munderover':
+          return childLatex();
+        default:
+          return childLatex();
+      }
+    }
+
+    function mathmlToLatex(mathml) {
+      const parser = new DOMParser();
+      const xml = parser.parseFromString(mathml, 'application/xml');
+      const parserError = xml.querySelector('parsererror');
+      if (parserError) {
+        return { latex: '', warning: 'Could not parse MathML cleanly. Review the corrected MathML manually.' };
+      }
+      const mathNode = xml.documentElement;
+      const latex = toLatexFromNode(mathNode).replace(/\s+/g, ' ').trim();
+      return { latex, warning: '' };
+    }
+
+    function setStatus(message, kind) {
+      statusEl.textContent = message;
+      statusEl.className = `status ${kind}`;
+    }
+
+    function copyText(value) {
+      navigator.clipboard.writeText(value).catch(() => {});
+    }
+
+    function repair() {
+      const input = sourceEl.value.trim();
+      if (!input) {
+        setStatus('Paste a broken Canvas/WIRIS payload first.', 'warn');
+        mathmlOutEl.value = '';
+        latexOutEl.value = '';
+        return;
+      }
+
+      const encodedMath = extractWirisPayload(input);
+      if (!encodedMath) {
+        setStatus('No WIRIS JSON payload was detected in the pasted text.', 'warn');
+        mathmlOutEl.value = '';
+        latexOutEl.value = '';
+        return;
+      }
+
+      const correctedMathml = decodeHtmlEntities(encodedMath).replace(/\\"/g, '"').trim();
+      mathmlOutEl.value = correctedMathml;
+
+      const { latex, warning } = mathmlToLatex(correctedMathml);
+      latexOutEl.value = latex;
+
+      if (warning) {
+        setStatus(`MathML recovered. ${warning}`, 'warn');
+      } else {
+        setStatus('MathML recovered and best-effort LaTeX generated. Test both in Canvas.', 'ok');
+      }
+    }
+
+    document.getElementById('repairBtn').addEventListener('click', repair);
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      sourceEl.value = '';
+      mathmlOutEl.value = '';
+      latexOutEl.value = '';
+      setStatus('Paste a broken payload, then click Repair.', 'warn');
+    });
+    document.getElementById('sampleBtn').addEventListener('click', () => {
+      sourceEl.value = SAMPLE;
+      repair();
+    });
+    document.getElementById('copyMathmlBtn').addEventListener('click', () => copyText(mathmlOutEl.value));
+    document.getElementById('copyLatexBtn').addEventListener('click', () => copyText(latexOutEl.value));
+  </script>
+</body>
+</html>
